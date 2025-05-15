@@ -1,49 +1,26 @@
+# Directory: hardware
+# Filename: basic_tutorial_1.py
+
 #!/usr/bin/env python3
 
 import time
-import logging
-from phidget_io_controller import PhidgetController, enable_phidget_library_logging
+import logging # Keep for PhidgetException, NameError etc. if they use logging indirectly, or for type hints.
+from phidget_io_controller import PhidgetController
 from Phidget22.PhidgetException import PhidgetException
 import traceback
 
-phidget_device_configs = {
-    "main_phidget": {
-        "serial_number": -1,
-        "open_timeout_ms": 5000
-    }
-}
+# setup_logger function has been removed from here.
+# It's now handled internally by PhidgetController.
 
-def setup_logger():
-    logger = logging.getLogger("PhidgetApp")
-    logger.setLevel(logging.DEBUG) 
-    ch = logging.StreamHandler()
-    ch.setLevel(logging.DEBUG)
-    formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
-    ch.setFormatter(formatter)
-    if not logger.handlers:
-        logger.addHandler(ch)
-    return logger
-
-def main():
-    app_logger = setup_logger()
-    
-    # enable_phidget_library_logging(level="INFO") 
-
-    if phidget_device_configs.get("main_phidget", {}).get("serial_number", 0) == -1: # Make check safer
-        app_logger.warning("="*50)
-        app_logger.warning("!!! 'main_phidget' serial number is -1 in `phidget_device_configs`. !!!")
-        app_logger.warning("!!! The script will try to open the first available Phidget matching criteria. !!!")
-        app_logger.warning("!!! Please update `phidget_device_configs` with your specific details for reliability. !!!")
-        app_logger.warning("="*50)
+def main(): 
+    pc = None # Define pc outside try so it's available in finally
 
     try:
-        # Create PhidgetController. It will use DEFAULT_SCRIPT_CHANNEL_MAP_CONFIG
-        # from phidget_manager.py because we are not passing a script_map_config argument.
-        with PhidgetController(device_configs=phidget_device_configs, logger=app_logger) as pc:
-            app_logger.info("\n--- Starting Phidget Interaction Test ---")
+        with PhidgetController() as pc:
+            pc.logger.info("\n--- Starting Phidget Interaction Test ---")
 
             # Example: Test outputs
-            app_logger.info("\nTesting outputs...")
+            pc.logger.info("\nTesting outputs...")
 
             pc.on("usb3")
             pc.on("connect")
@@ -55,22 +32,78 @@ def main():
             pc.off("connect")
             pc.off("usb3")
 
-            app_logger.info("\n--- Phidget Interaction Test Complete ---")
+            pc.logger.info("\n--- Phidget Interaction Test Complete ---")
 
     except PhidgetException as e:
-        app_logger.error(f"A PhidgetException occurred: {e.description} (Code: {e.code})")
-        app_logger.error(traceback.format_exc())
+        # If pc was initialized, use its logger. Otherwise, fallback to a temporary basic logger.
+        # If __init__ fails, pc will be None (or its previous value).
+        logger_to_use = None
+        if pc and hasattr(pc, 'logger') and pc.logger:
+            logger_to_use = pc.logger
+        else:
+            logger_to_use = logging.getLogger("PhidgetAppFallback")
+            if not logger_to_use.hasHandlers(): # Configure fallback logger if needed
+                logging.basicConfig(level=logging.ERROR, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+        
+        logger_to_use.error(f"A PhidgetException occurred: {e.description} (Code: {e.code})")
+        logger_to_use.error(traceback.format_exc())
     except NameError as e:
-        app_logger.error(f"A NameError occurred (likely an undefined channel name used): {e}")
-        app_logger.error(traceback.format_exc())
+        logger_to_use = None
+        if pc and hasattr(pc, 'logger') and pc.logger:
+            logger_to_use = pc.logger
+        else:
+            logger_to_use = logging.getLogger("PhidgetAppFallback")
+            if not logger_to_use.hasHandlers():
+                logging.basicConfig(level=logging.ERROR, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+
+        logger_to_use.error(f"A NameError occurred (likely an undefined channel name used): {e}")
+        logger_to_use.error(traceback.format_exc())
     except RuntimeError as e:
-        app_logger.error(f"A RuntimeError occurred (likely an uninitialized/failed channel): {e}")
-        app_logger.error(traceback.format_exc())
+        logger_to_use = None
+        if pc and hasattr(pc, 'logger') and pc.logger:
+            logger_to_use = pc.logger
+        else:
+            logger_to_use = logging.getLogger("PhidgetAppFallback")
+            if not logger_to_use.hasHandlers():
+                logging.basicConfig(level=logging.ERROR, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+        
+        logger_to_use.error(f"A RuntimeError occurred (likely an uninitialized/failed channel): {e}")
+        logger_to_use.error(traceback.format_exc())
     except Exception as e:
-        app_logger.error(f"An unexpected error occurred: {e}")
-        app_logger.error(traceback.format_exc())
+        logger_to_use = None
+        if pc and hasattr(pc, 'logger') and pc.logger:
+            logger_to_use = pc.logger
+        else:
+            logger_to_use = logging.getLogger("PhidgetAppFallback")
+            if not logger_to_use.hasHandlers(): # Check and configure if no handlers
+                # For general exceptions, set up a basic config if no handlers exist for the fallback.
+                # This ensures the message is seen.
+                _handler = logging.StreamHandler()
+                _formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+                _handler.setFormatter(_formatter)
+                logger_to_use.addHandler(_handler)
+                logger_to_use.setLevel(logging.ERROR) # Ensure level is appropriate for errors
+                logger_to_use.propagate = False # Avoid duplicate messages if root logger is also configured
+
+        logger_to_use.error(f"An unexpected error occurred: {e}") # This will use PhidgetAppFallback if pc.logger not set
+        logger_to_use.error(traceback.format_exc())
     finally:
-        app_logger.info("\nApplication finished.")
+        logger_to_use = None
+        if pc and hasattr(pc, 'logger') and pc.logger:
+            logger_to_use = pc.logger
+        else:
+            logger_to_use = logging.getLogger("PhidgetAppFallback")
+            # Ensure the fallback logger for 'finally' is configured to show INFO
+            if not logger_to_use.hasHandlers():
+                _handler = logging.StreamHandler()
+                _formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+                _handler.setFormatter(_formatter)
+                logger_to_use.addHandler(_handler)
+                logger_to_use.setLevel(logging.INFO) # Set level for the logger
+                _handler.setLevel(logging.INFO)      # Set level for the handler
+                logger_to_use.propagate = False
+
+        logger_to_use.info("\nApplication finished.") # This will use PhidgetAppFallback if pc.logger not set
 
 if __name__ == "__main__":
     main()
