@@ -21,17 +21,19 @@ DEFAULT_SCRIPT_CHANNEL_MAP_CONFIG = {
         "key3":    {"phidget_id": "main_phidget", "physical_channel": 3},
         "key4":    {"phidget_id": "main_phidget", "physical_channel": 4},
         "key5":    {"phidget_id": "main_phidget", "physical_channel": 5},
-        "lock":    {"phidget_id": "main_phidget", "physical_channel": 6},
-        "hold":    {"phidget_id": "main_phidget", "physical_channel": 7},
+        "key6":    {"phidget_id": "main_phidget", "physical_channel": 6},
+        "key7":    {"phidget_id": "main_phidget", "physical_channel": 7},
+        "key8":    {"phidget_id": "main_phidget", "physical_channel": 8},
+        "key9":    {"phidget_id": "main_phidget", "physical_channel": 9},
 
-        # Aliases
-        12:        {"phidget_id": "main_phidget", "physical_channel": 7}, # Alias for 'hold'
-        1 :        {"phidget_id": "main_phidget", "physical_channel": 1}, # Alias for 'key1'
-        3 :        {"phidget_id": "main_phidget", "physical_channel": 3}, # Alias for 'key3'
+        "lock":    {"phidget_id": "main_phidget", "physical_channel": 10},
+        "unlock":  {"phidget_id": "main_phidget", "physical_channel": 11},
 
-        "unlock":  {"phidget_id": "main_phidget", "physical_channel": 0}, # Alias for 'key0'
-        "connect": {"phidget_id": "main_phidget", "physical_channel": 5}, # Alias for 'key5'
-        "usb3":    {"phidget_id": "main_phidget", "physical_channel": 4}, # Alias for 'key4'
+        "connect": {"phidget_id": "main_phidget", "physical_channel": 13},
+        "usb3":    {"phidget_id": "main_phidget", "physical_channel": 14},
+
+        "hold":    {"phidget_id": "main_phidget", "physical_channel": 12},
+
     },
     "inputs": {
         "prod_inserted": {"phidget_id": "main_phidget", "physical_channel": 0},
@@ -232,7 +234,6 @@ class PhidgetController:
         :param channel_name: The script name or alias of the output channel.
         :param duration_ms: Duration of the hold in milliseconds.
         """
-        self.logger.debug(f"Pressing '{channel_name}'")
         try:
             self.on(channel_name)
             time.sleep(200 / 1000.0)
@@ -242,6 +243,57 @@ class PhidgetController:
             except Exception as e_off: # Catch errors during off()
                  self.logger.error(f"Error turning off '{channel_name}' during press: {e_off}")
                  # Decide if you want to re-raise e_off or the original error if one occurred in 'on'
+
+    def sequence(self, pin_sequence: list, press_duration_ms: float = 100, pause_duration_ms: float = 100):
+        """
+        Presses a sequence of digital output 'pins' (script names or aliases).
+
+        Each pin in the sequence is turned ON for 'press_duration_ms', then OFF.
+        A 'pause_duration_ms' occurs after each pin is turned OFF (before the next pin is pressed),
+        except after the last pin in the sequence.
+
+        :param pin_sequence: A list of script names or aliases for the digital output channels
+                             to be pressed in order. Must not be empty.
+        :param press_duration_ms: The duration (in milliseconds) each pin should be held ON.
+                                  Defaults to 100ms.
+        :param pause_duration_ms: The duration (in milliseconds) to pause after a pin is released
+                                  and before the next pin in the sequence is pressed.
+                                  Defaults to 100ms.
+        :raises ValueError: If pin_sequence is empty or contains invalid types.
+        :raises NameError: If a pin name/alias in the sequence is not defined.
+        :raises RuntimeError: If a pin in the sequence was defined but not initialized.
+        :raises TypeError: If a pin in the sequence is not a DigitalOutput.
+        """
+        if not pin_sequence:
+            raise ValueError("pin_sequence cannot be empty.")
+        if not isinstance(pin_sequence, list):
+            raise ValueError("pin_sequence must be a list.")
+        if not all(isinstance(pin, (str, int)) for pin in pin_sequence): # Assuming pins are identified by str or int
+            raise ValueError("All items in pin_sequence must be strings or integers (script names or aliases).")
+
+        if not (isinstance(press_duration_ms, (int, float)) and press_duration_ms >= 0):
+            raise ValueError("press_duration_ms must be a non-negative number.")
+        if not (isinstance(pause_duration_ms, (int, float)) and pause_duration_ms >= 0):
+            raise ValueError("pause_duration_ms must be a non-negative number.")
+
+        self.logger.info(f"Executing sequence: {pin_sequence} (Press: {press_duration_ms}ms, Pause: {pause_duration_ms}ms)")
+
+        for i, pin_name in enumerate(pin_sequence):
+            self.logger.debug(f"  Pulsing pin: '{pin_name}'")
+            try:
+                # The pulse method already handles on, sleep, off
+                self.hold(pin_name, duration_ms=press_duration_ms)
+            except Exception as e:
+                self.logger.error(f"Error pulsing pin '{pin_name}' in sequence: {e}")
+                raise # Re-raise the exception to halt the sequence or allow higher-level handling
+
+            # Pause after the pulse, unless it's the last pin in the sequence
+            if i < len(pin_sequence) - 1:
+                if pause_duration_ms > 0:
+                    self.logger.debug(f"  Pausing for {pause_duration_ms}ms")
+                    time.sleep(pause_duration_ms / 1000.0)
+        
+        self.logger.info("Sequence execution complete.")
 
     def read_input(self, channel_name):
         """
