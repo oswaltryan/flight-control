@@ -6,7 +6,9 @@ import time
 import logging
 import sys
 import os
+from pprint import pprint
 import traceback
+from usb_tool import find_apricorn_device
 
 # --- Path Setup ---
 # This script (basic_tutorial_5.py) is in project_root/scripts/
@@ -76,10 +78,10 @@ def main():
 
             if not at.is_camera_ready:
                 script_logger.error("Camera component of UnifiedController is not ready. Aborting pattern test.")
-                at.on("usb3") 
                 return
 
             script_logger.info("Turning Phidget 'connect' output ON.")
+            at.on("usb3")
             at.on("connect") 
 
             script_logger.info(
@@ -87,7 +89,16 @@ def main():
             )
             
             if at.await_and_confirm_led_pattern(pattern=STARTUP_PATTERN, timeout=AWAIT_FIRST_PATTERN_STATE_TIMEOUT, clear_buffer=True):
-                at.confirm_led_solid({'red':1, 'green':0, 'blue':0}, minimum=3, timeout=5)
+                if at.confirm_led_solid({'red':1, 'green':0, 'blue':0}, minimum=3, timeout=5):
+                    at.sequence(["key1", "key1", "key2", "key2", "key3", "key3", "key4", "key4", "unlock"])
+                    time.sleep(3)
+                    if at.confirm_led_solid({'green':1}, minimum=5, timeout=15):
+                        device = find_apricorn_device()
+                        pprint(device[1])
+                        at.press("lock")
+                        if at.confirm_led_solid({'red':1}, minimum=3, timeout=10):
+                            at.off("connect")
+                            at.confirm_led_solid({'red':0, 'green':0, 'blue':0}, minimum=3, timeout=5)
             
         script_logger.info("UnifiedController resources released.")
 
