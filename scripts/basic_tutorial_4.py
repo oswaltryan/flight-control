@@ -1,4 +1,4 @@
-# Directory: flight-control
+# Directory: scripts
 # Filename: basic_tutorial_4.py
 #!/usr/bin/env python3
 
@@ -45,7 +45,7 @@ LOG_LEVEL = logging.INFO  # Use logging.DEBUG for more verbose camera/phidget ou
 # in camera/camera_controller.py.
 # Durations are (min_duration_seconds, max_duration_seconds).
 STARTUP_PATTERN_CONFIG = [
-    # {'red':0, 'green':0, 'blue':0, 'duration': (0.00,  4.0)}, # All OFF
+    {'red':0, 'green':0, 'blue':0, 'duration': (0.00,  4.0)}, # All OFF
     {'red':1, 'green':0, 'blue':0, 'duration': (0.50,  5.0)}, # Red ON
     {'red':0, 'green':1, 'blue':0, 'duration': (0.50,  3.0)}, # Green ON
     {'red':0, 'green':0, 'blue':1, 'duration': (0.50,  4.0)}, # Blue ON
