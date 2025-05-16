@@ -1,16 +1,13 @@
-# Directory: hardware
+# Directory: flight-control
 # Filename: basic_tutorial_1.py
-
 #!/usr/bin/env python3
 
 import time
-import logging # Keep for PhidgetException, NameError etc. if they use logging indirectly, or for type hints.
-from phidget_io_controller import PhidgetController
+import logging
+from hardware.phidget_io_controller import PhidgetController
 from Phidget22.PhidgetException import PhidgetException
 import traceback
 
-# setup_logger function has been removed from here.
-# It's now handled internally by PhidgetController.
 
 def main(): 
     pc = None # Define pc outside try so it's available in finally

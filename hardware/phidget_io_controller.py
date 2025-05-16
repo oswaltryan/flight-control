@@ -35,23 +35,13 @@ DEFAULT_SCRIPT_CHANNEL_MAP_CONFIG = {
     }
 }
 
-def _create_controller_logger(logger_name="PhidgetApp", level=logging.DEBUG):
-    """
-    Creates and configures the main logger for the PhidgetController and application.
-    This logger will be used by PhidgetController and can be accessed by the application
-    via the PhidgetController instance (e.g., pc.logger).
-    """
-    logger = logging.getLogger(logger_name)
-    logger.setLevel(level)
-    # Use StreamHandler() which defaults to sys.stderr.
-    # This is consistent with where the original app_logger was sending messages.
-    ch = logging.StreamHandler() 
-    ch.setLevel(level)
-    formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
-    ch.setFormatter(formatter)
-    if not logger.handlers: # Avoid adding multiple handlers if this function is called again
-        logger.addHandler(ch)
-    return logger
+# Module-level logger, following the camera_controller.py pattern
+# This logger will be used by default if no logger_instance is passed to PhidgetController
+# Using __name__ (which will be 'hardware.phidget_io_controller') is a common practice.
+module_logger = logging.getLogger(__name__)
+module_logger.addHandler(logging.NullHandler()) # Add NullHandler to prevent "No handler found" warnings
+
+# The _create_controller_logger function has been removed.
 
 def enable_phidget_library_logging(level="DEBUG", app_logger=None):
     """
@@ -59,71 +49,69 @@ def enable_phidget_library_logging(level="DEBUG", app_logger=None):
     by configuring Python's standard `logging` module for the 'Phidget22' logger.
 
     :param level: Logging level string (e.g., "DEBUG", "INFO", "WARNING").
-    :param app_logger: The main application logger, used for reporting issues with this function.
+    :param app_logger: The logger instance to use for messages from this function itself.
                        If None, prints directly to stderr.
     """
+    # If app_logger is None, use a temporary basic logger for messages from this function.
+    # This is to ensure messages from this utility are seen even if no app_logger is passed.
+    # However, in practice, PhidgetController will always pass its self.logger.
+    effective_logger = app_logger if app_logger else logging.getLogger("PhidgetLibConfig")
+    if app_logger is None and not effective_logger.hasHandlers():
+        # Basic config for the temporary logger if no app_logger and it's not configured
+        _handler = logging.StreamHandler(sys.stderr)
+        _formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+        _handler.setFormatter(_formatter)
+        effective_logger.addHandler(_handler)
+        effective_logger.setLevel(logging.INFO) # Default to INFO for this utility's messages
+
     try:
         phidget_lib_logger = logging.getLogger("Phidget22") # Logger used by the Phidget22 library
         
-        # Ensure there's a handler for this logger if not already configured globally
-        # This avoids duplicate messages if called multiple times or if root logger is already configured
         has_stderr_handler = any(
-            isinstance(h, logging.StreamHandler) and h.stream == sys.stderr 
+            isinstance(h, logging.StreamHandler) and getattr(h, 'stream', None) == sys.stderr
             for h in phidget_lib_logger.handlers
         )
-        if not has_stderr_handler:
-            # Check if root logger has a handler, if so, Phidget22 logs might already be propagated
-            root_has_handlers = logging.getLogger().hasHandlers()
-            if not root_has_handlers: # Only add handler if neither Phidget22 nor root has one for stderr
-                handler = logging.StreamHandler(sys.stderr) # Log to stderr
-                formatter = logging.Formatter('%(asctime)s - Phidget22 - %(levelname)s - %(message)s')
-                handler.setFormatter(formatter)
-                phidget_lib_logger.addHandler(handler)
+        
+        # Configure handler only if no stderr handler exists OR if the root logger also has no handlers
+        # This avoids duplicate logs if root is already configured to output to stderr.
+        if not has_stderr_handler and not logging.getLogger().hasHandlers():
+            handler = logging.StreamHandler(sys.stderr)
+            formatter = logging.Formatter('%(asctime)s - Phidget22 - %(levelname)s - %(message)s')
+            handler.setFormatter(formatter)
+            phidget_lib_logger.addHandler(handler)
 
         log_level_val = getattr(logging, level.upper(), None)
         if not isinstance(log_level_val, int):
             msg = f"Warning: Invalid Phidget library log level '{level}'. Defaulting to DEBUG."
-            if app_logger and app_logger.hasHandlers():
-                app_logger.warning(msg)
-            else:
-                print(msg, file=sys.stderr)
+            effective_logger.warning(msg)
             log_level_val = logging.DEBUG
         
         phidget_lib_logger.setLevel(log_level_val)
-        # Also ensure any handlers we might have added, or existing ones, are not more restrictive
-        for h in phidget_lib_logger.handlers:
-            if h.level > log_level_val or h.level == 0: # if handler level is 0 (NOTSET) or higher than desired
-                h.setLevel(log_level_val)
+        for h in phidget_lib_logger.handlers: # Ensure handlers respect the new level
+            if h.level == 0 or h.level > log_level_val: # 0 is NOTSET
+                 h.setLevel(log_level_val)
         
-        # Ensure propagation is enabled so root logger (if configured) can also see these
-        phidget_lib_logger.propagate = True
+        phidget_lib_logger.propagate = True # Allow propagation to root logger
         
-        # Use print for this initial setup message as logger might not be fully ready for this specific message
-        print(f"Attempted to set Phidget22 Python library logging to: {level.upper()}", file=sys.stderr)
-        print("Note: For deep C-library/USB logs, set PHIDGET22_LOG environment variable (e.g., to 5 for VERBOSE).", file=sys.stderr)
+        # effective_logger.debug(f"Attempted to set Phidget22 Python library logging to: {level.upper()}")
 
     except Exception as e:
         err_msg = f"Error attempting to enable Phidget22 Python library logging: {e}"
-        if app_logger and app_logger.hasHandlers():
-            app_logger.error(err_msg)
-        else:
-            print(err_msg, file=sys.stderr)
+        effective_logger.error(err_msg)
 
 
 class PhidgetController:
-    def __init__(self, script_map_config=DEFAULT_SCRIPT_CHANNEL_MAP_CONFIG):
+    def __init__(self, script_map_config=DEFAULT_SCRIPT_CHANNEL_MAP_CONFIG, logger_instance=None):
         """
         Initializes the PhidgetController for LOCAL Phidgets only.
-        Logging is now handled internally. The controller creates its own logger
-        instance (`self.logger`) which can be used by the application.
+        Uses a provided logger_instance or defaults to the module-level logger.
         It also configures logging for the underlying Phidget22 library.
 
         :param script_map_config: (Optional) Dictionary defining script names to physical channel mappings.
-                                  If None, uses DEFAULT_SCRIPT_CHANNEL_MAP_CONFIG from this module.
+                                  If None, uses DEFAULT_SCRIPT_CHANNEL_MAP_CONFIG.
+        :param logger_instance: (Optional) An external logging.Logger instance.
         """
-        # Create the main logger for this controller and the application.
-        # This logger instance is made available as self.logger.
-        self.logger = _create_controller_logger(logger_name="PhidgetApp", level=logging.DEBUG)
+        self.logger = logger_instance if logger_instance else module_logger
         
         # Enable Phidget22 library specific logging, using self.logger for its own status messages.
         enable_phidget_library_logging(level="DEBUG", app_logger=self.logger)
@@ -148,8 +136,6 @@ class PhidgetController:
                                 "'is_remote' configurations will be ignored.")
             
         self._initialize_channels()
-
-    # _default_logger method has been removed as logger is now created in __init__
 
     def _configure_phidget_connection(self, ph, device_key):
         """Configures Phidget object with connection details for LOCAL Phidgets."""
@@ -182,13 +168,14 @@ class PhidgetController:
             # If it's a hub port device and no specific serial is given, it will try to open
             # any device of the correct type on the specified (or any) hub port.
             if not config.get("is_hub_port_device", False):
-                 self.logger.info(f"No serial number specified for '{device_key}'. Will attempt to open any matching local device.")
+                #  self.logger.info(f"No serial number specified for '{device_key}'. Will attempt to open any matching local device.")
+                pass
 
         return config.get("open_timeout_ms", 5000)
 
 
     def _initialize_channels(self):
-        self.logger.info("Initializing Phidget channels (Local Only)...")
+        # self.logger.info("Initializing Phidget channels (Local Only)...")
         channel_types_map = {
             "outputs": DigitalOutput,
             "inputs": DigitalInput
@@ -211,14 +198,14 @@ class PhidgetController:
 
                 if unique_ph_key not in self._opened_physical_channels:
                     try:
-                        self.logger.info(f"  Opening {channel_type_name[:-1]} '{script_name}' (Device ID: {phidget_id_key}, PhysChan: {physical_channel_index})...")
+                        # self.logger.info(f"  Opening {channel_type_name[:-1]} '{script_name}' (Device ID: {phidget_id_key}, PhysChan: {physical_channel_index})...")
                         ch = phidget_class()
                         timeout_ms = self._configure_phidget_connection(ch, phidget_id_key)
                         ch.setChannel(physical_channel_index)
                         
                         ch.openWaitForAttachment(timeout_ms)
                         self._opened_physical_channels[unique_ph_key] = ch
-                        self.logger.info(f"    '{script_name}' (Device: {ch.getDeviceName()} S/N {ch.getDeviceSerialNumber()} Ch {ch.getChannel()}) opened.")
+                        # self.logger.info(f"    '{script_name}' (Device: {ch.getDeviceName()} S/N {ch.getDeviceSerialNumber()} Ch {ch.getChannel()}) opened.")
                     except PhidgetException as e:
                         self.logger.error(f"Error opening {channel_type_name[:-1]} '{script_name}' (Device ID: {phidget_id_key}, PhysChan: {physical_channel_index}): PhidgetException: {e.description} (Code: {e.code})")
                         self._opened_physical_channels[unique_ph_key] = None # Mark as failed
@@ -288,7 +275,7 @@ class PhidgetController:
         :param channel_name: The script name or alias of the output channel.
         :param duration_ms: Duration of the hold in milliseconds.
         """
-        self.logger.debug(f"Holding '{channel_name}' for {duration_ms}ms.")
+        # self.logger.debug(f"Holding '{channel_name}' for {duration_ms}ms.")
         try:
             self.on(channel_name)
             time.sleep(duration_ms / 1000.0)
@@ -424,7 +411,7 @@ class PhidgetController:
                     if isinstance(ch_obj, DigitalOutput):
                          ch_obj.setState(False) # Ensure outputs are off
                     ch_obj.close()
-                    self.logger.info(f"  Closed Device ID: {ph_id_key}, Type: {ch_type}, PhysChan: {phys_ch_idx}")
+                    # self.logger.info(f"  Closed Device ID: {ph_id_key}, Type: {ch_type}, PhysChan: {phys_ch_idx}")
                 except PhidgetException as e:
                     self.logger.error(f"Error closing Phidget channel ({ph_id_key}, {ch_type}, {phys_ch_idx}): {e.description}")
         self._opened_physical_channels.clear()
