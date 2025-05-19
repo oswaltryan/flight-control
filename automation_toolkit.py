@@ -1,106 +1,98 @@
-# Filename: global_controller.py (place in project_root, or a common 'utils' or 'core' directory)
+# Filename: automation_toolkit.py (place in project_root, or a common 'utils' or 'core' directory)
 import logging
 import sys
 import os
+import atexit # Moved import up
 
-# --- Path Setup for global_controller.py to find 'controllers' ---
-# This assumes global_controller.py is in project_root.
-# If it's elsewhere (e.g. project_root/core/global_controller.py), adjust as needed.
+# --- Path Setup for automation_toolkit.py to find 'controllers' AND 'utils' ---
+# This assumes automation_toolkit.py is in project_root.
 PROJECT_ROOT_FOR_GLOBAL = os.path.dirname(os.path.abspath(__file__))
 if PROJECT_ROOT_FOR_GLOBAL not in sys.path:
     sys.path.insert(0, PROJECT_ROOT_FOR_GLOBAL)
 
+# --- IMPORT AND SETUP LOGGING FIRST ---
+try:
+    from utils.logging_config import setup_logging
+    # Call setup_logging() here, before anything else that might log.
+    # This establishes the global logging configuration for the entire application.
+    setup_logging()
+except ImportError as e_log_setup:
+    # Fallback basic logging if the main setup fails
+    _fallback_format = '%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+    logging.basicConfig(stream=sys.stderr, level=logging.CRITICAL, format=_fallback_format)
+    logging.critical(f"CRITICAL: Logging setup FAILED. Cannot import 'utils.logging_config'. Error: {e_log_setup}. Using basic fallback logging to stderr.", exc_info=True)
+    # Depending on policy, you might re-raise e_log_setup or sys.exit() here.
+# --- END OF LOGGING SETUP ---
+
+# Now get the logger for this module. It will use the global configuration.
+# Name ("GlobalATController") matches an entry in LOG_LEVEL_CONFIG for specific level setting.
+global_at_logger = logging.getLogger("GlobalATController")
+
 try:
     from controllers.unified_controller import UnifiedController
-except ImportError as e:
-    print(f"Critical Import Error in global_controller.py: {e}. Cannot find UnifiedController.", file=sys.stderr)
-    print("Ensure 'controllers/unified_controller.py' exists and paths are correct.", file=sys.stderr)
-    raise
+except ImportError as e_uc_import:
+    global_at_logger.critical(f"Import Error for UnifiedController: {e_uc_import}. Ensure 'controllers/unified_controller.py' exists and paths are correct.", exc_info=True)
+    raise # Re-raise after logging
 
 # --- Global Configuration for the 'at' instance ---
-# You can centralize default configurations here.
-# Scripts can override these if the UnifiedController allows reconfiguration,
-# or you can make these truly fixed for the global instance.
-
 DEFAULT_CAMERA_ID = 0
-DEFAULT_LED_DISPLAY_ORDER = ["red", "green", "blue"] # Or load from a config file
-
-# Setup a base logger for the global 'at' instance.
-# Individual scripts can still have their own script-specific loggers.
-global_at_logger = logging.getLogger("GlobalATController")
-if not global_at_logger.hasHandlers():
-    handler = logging.StreamHandler(sys.stdout)
-    formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
-    handler.setFormatter(formatter)
-    global_at_logger.addHandler(handler)
-    global_at_logger.setLevel(logging.INFO) # Default level for the global controller
+DEFAULT_LED_DISPLAY_ORDER = ["red", "green", "blue"]
 
 # --- Instantiate the Global Controller ---
+at = None # Initialize to None
 try:
-    # This instance 'at' will be created once when global_controller.py is first imported.
+    # This instance 'at' will be created once when automation_toolkit.py is first imported.
     at = UnifiedController(
         camera_id=DEFAULT_CAMERA_ID,
         display_order=DEFAULT_LED_DISPLAY_ORDER,
-        logger_instance=global_at_logger.getChild("UnifiedInstance") # Give it a child logger
-        # Add other default parameters for UnifiedController here if needed:
-        # script_map_config=None, # To use default Phidget map
-        # led_configs=None,       # To use default LED configs
+        # Pass a child logger for UnifiedController's internal messages.
+        # This logger ("GlobalATController.UnifiedInstance") can also be configured in LOG_LEVEL_CONFIG.
+        logger_instance=global_at_logger.getChild("UnifiedInstance")
     )
-    global_at_logger.info("Global 'at' (UnifiedController) instance created and initialized.")
 
-except Exception as e:
-    global_at_logger.critical(f"Failed to create global 'at' (UnifiedController) instance: {e}")
-    import traceback
-    global_at_logger.critical(traceback.format_exc())
-    # Depending on how critical this is, you might re-raise or set 'at' to None
-    at = None # Or raise SystemExit("Failed to initialize global controller.")
+except Exception as e_at_create:
+    global_at_logger.critical(f"Failed to create global 'at' (UnifiedController) instance: {e_at_create}", exc_info=True)
+    # 'at' remains None
 
 def get_at_controller():
     """
     Returns the globally initialized UnifiedController instance.
-    This function can also be used to perform any late initialization if needed,
-    though the current setup initializes 'at' on import.
     """
     if at is None:
         # This condition would be met if the initial instantiation failed.
-        # You might try to re-initialize or raise an error.
-        raise RuntimeError("Global 'at' controller was not successfully initialized.")
+        raise RuntimeError("Global 'at' controller was not successfully initialized or is None.")
     return at
 
 # --- Optional: Resource cleanup for the global instance ---
-# This is a bit trickier for a truly global instance that isn't managed by a 'with' block.
-# `atexit` can be used, but it has limitations (e.g., signal handling).
-# For scripts, it's often better if the main script using 'at' calls at.close() explicitly
-# in a finally block, or if 'at' itself is designed to be robust to being left open
-# (which PhidgetController and LogitechLedChecker generally are by releasing on __del__ or __exit__).
-
-import atexit
 def _cleanup_global_at():
     if at is not None and hasattr(at, 'close'):
-        global_at_logger.info("Attempting to close global 'at' controller instance on script exit...")
         try:
             at.close()
-            global_at_logger.info("Global 'at' controller instance closed via atexit.")
-        except Exception as e:
-            global_at_logger.error(f"Error closing global 'at' controller via atexit: {e}")
+            # 'at.close()' itself should log success/failure of its components.
+            # global_at_logger.info("Global 'at' controller instance close method called via atexit.")
+        except Exception as e_at_close:
+            global_at_logger.error(f"Error during at.close() via atexit: {e_at_close}", exc_info=True)
 
 if at is not None: # Only register cleanup if 'at' was successfully created
     atexit.register(_cleanup_global_at)
+else:
+    global_at_logger.warning("Global 'at' instance is None; atexit cleanup for 'at' not registered.")
 
-# You could also provide a manual cleanup function:
-# def cleanup_automation_toolkit():
-#     _cleanup_global_at()
 
 # To test this file directly (optional):
 if __name__ == "__main__":
-    print("Testing global_controller.py...")
+    # The setup_logging() at the top of the file has already run.
+    # The logger 'global_at_logger' is already configured.
+    global_at_logger.info("Testing automation_toolkit.py directly...")
     if at:
-        print(f"Global 'at' instance created. Camera ready: {at.is_camera_ready}")
-        # Example: at.on("usb3")
-        # time.sleep(0.1)
-        # at.off("usb3")
-        # print("Test Phidget command executed via global 'at'.")
-        # No at.close() here for direct test, atexit should handle it or it's left open.
+        global_at_logger.info(f"Global 'at' instance available. Camera ready: {at.is_camera_ready}")
+        # Example of using the global 'at' instance:
+        # try:
+        #     if at.is_camera_ready:
+        #         global_at_logger.info("Attempting a quick camera LED check (manual observation needed)...")
+        #         at.await_led_state({"red": 1}, timeout=2.0) # Example call
+        # except Exception as e_test:
+        #     global_at_logger.error(f"Error during direct test of 'at': {e_test}", exc_info=True)
     else:
-        print("Global 'at' instance is None (failed to initialize).")
-    print("Exiting global_controller.py test.")
+        global_at_logger.error("Global 'at' instance is None (failed to initialize). Cannot perform direct tests on 'at'.")
+    global_at_logger.info("Exiting automation_toolkit.py direct test.")

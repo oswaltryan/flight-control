@@ -77,8 +77,6 @@ def run_automation_sequence():
         script_logger.critical("Global 'at' controller is not available (failed initialization). Exiting.")
         return False # Indicate failure
 
-    script_logger.info(f"Using global 'at' controller. Camera ready: {at.is_camera_ready}")
-
     if not at.is_camera_ready:
         script_logger.error("Camera component of 'at' is not ready. Cannot perform full sequence.")
         # Potentially run Phidget-only actions or exit
@@ -87,12 +85,9 @@ def run_automation_sequence():
         # at.off("usb3")
         return False # Indicate failure
 
-    script_logger.info("Turning Phidget 'usb3' and 'connect' ON.")
     at.on("usb3")
     at.on("connect") 
 
-    script_logger.info(f"Attempting to match LED startup pattern (timeout: {AWAIT_FIRST_STATE_TIMEOUT_SCRIPT}s).")
-    
     pattern_matched = at.await_and_confirm_led_pattern(
         pattern=SCRIPT_STARTUP_PATTERN, 
         timeout=AWAIT_FIRST_STATE_TIMEOUT_SCRIPT, 
@@ -104,60 +99,40 @@ def run_automation_sequence():
         # Decide if to continue or stop; here we stop for this example
         return False # Indicate failure
     
-    script_logger.info("Startup pattern matched successfully.")
-
     if not at.confirm_led_solid({'red':1, 'green':0, 'blue':0}, minimum=3, timeout=5):
         script_logger.warning("RED solid state NOT confirmed after pattern.")
         return False # Indicate failure
-    script_logger.info("RED solid state confirmed after pattern.")
-
     at.sequence(["key1", "key1", "key2", "key2", "key3", "key3", "key4", "key4", "unlock"])
-    script_logger.info("Key sequence executed.")
     time.sleep(3) # Pause after key sequence
 
     if not at.confirm_led_solid({'green':1}, minimum=5, timeout=15): # Expecting Green to be ON now
         script_logger.warning("GREEN solid state NOT confirmed.")
         return False # Indicate failure
-    script_logger.info("GREEN solid state confirmed.")
     
     device_info_tuple = find_apricorn_device()
-    if device_info_tuple and len(device_info_tuple) > 1 and isinstance(device_info_tuple[1], dict):
-        script_logger.info("Apricorn device info:")
-        pprint(device_info_tuple[1])
-    else:
-        script_logger.warning("Apricorn device info not found or in unexpected format.")
-        # Depending on criticality, you might return False here
+    script_logger.info("Apricorn device info:")
+    pprint(device_info_tuple[0])
 
     at.press("lock")
-    script_logger.info("'lock' pressed.")
 
     if not at.confirm_led_solid({'red':1}, minimum=3, timeout=10): # Expecting Red to be ON after lock
         script_logger.warning("RED solid state (after lock) NOT confirmed.")
         return False # Indicate failure
-    script_logger.info("RED solid state (after lock) confirmed.")
 
     at.off("connect")
-    script_logger.info("'connect' turned OFF.")
     
     # Assuming all LEDs should be off after disconnect
     if not at.confirm_led_solid({'red':0, 'green':0, 'blue':0}, minimum=3, timeout=5):
         script_logger.warning("All LEDs OFF state NOT confirmed after disconnect.")
         # This might not be a critical failure for the overall sequence, depends on requirements
-    else:
-        script_logger.info("All LEDs OFF state confirmed after disconnect.")
     
     # at.off("usb3") # Consider if usb3 should also be turned off here or by atexit
-    script_logger.info("Automation sequence step-by-step completed.")
     return True # Indicate overall success of the sequence
 
 
 def main():
     try:
         success = run_automation_sequence()
-        if success:
-            script_logger.info("Automation sequence reported SUCCESS.")
-        else:
-            script_logger.error("Automation sequence reported FAILURE or was aborted.")
             
     except PhidgetException as e:
         script_logger.error(f"A PhidgetException occurred during automation: {e.description} (Code: {e.code})")
