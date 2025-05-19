@@ -88,6 +88,7 @@ def run_automation_sequence():
     at.on("usb3")
     at.on("connect") 
 
+    at.logger.info(f"Verifying Startup Self-Test Pattern")
     pattern_matched = at.await_and_confirm_led_pattern(
         pattern=SCRIPT_STARTUP_PATTERN, 
         timeout=AWAIT_FIRST_STATE_TIMEOUT_SCRIPT, 
@@ -99,26 +100,33 @@ def run_automation_sequence():
         # Decide if to continue or stop; here we stop for this example
         return False # Indicate failure
     
+    at.logger.info(f"Verifying Standby Mode")
     if not at.confirm_led_solid({'red':1, 'green':0, 'blue':0}, minimum=3, timeout=5):
         script_logger.warning("RED solid state NOT confirmed after pattern.")
         return False # Indicate failure
+    at.logger.info(f"Entering Admin PIN")
     at.sequence(["key1", "key1", "key2", "key2", "key3", "key3", "key4", "key4", "unlock"])
     time.sleep(3) # Pause after key sequence
 
+    at.logger.info(f"Verifying Enumeration (LED)")
     if not at.confirm_led_solid({'green':1}, minimum=5, timeout=15): # Expecting Green to be ON now
         script_logger.warning("GREEN solid state NOT confirmed.")
         return False # Indicate failure
     
+    at.logger.info(f"Verifying Enumeration (USB)")
     device_info_tuple = find_apricorn_device()
     script_logger.info("Apricorn device info:")
     pprint(device_info_tuple[0])
 
+    at.logger.info(f"Exiting Admin Enumeration")
     at.press("lock")
 
+    at.logger.info(f"Verifying Standby Mode")
     if not at.confirm_led_solid({'red':1}, minimum=3, timeout=10): # Expecting Red to be ON after lock
         script_logger.warning("RED solid state (after lock) NOT confirmed.")
         return False # Indicate failure
 
+    at.logger.info(f"Verifying Sleep Mode")
     at.off("connect")
     
     # Assuming all LEDs should be off after disconnect
