@@ -121,7 +121,9 @@ class PhidgetController:
         do_ch = self._get_channel_object(name, DigitalOutput)
         try: do_ch.setState(bool(state)); self.logger.debug(f"Output '{name}' set to {'ON' if state else 'OFF'}.") # Already DEBUG
         except PhidgetException as e: self.logger.error(f"Error setting output '{name}': {e.description}", exc_info=False); raise
+
     def on(self, name): self.set_output(name, True)
+    
     def off(self, name): self.set_output(name, False)
 
     def hold(self, name, duration_ms=200):

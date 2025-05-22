@@ -21,6 +21,7 @@ LOG_LEVEL_CONFIG = {
     "hardware.phidget_io_controller": logging.INFO, # If PhidgetController used standalone
     "controllers.unified_controller": logging.INFO, # For UnifiedController's own messages
     "Phidget22": logging.WARNING, # Default verbosity for the Phidget22 library itself
+    "transitions": logging.WARNING,
     # "MyMainScript": logging.DEBUG # Example if you have another main script
 }
 

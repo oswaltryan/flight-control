@@ -7,6 +7,7 @@ import sys
 import os
 import time # Added for the __main__ test block
 # import traceback # Not strictly needed if using exc_info=True with logging
+from pprint import pprint
 
 # --- Path Setup ---
 CONTROLLERS_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -22,6 +23,10 @@ try:
     from hardware.phidget_io_controller import PhidgetController, DEFAULT_SCRIPT_CHANNEL_MAP_CONFIG
     from camera.camera_controller import LogitechLedChecker
     from Phidget22.PhidgetException import PhidgetException
+    from camera.led_dictionaries import LEDs
+    from usb_tool import find_apricorn_device
+    # If EventData is needed for type hinting:
+    # from transitions import EventData # Or from typing import Any if you don't want direct dependency
 except ImportError as e_import:
     module_logger.critical(f"Critical Import Error in unified_controller.py: {e_import}. Check paths and dependencies.", exc_info=True)
     raise
@@ -39,28 +44,22 @@ class UnifiedController:
         Logging is assumed to be pre-configured globally.
         """
         self.logger = logger_instance if logger_instance else module_logger
-        # No basicConfig or other logging setup here.
 
         self.phidget_config_to_use = script_map_config if script_map_config is not None else DEFAULT_SCRIPT_CHANNEL_MAP_CONFIG
 
-        # Create child loggers for encapsulated controllers. These inherit from self.logger.
         phidget_ctrl_logger = self.logger.getChild("Phidget")
         camera_ctrl_logger = self.logger.getChild("Camera")
 
-        # Initialize PhidgetController
-        self._phidget_controller = None # Initialize to None
+        self._phidget_controller = None
         try:
             self._phidget_controller = PhidgetController(
                 script_map_config=self.phidget_config_to_use,
                 logger_instance=phidget_ctrl_logger
             )
-            # PhidgetController's __init__ logs its own success/status.
         except Exception as e_phidget_init:
             self.logger.error(f"Failed to initialize PhidgetController component: {e_phidget_init}", exc_info=True)
-            # Allow continuation if possible, or re-raise if critical
 
-        # Initialize LogitechLedChecker
-        self._camera_checker = None # Initialize to None
+        self._camera_checker = None
         try:
             self._camera_checker = LogitechLedChecker(
                 camera_id=camera_id,
@@ -68,18 +67,18 @@ class UnifiedController:
                 display_order=display_order,
                 logger_instance=camera_ctrl_logger
             )
-            if not self._camera_checker.is_camera_initialized: # is_camera_initialized is set by LogitechLedChecker
+            if not self._camera_checker.is_camera_initialized:
                 self.logger.error(f"LogitechLedChecker component FAILED to initialize camera ID {camera_id}. Camera functions will not work.")
-            # LogitechLedChecker's __init__ logs its own success/status.
         except Exception as e_camera_init:
             self.logger.error(f"Failed to initialize LogitechLedChecker component for camera ID {camera_id}: {e_camera_init}", exc_info=True)
-            # Allow continuation, _camera_checker remains None or partially init'd
 
+
+    ### LOWER LEVEL COMMANDS ###
     # --- PhidgetController Method Delegation ---
     def on(self, channel_name):
         if not self._phidget_controller:
             self.logger.error("Phidget controller not initialized. Cannot call 'on'.")
-            return # Or raise an exception
+            return
         self._phidget_controller.on(channel_name)
 
     def off(self, channel_name):
@@ -94,7 +93,7 @@ class UnifiedController:
             return
         self._phidget_controller.hold(channel_name, duration_ms)
 
-    def press(self, channel_name, duration_ms=200): # Added duration_ms from PhidgetController
+    def press(self, channel_name, duration_ms=200):
         if not self._phidget_controller:
             self.logger.error("Phidget controller not initialized. Cannot call 'press'.")
             return
@@ -109,16 +108,16 @@ class UnifiedController:
     def read_input(self, channel_name):
         if not self._phidget_controller:
             self.logger.error("Phidget controller not initialized. Cannot call 'read_input'.")
-            return None # Or raise
+            return None
         return self._phidget_controller.read_input(channel_name)
 
     def wait_for_input(self, channel_name, expected_state, timeout_s=5, poll_interval_s=0.05):
         if not self._phidget_controller:
             self.logger.error("Phidget controller not initialized. Cannot call 'wait_for_input'.")
-            return False # Or raise
+            return False
         return self._phidget_controller.wait_for_input(channel_name, expected_state, timeout_s, poll_interval_s)
 
-    # --- LogitechLedChecker Method Delegation ---
+    # --- LogitechLedChecker Method Delegation (Low-Level Primitives) ---
     @property
     def is_camera_ready(self) -> bool:
         return self._camera_checker is not None and self._camera_checker.is_camera_initialized
@@ -158,17 +157,15 @@ class UnifiedController:
 
     # --- Resource Management ---
     def close(self):
-        if self._camera_checker and hasattr(self._camera_checker, 'release_camera'): # Check if instance exists
+        if self._camera_checker and hasattr(self._camera_checker, 'release_camera'):
             try:
                 self._camera_checker.release_camera()
-                # self.logger.info("Camera component released.") # Logged by LogitechLedChecker.release_camera
             except Exception as e_cam_close:
                 self.logger.error(f"Error releasing camera component: {e_cam_close}", exc_info=True)
         
-        if self._phidget_controller and hasattr(self._phidget_controller, 'close_all'): # Check if instance exists
+        if self._phidget_controller and hasattr(self._phidget_controller, 'close_all'):
             try:
                 self._phidget_controller.close_all()
-                # self.logger.info("Phidget component closed.") # Logged by PhidgetController.close_all
             except Exception as e_phid_close:
                 self.logger.error(f"Error closing phidget component: {e_phid_close}", exc_info=True)
 
@@ -178,75 +175,103 @@ class UnifiedController:
     def __exit__(self, exc_type, exc_val, exc_tb):
         self.close()
 
+    def confirm_enum(self, stable_min=5, timeout=15):
+        self.logger.info(f"Attempting to confirm Drive enumeration (USB)...")
+        self.logger.info(f"Waiting for stable, available drive (stable_min: {stable_min}, timeout: {timeout})...")
+        DUT_ping_1 = find_apricorn_device()
+        if len(DUT_ping_1) != 0:
+            self.logger.info("Device enumerated at 0.0s, verifying stability...")
+        for device in DUT_ping_1:
+            if device.idProduct == '0310':
+                ping_1_iSerial = device.iSerial
+        time.sleep(stable_min)
+        DUT_ping_2 = find_apricorn_device()
+        for device in DUT_ping_2:
+            if device.iSerial == ping_1_iSerial:
+                self.logger.info(f"Drive stable for {float(stable_min)}s:")
+                self.logger.info(f" VID:PID  [Firm] @USB iSerial      iProduct")
+                self.logger.info(f"{device.idVendor}:{device.idProduct} [{device.bcdDevice}] @{device.bcdUSB} {device.iSerial} {device.iProduct}")
+
+    # --- FSM Event Handling Callbacks (High-Level) ---
+    def handle_post_failure(self, event_data) -> None: # event_data is passed by transitions
+        """Handles actions to take when POST fails."""
+        details = "No details provided"
+        if event_data and hasattr(event_data, 'kwargs') and event_data.kwargs:
+            details = event_data.kwargs.get('details', details)
+        self.logger.error(f"UnifiedController: Handling POST failure. Details: {details}")
+        # Add any specific actions UnifiedController should take on POST failure
+        # e.g., self.off("all_power_relays_if_any")
+        # e.g., self.log_to_external_monitoring_system("POST_FAIL", details)
+
+    def handle_critical_error(self, event_data) -> None: # event_data is passed by transitions
+        """Handles actions to take on a critical error."""
+        details = "No details provided"
+        if event_data and hasattr(event_data, 'kwargs') and event_data.kwargs:
+            details = event_data.kwargs.get('details', details)
+        self.logger.critical(f"UnifiedController: Handling CRITICAL error. Details: {details}")
+        # Add any specific actions UnifiedController should take on critical error
+        # e.g., attempt a safe shutdown, log extensively.
+
 # --- For direct testing of unified_controller.py if needed ---
 if __name__ == '__main__':
-    # IMPORTANT FOR DIRECT TESTING: Call setup_logging() from this module's test scope.
     print("Running a direct test of UnifiedController (from controllers/unified_controller.py)...")
     try:
         from utils.logging_config import setup_logging
-        # For testing, often useful to set a more verbose default level.
-        # This will be applied to all loggers unless overridden by LOG_LEVEL_CONFIG.
         setup_logging(default_log_level=logging.DEBUG)
     except ImportError:
         print("CRITICAL: Could not import 'utils.logging_config.setup_logging' for direct test. Using basicConfig.")
         logging.basicConfig(stream=sys.stdout, level=logging.DEBUG,
                             format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 
-    # Get a logger specifically for this test block.
-    # Its name ("UnifiedControllerDirectTest") can be added to LOG_LEVEL_CONFIG for custom levels.
     direct_test_logger = logging.getLogger("UnifiedControllerDirectTest")
     direct_test_logger.info("UnifiedController direct test logging configured and starting...")
 
-    test_display_order = ["red", "green", "blue"]
-    test_pattern_for_camera = [
-        {'red':1, 'green':0, 'blue':0, 'duration': (0.5, 2.0)}, # Red ON
-        {'red':0, 'green':0, 'blue':0, 'duration': (0.1, 2.0)}, # All OFF
-    ]
-    test_solid_state_red_on = {'red':1, 'green':0, 'blue':0}
-    phidget_channel_to_test = "connect" # Ensure this is in DEFAULT_SCRIPT_CHANNEL_MAP_CONFIG
-
     uc_instance_for_test = None
     try:
-        # Pass a child of the direct_test_logger to the UnifiedController instance
         uc_instance_for_test = UnifiedController(
             logger_instance=direct_test_logger.getChild("TestUCInstance"),
             camera_id=0,
-            display_order=test_display_order
         )
         direct_test_logger.info(f"UnifiedController instance for test created. Camera Ready: {uc_instance_for_test.is_camera_ready}")
         
-        if uc_instance_for_test._phidget_controller: # Check if Phidget part initialized
-            direct_test_logger.info(f"Testing Phidget: Turning '{phidget_channel_to_test}' ON for 1 second.")
-            uc_instance_for_test.on(phidget_channel_to_test)
+        if uc_instance_for_test._phidget_controller:
+            direct_test_logger.info("Testing Phidget: Powering ON via high-level power_on().")
+            uc_instance_for_test.power_on() # Test new high-level method
             time.sleep(1)
-            uc_instance_for_test.off(phidget_channel_to_test)
-            direct_test_logger.info(f"Phidget '{phidget_channel_to_test}' OFF.")
+            direct_test_logger.info("Testing Phidget: Powering OFF via high-level power_off().")
+            uc_instance_for_test.power_off() # Test new high-level method
+            direct_test_logger.info("Phidget power cycle test complete.")
         else:
             direct_test_logger.warning("Phidget component of UnifiedController not initialized. Skipping Phidget tests.")
 
+        # Mock EventData for testing handler methods
+        class MockEventData:
+            def __init__(self, kwargs=None):
+                self.kwargs = kwargs if kwargs else {}
+                self.transition = type('MockTransition', (), {'source': 'test_source', 'dest': 'test_dest'})()
+                self.event = type('MockEvent', (), {'name': 'test_event'})()
+                self.model = uc_instance_for_test # or a mock model
+
+        direct_test_logger.info("Testing handle_post_failure...")
+        uc_instance_for_test.handle_post_failure(MockEventData(kwargs={'details': 'Test POST failure details'}))
+        
+        direct_test_logger.info("Testing handle_critical_error...")
+        uc_instance_for_test.handle_critical_error(MockEventData(kwargs={'details': 'Test CRITICAL error details'}))
+
 
         if uc_instance_for_test.is_camera_ready:
-            direct_test_logger.info("--- Testing Camera Functions ---")
-            direct_test_logger.info(f"Manual check: Make RED LED turn ON for 'confirm_led_solid' test.")
-            direct_test_logger.info("Test 1: Confirming RED LED is solid ON for 2s (5s timeout)...")
+            direct_test_logger.info("--- Testing High-Level Camera Functions ---")
+            # ... (existing camera tests can remain)
+            direct_test_logger.info(f"Manual check: Ensure device performs POST sequence for 'confirm_startup_self_test' test.")
+            input("Press Enter to attempt confirm_startup_self_test...")
             
-            solid_success = uc_instance_for_test.confirm_led_solid(test_solid_state_red_on, minimum=2.0, timeout=5.0)
-            if solid_success:
-                direct_test_logger.info(f"SUCCESS: RED ON state confirmed solid.")
+            startup_success = uc_instance_for_test.confirm_startup_self_test()
+            if startup_success:
+                direct_test_logger.info(f"SUCCESS: Startup self-test sequence confirmed.")
             else:
-                direct_test_logger.warning(f"FAILURE: RED ON state not confirmed solid.")
-
-            direct_test_logger.info("-" * 30)
-            direct_test_logger.info(f"Manual check: Make LEDs follow pattern: RED ON, then ALL OFF for 'await_and_confirm_led_pattern' test.")
-            direct_test_logger.info("Test 2: Awaiting and confirming camera pattern (3s await timeout)...")
-            
-            pattern_success = uc_instance_for_test.await_and_confirm_led_pattern(test_pattern_for_camera, timeout=3.0)
-            if pattern_success:
-                direct_test_logger.info("SUCCESS: Camera pattern confirmed.")
-            else:
-                direct_test_logger.warning("FAILURE: Camera pattern NOT confirmed.")
+                direct_test_logger.warning(f"FAILURE: Startup self-test sequence NOT confirmed.")
         else:
-            direct_test_logger.warning("Camera component not ready, skipping camera function tests.")
+            direct_test_logger.warning("Camera component not ready, skipping high-level camera function tests.")
 
         direct_test_logger.info("UnifiedController direct test sequence complete.")
 
@@ -255,7 +280,7 @@ if __name__ == '__main__':
     except Exception as e_test_main:
         direct_test_logger.error(f"An unexpected error occurred during test: {e_test_main}", exc_info=True)
     finally:
-        if uc_instance_for_test: # Ensure close is called if instance was created
+        if uc_instance_for_test:
             direct_test_logger.info("Closing UnifiedController instance from direct test...")
             uc_instance_for_test.close()
         direct_test_logger.info("UnifiedController direct test finished.")
