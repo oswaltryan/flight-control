@@ -21,7 +21,8 @@ module_logger = logging.getLogger(__name__)
 
 try:
     from hardware.phidget_io_controller import PhidgetController, DEFAULT_SCRIPT_CHANNEL_MAP_CONFIG
-    from camera.camera_controller import LogitechLedChecker
+    # MODIFIED: Import DEFAULT_DURATION_TOLERANCE_SEC to use as a default if not provided by caller
+    from camera.camera_controller import LogitechLedChecker, DEFAULT_DURATION_TOLERANCE_SEC as CAMERA_DEFAULT_TOLERANCE
     from Phidget22.PhidgetException import PhidgetException
     from camera.led_dictionaries import LEDs
     from usb_tool import find_apricorn_device
@@ -38,7 +39,8 @@ class UnifiedController:
                  camera_id: int = 0,
                  led_configs=None,
                  display_order: list = None,
-                 logger_instance=None):
+                 logger_instance=None,
+                 led_duration_tolerance_sec: float = None): # MODIFIED: Added led_duration_tolerance_sec
         """
         Initializes a unified controller for Phidgets and Logitech LED checking.
         Logging is assumed to be pre-configured globally.
@@ -60,12 +62,16 @@ class UnifiedController:
             self.logger.error(f"Failed to initialize PhidgetController component: {e_phidget_init}", exc_info=True)
 
         self._camera_checker = None
+        # MODIFIED: Determine tolerance to pass to LogitechLedChecker
+        self.effective_led_duration_tolerance = led_duration_tolerance_sec if led_duration_tolerance_sec is not None else CAMERA_DEFAULT_TOLERANCE
+        
         try:
             self._camera_checker = LogitechLedChecker(
                 camera_id=camera_id,
                 led_configs=led_configs,
                 display_order=display_order,
-                logger_instance=camera_ctrl_logger
+                logger_instance=camera_ctrl_logger,
+                duration_tolerance_sec=self.effective_led_duration_tolerance # MODIFIED: Pass tolerance
             )
             if not self._camera_checker.is_camera_initialized:
                 self.logger.error(f"LogitechLedChecker component FAILED to initialize camera ID {camera_id}. Camera functions will not work.")
@@ -231,16 +237,17 @@ if __name__ == '__main__':
         uc_instance_for_test = UnifiedController(
             logger_instance=direct_test_logger.getChild("TestUCInstance"),
             camera_id=0,
+            led_duration_tolerance_sec=0.08 # Example: Test with a specific tolerance
         )
         direct_test_logger.info(f"UnifiedController instance for test created. Camera Ready: {uc_instance_for_test.is_camera_ready}")
+        direct_test_logger.info(f"Effective LED duration tolerance for this instance: {uc_instance_for_test.effective_led_duration_tolerance:.3f}s")
         
         if uc_instance_for_test._phidget_controller:
-            direct_test_logger.info("Testing Phidget: Powering ON via high-level power_on().")
-            uc_instance_for_test.power_on() # Test new high-level method
+            direct_test_logger.info("Testing Phidget: Turning 'usb3' ON then OFF.") # Simplified test message
+            uc_instance_for_test.on("usb3") # Test new high-level method
             time.sleep(1)
-            direct_test_logger.info("Testing Phidget: Powering OFF via high-level power_off().")
-            uc_instance_for_test.power_off() # Test new high-level method
-            direct_test_logger.info("Phidget power cycle test complete.")
+            uc_instance_for_test.off("usb3") # Test new high-level method
+            direct_test_logger.info("Phidget 'usb3' power cycle test complete.")
         else:
             direct_test_logger.warning("Phidget component of UnifiedController not initialized. Skipping Phidget tests.")
 
@@ -260,18 +267,20 @@ if __name__ == '__main__':
 
 
         if uc_instance_for_test.is_camera_ready:
-            direct_test_logger.info("--- Testing High-Level Camera Functions ---")
-            # ... (existing camera tests can remain)
-            direct_test_logger.info(f"Manual check: Ensure device performs POST sequence for 'confirm_startup_self_test' test.")
-            input("Press Enter to attempt confirm_startup_self_test...")
-            
-            startup_success = uc_instance_for_test.confirm_startup_self_test()
-            if startup_success:
-                direct_test_logger.info(f"SUCCESS: Startup self-test sequence confirmed.")
-            else:
-                direct_test_logger.warning(f"FAILURE: Startup self-test sequence NOT confirmed.")
+            direct_test_logger.info("--- Testing Camera Functions (with tolerance) ---")
+            # Example: Test confirm_led_solid with a short minimum that might only pass due to tolerance
+            test_state = {"red": 1, "green": 0, "blue": 0} # Example: Red LED only
+            test_min_duration = 0.1 # A very short duration
+            direct_test_logger.info(f"Attempting confirm_led_solid for {test_state} with min_duration {test_min_duration}s. "
+                                    f"Effective min with tolerance: {max(0, test_min_duration - uc_instance_for_test.effective_led_duration_tolerance):.3f}s")
+            # input(f"Ensure only RED LED is on and press Enter to test confirm_led_solid for {test_min_duration}s...")
+            # success = uc_instance_for_test.confirm_led_solid(test_state, minimum=test_min_duration, timeout=2)
+            # direct_test_logger.info(f"confirm_led_solid result: {'SUCCESS' if success else 'FAILURE'}")
+
+            # Removed startup_self_test from here as it's a very specific sequence
+            # and this direct test is more for unit-testing the controller itself.
         else:
-            direct_test_logger.warning("Camera component not ready, skipping high-level camera function tests.")
+            direct_test_logger.warning("Camera component not ready, skipping camera function tests.")
 
         direct_test_logger.info("UnifiedController direct test sequence complete.")
 

@@ -1,3 +1,6 @@
+# Directory: /
+# Filename: automation_toolkit.py
+
 # Filename: automation_toolkit.py (in project root)
 import logging
 import sys
@@ -15,8 +18,10 @@ try:
     from utils.logging_config import setup_logging # utils is found because root is in path
     setup_logging()
 except ImportError as e_log_setup:
-    # ... (fallback logging) ...
-    pass # Placeholder
+    # Basic fallback logging if setup_logging fails
+    logging.basicConfig(level=logging.WARNING, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+    logging.getLogger().critical(f"Failed to import or run setup_logging: {e_log_setup}. Using basic logging.", exc_info=True)
+    pass 
 
 global_at_logger = logging.getLogger("GlobalATController")
 
@@ -38,10 +43,11 @@ try:
     at = UnifiedController(
         camera_id=DEFAULT_CAMERA_ID,
         display_order=DEFAULT_LED_DISPLAY_ORDER,
-        logger_instance=global_at_logger.getChild("UnifiedInstance")
+        logger_instance=global_at_logger.getChild("UnifiedInstance"),
     )
 except Exception as e_at_create:
     global_at_logger.critical(f"Failed to create global 'at' (UnifiedController) instance: {e_at_create}", exc_info=True)
+    # at remains None
 
 def get_at_controller():
     if at is None:
@@ -58,6 +64,7 @@ if at: # Only initialize FSM if 'at' was successful
         global_at_logger.info(f"Global FSM initialized. Initial state: {fsm.state}")
     except Exception as e_fsm_create:
         global_at_logger.critical(f"Failed to create global 'fsm' instance: {e_fsm_create}", exc_info=True)
+        # fsm remains None
 else:
     global_at_logger.error("'at' controller is None. Cannot initialize global FSM.")
 
@@ -69,10 +76,19 @@ def get_fsm():
 
 # --- Optional: Resource cleanup ---
 def _cleanup_global_at():
-    # ... (your existing cleanup for 'at') ...
-    pass # Placeholder
+    global_at_logger.info("Attempting to cleanup global 'at' resources...")
+    if at and hasattr(at, 'close'):
+        try:
+            at.close()
+            global_at_logger.info("Global 'at' resources closed successfully.")
+        except Exception as e_at_close:
+            global_at_logger.error(f"Error during global 'at' cleanup: {e_at_close}", exc_info=True)
+    elif at:
+        global_at_logger.warning("Global 'at' instance exists but has no 'close' method.")
+    else:
+        pass # No 'at' instance to cleanup, already logged or handled
 
-if at is not None:
+if at is not None: # Check if 'at' was successfully created before registering cleanup
     atexit.register(_cleanup_global_at)
 else:
     global_at_logger.warning("Global 'at' instance is None; atexit cleanup for 'at' not registered.")
@@ -86,6 +102,7 @@ if __name__ == "__main__":
     global_at_logger.info("Testing automation_toolkit.py directly...")
     if at:
         global_at_logger.info(f"Global 'at' instance available. Camera ready: {at.is_camera_ready}")
+        global_at_logger.info(f"  'at' instance effective LED duration tolerance: {at.effective_led_duration_tolerance:.3f}s")
     else:
         global_at_logger.error("Global 'at' instance is None.")
     if fsm:
@@ -93,7 +110,7 @@ if __name__ == "__main__":
         # Example: Trigger an FSM event if it makes sense for testing
         # if fsm.state == 'OFF':
         #     global_at_logger.info("Attempting to trigger 'power_on_requested' on FSM...")
-        #     fsm.power_on_requested()
+        #     fsm.power_on_requested() # Ensure this method exists or use a valid trigger
         #     global_at_logger.info(f"FSM state after power_on_requested: {fsm.state}")
     else:
         global_at_logger.error("Global 'fsm' instance is None.")

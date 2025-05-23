@@ -61,7 +61,7 @@ class SimplifiedDeviceFSM:
         current_state: str = self.state # self.state is updated by the Machine
         self.logger.debug(f"State changed: {source_state} -> {current_state} (Event: {event_name})")
         if event_data.kwargs: # Log any extra data passed with the event trigger
-            self.logger.info(f"  Event details: {event_data.kwargs}")
+            self.logger.debug(f"  Event details: {event_data.kwargs}")
 
     # --- on_enter_STATENAME Callbacks (State-specific logic) ---
     def on_enter_OFF(self, event_data: EventData) -> None:
@@ -97,10 +97,6 @@ class SimplifiedDeviceFSM:
             return
 
     def on_enter_STANDBY_MODE(self, event_data: EventData) -> None:
-       
-       print(self.state)
-       if self.state == 'UNLOCKED_ADMIN':
-           self.at.press("lock")
 
        self.logger.info(f"Confirming Standby Mode...")
        
@@ -131,6 +127,10 @@ class SimplifiedDeviceFSM:
             return
         
         self.at.confirm_enum()
+
+    def on_exit_UNLOCKED_ADMIN(self, event_data: EventData) -> None:
+        self.logger.info(f"Locking DUT from Unlocked Admin...")
+        self.at.press("lock")
 
 # --- Main Execution Logic (Example for direct testing of this FSM module) ---
 if __name__ == '__main__':

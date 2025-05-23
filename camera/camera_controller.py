@@ -15,6 +15,7 @@ logger = logging.getLogger(__name__)
 DEFAULT_FPS = 30
 CAMERA_BUFFER_SIZE_FRAMES = 5
 MIN_LOGGABLE_STATE_DURATION = 0.01 # Seconds. States held for less than this won't be logged as "held".
+DEFAULT_DURATION_TOLERANCE_SEC = 0.5 # NEW: Default tolerance for duration checks
 
 # --- PRIMARY (USER-TUNED) LED CONFIGURATIONS ---
 PRIMARY_LED_CONFIGURATIONS = {
@@ -72,16 +73,16 @@ def get_capture_backend():
 
 
 class LogitechLedChecker:
-    def __init__(self, camera_id: int, logger_instance=None, led_configs=None, display_order: list = None):
+    def __init__(self, camera_id: int, logger_instance=None, led_configs=None, display_order: list = None, duration_tolerance_sec: float = DEFAULT_DURATION_TOLERANCE_SEC):
         self.logger = logger_instance if logger_instance else logger
         self.cap = None
-        self.is_camera_initialized = False # Set to True upon successful _initialize_camera
+        self.is_camera_initialized = False
         self.camera_id = camera_id
         self.preferred_backend = get_capture_backend()
         self._ordered_keys_for_display_cache = None
         self.explicit_display_order = display_order
+        self.duration_tolerance_sec = duration_tolerance_sec
 
-        # Determine LED configurations
         if led_configs is not None:
             self.led_configs = led_configs
             self.logger.debug("Using LED configurations explicitly provided by the caller.")
@@ -95,13 +96,11 @@ class LogitechLedChecker:
                 "Please define and tune PRIMARY_LED_CONFIGURATIONS in camera_controller.py."
             )
 
-        # Validate LED configurations structure
         if not isinstance(self.led_configs, dict) or not self.led_configs:
              self.logger.critical("LED configurations are missing or invalid. Cannot initialize LogitechLedChecker.")
              raise ValueError("LED configurations are missing or invalid. "
                               "Ensure PRIMARY_LED_CONFIGURATIONS is set or valid 'led_configs' are passed.")
 
-        # Validate display_order if provided
         if self.explicit_display_order:
             for key in self.explicit_display_order:
                 if key not in self.led_configs:
@@ -134,6 +133,7 @@ class LogitechLedChecker:
             return 
 
         self._initialize_camera()
+        self.logger.info(f"LogitechLedChecker initialized with duration tolerance: {self.duration_tolerance_sec:.3f}s")
 
     def _initialize_camera(self):
         try:
@@ -269,14 +269,13 @@ class LogitechLedChecker:
         if state_dict is not None:
             duration = end_time - state_timestamp
             if duration >= MIN_LOGGABLE_STATE_DURATION:
-                self.logger.info(f"{self._format_led_display_string(state_dict)} ({duration:.0f}s{reason_suffix})")
+                self.logger.info(f"{self._format_led_display_string(state_dict)} ({duration:.2f}s{reason_suffix})")
 
 
     def confirm_led_solid(self, state: dict, minimum: float = 2, timeout: float = 10,
                           fail_leds: list = None, clear_buffer: bool = True) -> bool:
         formatted_target_state = self._format_led_display_string(state)
-        # MODIFIED: "Waiting for..." message level is DEBUG (as per provided file)
-        self.logger.debug(f"Waiting for LED solid {formatted_target_state}, minimum {minimum:.0f}s, timeout {timeout:.0f}s")
+        self.logger.debug(f"Waiting for LED solid {formatted_target_state}, minimum {minimum:.2f}s (tol: {self.duration_tolerance_sec:.2f}s), timeout {timeout:.2f}s")
         if not self.is_camera_initialized: self.logger.error("Camera not initialized for confirm_led_solid."); return False
         
         last_state_info = [None, 0.0] 
@@ -287,20 +286,18 @@ class LogitechLedChecker:
             self._clear_camera_buffer()
             initial_leds_for_log = self._get_current_led_state_from_camera()
             if not initial_leds_for_log: initial_leds_for_log = {} 
-            # MODIFIED: Removed immediate bare log of initial state
-            # self.logger.info(f"{self._format_led_display_string(initial_leds_for_log)}") 
             last_state_info[0] = initial_leds_for_log
             last_state_info[1] = initial_capture_time 
         else: 
             initial_leds_for_log = self._get_current_led_state_from_camera()
             if not initial_leds_for_log: initial_leds_for_log = {}
-            # MODIFIED: Removed immediate bare log of initial state
-            # self.logger.info(f"{self._format_led_display_string(initial_leds_for_log)}")
             last_state_info[0] = initial_leds_for_log 
             last_state_info[1] = initial_capture_time
 
         overall_start_time = time.time()
         continuous_target_match_start_time = None
+        
+        effective_minimum = max(0, minimum - self.duration_tolerance_sec)
 
         try:
             while time.time() - overall_start_time < timeout:
@@ -320,11 +317,9 @@ class LogitechLedChecker:
                     
                     target_held_duration = current_time - continuous_target_match_start_time
                     
-                    if target_held_duration >= minimum:
-                        # MODIFIED: Log confirmed state with :.2f duration
+                    if target_held_duration >= effective_minimum:
                         self.logger.info(f"{self._format_led_display_string(last_state_info[0])} ({target_held_duration:.2f}s)")
-                        # MODIFIED: Summary log uses target_held_duration with :.0f
-                        self.logger.info(f"LED solid confirmed: {formatted_target_state} for {target_held_duration:.0f}s")
+                        self.logger.info(f"LED solid confirmed: {formatted_target_state} for {target_held_duration:.2f}s (required ~{effective_minimum:.2f}s)")
                         return True
                 else: 
                     continuous_target_match_start_time = None 
@@ -335,10 +330,10 @@ class LogitechLedChecker:
             log_method = self.logger.warning
             if continuous_target_match_start_time is not None:
                 held_duration = time.time() - continuous_target_match_start_time
-                log_method(f"Timeout: Target {formatted_target_state} was active for {held_duration:.0f}s, "
-                           f"but did not meet full minimum {minimum:.0f}s within {timeout:.0f}s overall timeout.")
+                log_method(f"Timeout: Target {formatted_target_state} was active for {held_duration:.2f}s, "
+                           f"but did not meet full minimum {effective_minimum:.2f}s (original min: {minimum:.2f}s) within {timeout:.2f}s overall timeout.")
             else:
-                log_method(f"Timeout: Target {formatted_target_state} not confirmed solid for {minimum:.0f}s within {timeout:.0f}s.")
+                log_method(f"Timeout: Target {formatted_target_state} not confirmed solid for {effective_minimum:.2f}s (original min: {minimum:.2f}s) within {timeout:.2f}s.")
             return False
         finally:
             pass
@@ -346,7 +341,9 @@ class LogitechLedChecker:
 
     def confirm_led_solid_strict(self, state: dict, minimum: float, clear_buffer: bool = True) -> bool:
         formatted_target_state = self._format_led_display_string(state)
-        self.logger.info(f"Waiting for LED strictly solid {formatted_target_state}, duration {minimum:.0f}s")
+        effective_minimum = max(0.0, minimum - self.duration_tolerance_sec)
+        self.logger.info(f"Waiting for LED strictly solid {formatted_target_state}, effective duration {effective_minimum:.2f}s (original min: {minimum:.2f}s, tol: {self.duration_tolerance_sec:.2f}s)")
+        
         if not self.is_camera_initialized: self.logger.error("Camera not initialized for confirm_led_solid_strict."); return False
         
         last_state_info = [None, 0.0] 
@@ -374,19 +371,19 @@ class LogitechLedChecker:
         target_state_began_at = last_state_info[1] 
 
         try:
-            while time.time() - target_state_began_at < minimum :
+            while time.time() - target_state_began_at < effective_minimum :
                 current_time = time.time()
 
-                if current_time - strict_overall_start_time > (minimum + 5.0): 
+                if current_time - strict_overall_start_time > (effective_minimum + 5.0): 
                     self._log_final_state(last_state_info, current_time, reason_suffix=" at strict op timeout")
-                    self.logger.warning(f"Strict confirm for {formatted_target_state} FAILED due to operation timeout.")
+                    self.logger.warning(f"Strict confirm for {formatted_target_state} FAILED due to operation timeout (aiming for {effective_minimum:.2f}s).")
                     return False
 
                 current_leds = self._get_current_led_state_from_camera()
 
                 if not current_leds: 
                     self._handle_state_change_logging({}, current_time, last_state_info) 
-                    self.logger.warning(f"Strict confirm for {formatted_target_state} FAILED. Frame capture error at {current_time - strict_overall_start_time:.0f}s.")
+                    self.logger.warning(f"Strict confirm for {formatted_target_state} FAILED. Frame capture error at {current_time - strict_overall_start_time:.2f}s.")
                     return False
                 
                 logged_a_change = self._handle_state_change_logging(current_leds, current_time, last_state_info)
@@ -395,15 +392,16 @@ class LogitechLedChecker:
                     if not logged_a_change and last_state_info[0] is not None: 
                         self.logger.info(f"{self._format_led_display_string(last_state_info[0])} ({current_time - last_state_info[1]:.2f}s, broke strict sequence)")
                     
+                    actual_held_duration_before_break = last_state_info[1] - target_state_began_at
                     self.logger.warning(
                         f"Strict confirm for {formatted_target_state} FAILED. State broke sequence. "
-                        f"Target was held for {last_state_info[1] - target_state_began_at:.0f}s.")
+                        f"Target was held for {actual_held_duration_before_break:.2f}s. Needed to hold for {effective_minimum:.2f}s without break.")
                     return False
                 
                 time.sleep(1 / DEFAULT_FPS if DEFAULT_FPS > 0 else 0.1)
             
             self._log_final_state(last_state_info, time.time(), reason_suffix=" on success") 
-            self.logger.info(f"LED strictly solid confirmed: {formatted_target_state} for at least {minimum:.0f}s")
+            self.logger.info(f"LED strictly solid confirmed: {formatted_target_state} for at least {effective_minimum:.2f}s (original min: {minimum:.2f}s, tol: {self.duration_tolerance_sec:.2f}s)")
             return True
         finally:
             pass
@@ -412,7 +410,7 @@ class LogitechLedChecker:
     def await_led_state(self, state: dict, timeout: float = 1,
                         fail_leds: list = None, clear_buffer: bool = True) -> bool:
         formatted_target_state = self._format_led_display_string(state)
-        self.logger.info(f"Awaiting LED state {formatted_target_state}, timeout {timeout:.0f}s")
+        self.logger.info(f"Awaiting LED state {formatted_target_state}, timeout {timeout:.2f}s")
         if not self.is_camera_initialized: self.logger.error("Camera not initialized for await_led_state."); return False
         
         last_state_info = [None, 0.0]
@@ -424,14 +422,12 @@ class LogitechLedChecker:
             initial_leds_for_log = self._get_current_led_state_from_camera()
             if not initial_leds_for_log: initial_leds_for_log = {}
             self.logger.info(f"{self._format_led_display_string(initial_leds_for_log)}")
-            self.logger.info(f"LED state confirmed: {self._format_led_display_string(initial_leds_for_log)}") # This line seems redundant/misplaced
             last_state_info[0] = initial_leds_for_log
             last_state_info[1] = initial_capture_time
         else:
             initial_leds_for_log = self._get_current_led_state_from_camera()
             if not initial_leds_for_log: initial_leds_for_log = {}
             self.logger.info(f"{self._format_led_display_string(initial_leds_for_log)}")
-            self.logger.info(f"LED state confirmed: {self._format_led_display_string(initial_leds_for_log)}") # This line also seems redundant/misplaced
             last_state_info[0] = initial_leds_for_log
             last_state_info[1] = initial_capture_time
 
@@ -448,23 +444,25 @@ class LogitechLedChecker:
                 self._handle_state_change_logging(current_leds, current_time, last_state_info)
 
                 if self._matches_state(current_leds, state, fail_leds):
-                    # NOTE: The success path logging from the original file was:
-                    # if last_state_info[0] == state:
-                    #     self._log_final_state(last_state_info, current_time, reason_suffix=" when target observed")
-                    # This is missing in the provided file. I am not re-adding it as per the scoped request.
+                    if last_state_info[0] == current_leds and (current_time - last_state_info[1] >= MIN_LOGGABLE_STATE_DURATION): 
+                         self.logger.info(f"{self._format_led_display_string(last_state_info[0])} ({current_time - last_state_info[1]:.2f}s when target observed)")
+                    elif last_state_info[0] != current_leds: 
+                         self.logger.info(f"{self._format_led_display_string(current_leds)} (0.00s+ when target observed)")
+
+                    self.logger.info(f"Target state {formatted_target_state} observed.")
                     return True
                 
                 time.sleep(1 / DEFAULT_FPS if DEFAULT_FPS > 0 else 0.1)
 
             self._log_final_state(last_state_info, time.time(), reason_suffix=" at timeout")
-            self.logger.warning(f"Timeout: {formatted_target_state} not observed within {timeout:.0f}s."); 
+            self.logger.warning(f"Timeout: {formatted_target_state} not observed within {timeout:.2f}s.");
             return False
         finally:
             pass
 
 
     def confirm_led_pattern(self, pattern: list, clear_buffer: bool = True) -> bool:
-        self.logger.debug("Attempting to match LED pattern...") 
+        self.logger.debug(f"Attempting to match LED pattern (tol: {self.duration_tolerance_sec:.2f}s)...")
         if not pattern: self.logger.warning("Empty pattern provided."); return False
         if not self.is_camera_initialized: self.logger.error("Camera not initialized for confirm_led_pattern."); return False
         
@@ -484,8 +482,20 @@ class LogitechLedChecker:
 
             step_cfg = pattern[current_step_idx]
             target_state_for_step = {k: v for k, v in step_cfg.items() if k != 'duration'}
-            min_d, max_d = step_cfg.get('duration', (0, float('inf')))
+            min_d_orig, max_d_orig = step_cfg.get('duration', (0, float('inf')))
+            
+            min_d_check = max(0.0, min_d_orig - self.duration_tolerance_sec)
+            max_d_check = max_d_orig + self.duration_tolerance_sec
+            if max_d_orig == float('inf'):
+                max_d_check = float('inf')
+
+
             target_state_str_for_step = self._format_led_display_string(target_state_for_step, ordered_keys)
+            
+            # MODIFIED: Removed the verbose per-step debug log line below
+            # self.logger.debug(f"Pattern step {current_step_idx+1}/{len(pattern)}: Target {target_state_str_for_step}, "
+            #                   f"Orig Dur: ({min_d_orig:.2f}, {max_d_orig if max_d_orig == float('inf') else f'{max_d_orig:.2f}'}), "
+            #                   f"Check Dur: ({min_d_check:.2f}, {max_d_check if max_d_check == float('inf') else f'{max_d_check:.2f}'})s")
                         
             step_seen_at = None 
             step_loop_start_time = time.time() 
@@ -502,17 +512,17 @@ class LogitechLedChecker:
                     step_seen_at = loop_check_time 
                     break 
 
-                if current_step_idx == 0 and min_d == 0.0 and (loop_check_time - step_loop_start_time > 0.25): 
+                if current_step_idx == 0 and min_d_orig == 0.0 and (loop_check_time - step_loop_start_time > 0.25): 
                     break 
                 
-                step_appearance_timeout_val = max(1.0, max_d / 2 if max_d != float('inf') else 5.0) 
+                step_appearance_timeout_val = max(1.0, max_d_orig / 2 if max_d_orig != float('inf') else 5.0) 
                 if loop_check_time - step_loop_start_time > step_appearance_timeout_val :
                     self.logger.warning(f"Pattern FAILED: Step {current_step_idx+1} ({target_state_str_for_step}) not seen within {step_appearance_timeout_val:.2f}s of trying for it."); return False
                 time.sleep(1 / DEFAULT_FPS if DEFAULT_FPS > 0 else 0.03)
 
             if step_seen_at is None: 
-                if current_step_idx == 0 and min_d == 0.0:
-                    self.logger.info(f"{target_state_str_for_step}  0.00s ({current_step_idx + 1:02d}/{len(pattern):02d}) - Skipped")
+                if current_step_idx == 0 and min_d_orig == 0.0: 
+                    self.logger.info(f"{target_state_str_for_step}  0.00s ({current_step_idx + 1:02d}/{len(pattern):02d}) - Skipped (original min_d was 0)")
                     current_step_idx += 1; continue
                 else: 
                     self.logger.error(f"Pattern FAILED: Step {current_step_idx + 1} ({target_state_str_for_step}) internal logic error, never detected."); return False
@@ -528,20 +538,20 @@ class LogitechLedChecker:
                 held_time = loop_check_time - step_seen_at 
                 
                 if self._matches_state(current_leds, target_state_for_step): 
-                    if held_time > max_d:
-                        self.logger.warning(f"Pattern FAILED: Step {current_step_idx+1} ({target_state_str_for_step}) held for {held_time:.2f}s > max {max_d:.2f}s."); return False
+                    if max_d_check != float('inf') and held_time > max_d_check:
+                        self.logger.warning(f"Pattern FAILED: Step {current_step_idx+1} ({target_state_str_for_step}) held for {held_time:.2f}s > max_check {max_d_check:.2f}s (orig_max: {max_d_orig:.2f}s)."); return False
                     
                     is_last_step_of_pattern = (current_step_idx == len(pattern) - 1)
-                    if is_last_step_of_pattern and held_time >= min_d: 
+                    if is_last_step_of_pattern and held_time >= min_d_check: 
                         self.logger.info(f"{target_state_str_for_step}  {held_time:.2f}s+ ({current_step_idx + 1:02d}/{len(pattern):02d})")
                         current_step_idx += 1; break 
                 else: 
-                    if held_time >= min_d: 
+                    if held_time >= min_d_check: 
                         self.logger.info(f"{target_state_str_for_step}  {held_time:.2f}s ({current_step_idx + 1:02d}/{len(pattern):02d})")
                         current_step_idx += 1; break 
                     else: 
                         self.logger.warning(f"Pattern FAILED: Step {current_step_idx+1} ({target_state_str_for_step}) changed to {self._format_led_display_string(current_leds, ordered_keys)} "
-                                           f"after {held_time:.2f}s (min {min_d:.2f}s required)."); return False
+                                           f"after {held_time:.2f}s (min_check {min_d_check:.2f}s required, orig_min: {min_d_orig:.2f}s)."); return False
                 time.sleep(1 / DEFAULT_FPS if DEFAULT_FPS > 0 else 0.03)
         
         if current_step_idx == len(pattern): self.logger.info("LED pattern confirmed"); return True
@@ -549,17 +559,16 @@ class LogitechLedChecker:
 
 
     def await_and_confirm_led_pattern(self, pattern: list, timeout: float, clear_buffer: bool = True) -> bool:
-        if not pattern: self.logger.warning("Empty pattern for await_and_confirm."); return False # Moved this check up
+        if not pattern: self.logger.warning("Empty pattern for await_and_confirm."); return False 
         if not self.is_camera_initialized: self.logger.error("Camera not init for await_and_confirm."); return False
             
-        # Moved the debug log after the initial checks
-        self.logger.debug(f"Awaiting first state of pattern (timeout: {timeout:.0f}s), steps: {len(pattern)}.")
+        self.logger.debug(f"Awaiting first state of pattern (timeout: {timeout:.2f}s), steps: {len(pattern)}.")
         first_state_target = {k: v for k, v in pattern[0].items() if k != 'duration'}
         
         if self.await_led_state(first_state_target, timeout=timeout, clear_buffer=clear_buffer):
             return self.confirm_led_pattern(pattern, clear_buffer=False) 
         
-        self.logger.warning(f"Pattern not started: First state {self._format_led_display_string(first_state_target)} not observed in {timeout:.0f}s."); return False
+        self.logger.warning(f"Pattern not started: First state {self._format_led_display_string(first_state_target)} not observed in {timeout:.2f}s."); return False
 
     def release_camera(self):
         if self.cap and self.cap.isOpened(): self.cap.release(); self.logger.info(f"Camera ID {self.camera_id} released.")
