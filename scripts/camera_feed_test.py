@@ -5,21 +5,25 @@ import logging
 import sys
 import cv2 # OpenCV for displaying frames and drawing ROIs
 import numpy as np # For HSV array manipulation
+import os
 
 # Make sure the 'camera' module is in the Python path
+SCRIPT_DIR_BASIC = os.path.dirname(os.path.abspath(__file__))
+PROJECT_ROOT_BASIC = os.path.abspath(os.path.join(SCRIPT_DIR_BASIC, '..')) # Go one level up
+if PROJECT_ROOT_BASIC not in sys.path:
+    sys.path.insert(0, PROJECT_ROOT_BASIC)
+
 try:
     # Import the checker class AND the single source of truth for LED configurations
     from camera.camera_controller import LogitechLedChecker, PRIMARY_LED_CONFIGURATIONS
 except ImportError:
     import os
-    sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '.')))
     from camera.camera_controller import LogitechLedChecker, PRIMARY_LED_CONFIGURATIONS
 
 try:
     from hardware.phidget_io_controller import PhidgetController
 except ImportError:
     import os
-    sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '.')))
     from hardware.phidget_io_controller import PhidgetController
 
 

@@ -1,593 +1,612 @@
-# State Transition Diagram for Apricorn Device
+# Comprehensive State Transition Diagram for Automating Apricorn Device (Automation Perspective)
 
-**I. LIST OF STATES:**
-*(List all unique, primary operational states. Think about what the device is "being" or "waiting for" at any given moment. Avoid listing actions as states here.)*
+This document outlines the states and transitions from the perspective of an automation system controlling and verifying an Apricorn-like secure USB device. It is based on the features described in `device_markdown_map.md`.
 
-1.  `OFF`
-2.  `SLEEP_MODE` (Low power, LEDs off, for battery-powered devices ONLY)
-3.  `STARTUP_SELF_TEST` (Power-on self-test, hardware checks, for non-battery-powered devices ONLY)
-4.  `OOB_MODE` (Out-of-Box, awaiting initial Admin PIN enrollment)
-5.  `STANDBY_MODE` (Device configured, idle, locked, awaiting PIN for Admin/User/Recovery/Self-Destruct)
-6.  `ADMIN_MODE` (Admin is authenticated and can perform configuration actions: enrolling pins, toggling features. Data partition likely NOT accessible for R/W here.)
-7.  `ADMIN_MODE_UNLOCKED_DATA_ACCESS` (Admin PIN entered, data partition accessible for R/W or as per current R/O setting)
-8.  `USER_MODE_UNLOCKED_DATA_ACCESS` (User PIN entered, data partition accessible for R/W or as per current R/O setting, according to user permissions)
-9.  `SELF_DESTRUCT_UNLOCKED_DATA_ACCESS` (Self-Destruct PIN entered, data partition accessible for R/W)
-10. `READ_ONLY_SESSION_ACTIVE` (A sub-state or flag indicating that the current unlocked session is read-only, could be entered from ADMIN_MODE_UNLOCKED_DATA_ACCESS or USER_MODE_UNLOCKED_DATA_ACCESS)
-11. `DIAGNOSTIC_MODE` (Device version numbers and hardware IDs are displayed, after version display a keypad test is available)
-12. `SELF_DESTRUCT_SEQUENCE_ACTIVE` (Self-destruct PIN entered, data being/has been wiped)
-13. `USER_FORCED_ENROLLMENT` (Admin authorized, device now waiting for new User PIN sequence, appears the same as OOB Mode LEDs)
-14. `BRUTE_FORCE_TIER1_LOCKOUT` (After N failed PIN attempts, temporary lockout, specific LED behavior)
-15. `BRUTE_FORCE_TIER2_LOCKOUT` (Tier 1 was cleared successfully. After more failed PIN attempts, lockout data is wiped)
-16. `PERMANENTLY_BRICKED` (Recovery failed, or other critical unrecoverable error, distinct LED behavior)
-17. `FACTORY_RESETTING_IN_PROGRESS` (Transient state during reset process, specific LED behavior)
-18. `AWAITING_PIN_ENROLLMENT_SEQUENCE` (Generic state for user to input a sequence of digits for a PIN.)
-19. `AWAITING_COUNTER_VALUE_SETTING` (Generic state for user to input a sequence of digits for a counter.)
-20. `AWAITING_PIN_LOGIN` (Generic state for user to enter PIN protected modes, NO DATA ACCESS)
-21. `ERROR_MODE` (Generic state for errors)
+**I. LIST OF STATES (Automation Perspective):**
 
+**Core States:**
+1.  `DEVICE_OFF`: Device unpowered.
+2.  `POWERING_ON`: Power applied, awaiting POST.
+3.  `VERIFYING_POST`: Observing POST LED sequence.
+4.  `DEVICE_IN_STANDBY_MODE`: Locked, configured, awaiting PIN.
+5.  `LOCKING_DEVICE`: Lock command issued, awaiting Standby confirmation.
+6.  `POWERING_OFF`: Power-off command issued, awaiting LED confirmation.
+7.  `AUTOMATION_ERROR_STATE`: Automation encountered an unrecoverable error.
 
-**II. INITIAL STATE:**
-*   BATTERY-POWERED DEVICE: `SLEEP MODE`
-*   NON-BATTERY-POWERED DEVICE: `OFF`
+**OOB & Initial Setup States:**
+8.  `DEVICE_IN_OOB_MODE`: POST successful, device in Out-of-Box state.
+9.  `AWAITING_OOB_ADMIN_PIN_ENROLL_START`: In OOB, initiating Admin PIN enrollment.
+10. `OOB_ADMIN_PIN_ENROLLING`: Inputting new Admin PIN in OOB.
 
+**PIN Entry & Unlock States:**
+11. `AWAITING_PIN_INPUT`: Keypad active, automation inputting a PIN. (Generic for User, Admin, SD, Recovery).
+12. `AWAITING_UNLOCK_CONFIRMATION`: PIN submitted, observing LEDs/USB for unlock outcome.
 
-**III. STATE DEFINITIONS & TRANSITIONS:**
+**Unlocked States (Data Access):**
+13. `USER_MODE_UNLOCKED`: User PIN accepted, data accessible.
+14. `ADMIN_MODE_UNLOCKED_DATA`: Admin PIN accepted for data access.
+15. `SELF_DESTRUCT_MODE_UNLOCKED_DATA`: Self-Destruct PIN accepted, data accessible (prior to wipe completion if device allows temporary access).
 
-*(For each state, define:*
-*   *Description: A brief explanation of the state.*
-*   *Entry Actions: What happens immediately upon entering this state (e.g., LED changes, checks performed, timers started).*
-*   *Exit Actions: What happens immediately upon exiting this state (e.g., cleanup, timers stopped).*
-*   *Internal Actions/Events Handled: Actions that can be performed *within* this state without causing a state change (e.g., an Admin in `ADMIN_MODE_CONFIGURING` toggles a feature).*
-*   *Transitions Out:* List all possible events that can cause a transition *out* of this state.*)
+**Admin Configuration Mode States:**
+16. `AWAITING_ADMIN_CONFIG_MODE_ENTRY`: Admin PIN for *configuration* submitted.
+17. `ADMIN_MODE_CONFIGURING`: In Admin config mode, awaiting action selection.
+18. `ADMIN_MODE_NAVIGATING_MENU`: Sending key sequences to navigate Admin menus.
+19. `ADMIN_MODE_AWAITING_PIN_FOR_CHANGE_OR_ENROLL`: Admin sub-op requires new PIN entry (e.g. Enroll User, Change Admin).
+20. `ADMIN_MODE_ENTERING_NEW_PIN`: Inputting a new PIN (User, Admin, SD, Recovery) during Admin config.
+21. `ADMIN_MODE_AWAITING_NEW_PIN_CONFIRMATION`: Inputting the new PIN a second time for confirmation.
+22. `ADMIN_MODE_AWAITING_COUNTER_VALUE_INPUT`: Admin sub-op requires numeric input (e.g. Brute Force Counter, Min PIN Length).
+23. `ADMIN_MODE_ENTERING_COUNTER_VALUE`: Inputting digits for a counter.
+24. `ADMIN_MODE_TOGGLING_FEATURE`: Sending sequence to toggle a feature, awaiting feedback.
+25. `ADMIN_MODE_INITIATING_USER_RESET`: Confirming User Reset (Factory Default) from Admin Mode.
+
+**User Forced Enrollment (UFE) States:**
+26. `AWAITING_UFE_START_CONFIRMATION`: UFE hardware sequence sent from Standby.
+27. `UFE_AWAITING_ADMIN_PIN_AUTH`: UFE mode active, awaiting Admin PIN.
+28. `UFE_AWAITING_NEW_USER_PIN_ENROLL`: UFE Admin Auth OK, awaiting new User PIN.
+
+**Brute Force & Recovery States:**
+29. `BRUTE_FORCE_TIER1_LOCKOUT_DETECTED`: Device showing Tier 1 Brute Force lockout LEDs.
+30. `BRUTE_FORCE_TIER2_LOCKOUT_DETECTED`: Device showing Tier 2 Brute Force lockout LEDs.
+31. `DEVICE_BRICKED_AWAITING_ADMIN_RECOVERY_PIN`: Bricked by BF+ProvisionLock, awaiting Admin Recovery PIN.
+32. `DEVICE_PERMANENTLY_BRICKED_DETECTED`: LEDs indicate permanent, unrecoverable bricked state.
+
+**Reset & Self-Destruct States:**
+33. `INITIATING_FACTORY_RESET`: Factory Reset command issued, awaiting process.
+34. `FACTORY_RESET_IN_PROGRESS`: Observing Factory Reset LED pattern.
+35. `SELF_DESTRUCT_SEQUENCE_ACTIVE_WIPING`: Self-Destruct PIN accepted, observing wipe/reset.
+
+**Diagnostic Mode States:**
+36. `AWAITING_DIAGNOSTIC_MODE_ENTRY`: Diagnostic mode entry sequence sent.
+37. `DIAGNOSTIC_MODE_DISPLAYING_INFO`: Observing version/ID display.
+38. `DIAGNOSTIC_MODE_KEYPAD_TEST_ACTIVE`: Keypad test active within Diagnostics.
+
+**Sleep Mode (If applicable to automation):**
+39. `DEVICE_IN_SLEEP_MODE`: Device detected/assumed in low-power sleep.
+40. `AWAKENING_FROM_SLEEP`: Wake-up stimulus sent/detected.
+
+**II. INITIAL STATE (Automation Perspective):**
+*   `DEVICE_OFF`
+
+**III. STATE DEFINITIONS & TRANSITIONS (Automation Perspective):**
 
 ---
-**State: `OFF`**
-*   **Description:** Device is powered down. No activity.
-*   **Entry Actions:** (N/A if FSM starts here and assumes power off)
-*   **Exit Actions:** None.
-*   **Internal Actions/Events Handled:** None.
+**(Core States: `DEVICE_OFF`, `POWERING_ON`, `VERIFYING_POST`, `DEVICE_IN_STANDBY_MODE`, `LOCKING_DEVICE`, `POWERING_OFF`, `AUTOMATION_ERROR_STATE` - as previously defined, with `VERIFYING_POST` now branching based on detected mode)**
+
+---
+**State: `VERIFYING_POST` (Revised Transitions Out)**
+*   ... (Entry Actions as before) ...
 *   **Transitions Out:**
-    1.  **Event:** `power_applied`
-        *   **Condition(s):** Valid power source detected.
-        *   **Action(s) during transition:** Log "Power applied to device."
-        *   **Next State:** `STARTUP_SELF_TEST`
+    1.  **Event:** `post_sequence_successful_oob_detected`
+        *   **Condition(s):** `is_post_ok == True` AND `at.confirm_led_solid(LEDs['OOB_MODE_PATTERN'] or LEDs['STANDBY_MODE'], ...)` indicates OOB.
+        *   **Next State:** `DEVICE_IN_OOB_MODE`
+    2.  **Event:** `post_sequence_successful_standby_detected`
+        *   **Condition(s):** `is_post_ok == True` AND `at.confirm_led_solid(LEDs['STANDBY_MODE'], ...)` indicates Standby.
+        *   **Next State:** `DEVICE_IN_STANDBY_MODE`
+    3.  **Event:** `post_sequence_successful_ufe_detected`
+        *   **Condition(s):** `is_post_ok == True` AND `at.confirm_led_solid(LEDs['UFE_AWAIT_ADMIN_AUTH_PATTERN'], ...)` indicates UFE mode.
+        *   **Next State:** `UFE_AWAITING_ADMIN_PIN_AUTH`
+    4.  **Event:** `post_sequence_successful_brute_force_tier1_detected`
+        *   **Condition(s):** `is_post_ok == True` AND `at.confirm_led_pattern(LEDs['BRUTE_FORCED_TIER1_PATTERN'], ...)`
+        *   **Next State:** `BRUTE_FORCE_TIER1_LOCKOUT_DETECTED`
+    5.  **Event:** `post_sequence_successful_brute_force_tier2_detected`
+        *   **Condition(s):** `is_post_ok == True` AND `at.confirm_led_pattern(LEDs['BRUTE_FORCED_TIER2_PATTERN'], ...)`
+        *   **Next State:** `BRUTE_FORCE_TIER2_LOCKOUT_DETECTED`
+    6.  **Event:** `post_sequence_failed_or_unknown_state`
+        *   **Condition(s):** `is_post_ok == False` OR no known state pattern detected after POST.
+        *   **Next State:** `AUTOMATION_ERROR_STATE`
 
 ---
-**State: `STARTUP_SELF_TEST`**
-*   **Description:** Device is powering up, running power-on self-tests (POST), checking hardware integrity.
+**State: `DEVICE_IN_OOB_MODE`**
+*   ... (Entry Actions as before) ...
+*   **Transitions Out:**
+    1.  **Event (Automation):** `initiate_oob_admin_pin_enrollment`
+        *   **Next State:** `AWAITING_OOB_ADMIN_PIN_ENROLL_START`
+    2.  **Event (Automation):** `request_diagnostic_mode_from_oob`
+        *   **Action(s):** `at.sequence(config.OOB_DIAGNOSTIC_MODE_KEYS)`
+        *   **Next State:** `AWAITING_DIAGNOSTIC_MODE_ENTRY`
+    3.  **Event (Automation):** `request_user_reset_from_oob`
+        *   **Condition(s):** `not at.is_provision_lock_enabled()` (Hypothetical check, OOB usually allows reset).
+        *   **Next State:** `INITIATING_FACTORY_RESET` (Payload: `source_state='OOB_MODE'`)
+    4.  **Event (Automation):** `request_power_off_from_oob`
+        *   **Next State:** `POWERING_OFF`
+
+---
+**State: `AWAITING_OOB_ADMIN_PIN_ENROLL_START`** & **`OOB_ADMIN_PIN_ENROLLING`**
+*   (As previously defined)
+*   **`OOB_ADMIN_PIN_ENROLLING` Transitions Out:**
+    1.  **Event:** `oob_admin_pin_enroll_successful`
+        *   ...
+        *   **Next State:** `ADMIN_MODE_CONFIGURING` (Device often goes to Admin Mode after initial Admin PIN set) or `DEVICE_IN_STANDBY_MODE`.
+    2.  ... (failure case) ...
+
+---
+**State: `DEVICE_IN_STANDBY_MODE` (Revised Transitions Out)**
+*   ... (Entry Actions as before) ...
+*   **Transitions Out:**
+    1.  **Event (Automation):** `initiate_pin_unlock` (Payload: `pin_sequence`, `pin_type` \['user', 'admin_data', 'self_destruct', 'recovery'\], `expected_unlock_success_pattern`, `target_successful_state`)
+        *   **Next State:** `AWAITING_PIN_INPUT`
+    2.  **Event (Automation):** `initiate_admin_config_mode_entry` (Payload: `admin_pin_sequence`)
+        *   **Next State:** `AWAITING_ADMIN_CONFIG_MODE_ENTRY`
+    3.  **Event (Automation):** `initiate_user_forced_enrollment_start`
+        *   **Action(s):** `at.sequence(config.UFE_START_KEYS_FROM_STANDBY)`
+        *   **Next State:** `AWAITING_UFE_START_CONFIRMATION`
+    4.  **Event (Automation):** `request_diagnostic_mode_from_standby`
+        *   **Action(s):** `at.sequence(config.STANDBY_DIAGNOSTIC_MODE_KEYS)`
+        *   **Next State:** `AWAITING_DIAGNOSTIC_MODE_ENTRY`
+    5.  **Event (Automation):** `request_user_reset_from_standby`
+        *   **Condition(s):** `not at.is_provision_lock_enabled()`.
+        *   **Action(s):** `at.sequence(config.STANDBY_USER_RESET_KEYS)` (if direct key sequence exists, otherwise needs Admin)
+        *   **Next State:** `INITIATING_FACTORY_RESET` (Payload: `source_state='STANDBY_MODE'`)
+    6.  **Event (Automation):** `request_power_off_from_standby`
+        *   **Next State:** `POWERING_OFF`
+    7.  **Event (Automation, if applicable):** `request_sleep_mode`
+        *   **Action(s):** `at.sequence(config.SLEEP_MODE_KEYS)` (if applicable)
+        *   **Next State:** `DEVICE_IN_SLEEP_MODE` (after confirmation)
+
+---
+**State: `AWAITING_PIN_INPUT`**
+*   **Description:** Generic state for automation inputting any PIN.
+*   **Entry Actions (Payload: `pin_sequence`, `pin_type`, `expected_unlock_success_pattern`, `target_successful_state`):**
+    *   `self.current_pin_type = event_data.kwargs['pin_type']`
+    *   `at.sequence(event_data.kwargs['pin_sequence'])`
+    *   `self.proceed_to_unlock_confirmation(expected_pattern=event_data.kwargs['expected_unlock_success_pattern'], target_state=event_data.kwargs['target_successful_state'], attempted_pin_type=self.current_pin_type)`
+*   **Transitions Out:** (Handled by `proceed_to_unlock_confirmation` trigger)
+    1.  **Event (Internal):** `proceed_to_unlock_confirmation` -> `AWAITING_UNLOCK_CONFIRMATION`
+
+---
+**State: `AWAITING_UNLOCK_CONFIRMATION` (Revised Transitions Out)**
+*   ... (Entry Actions as before, checking for success, reject, brute_force patterns) ...
+*   **Transitions Out:**
+    1.  **Event:** `unlock_successful`
+        *   **Next State:** `event_data.kwargs['target_state']` (e.g. `USER_MODE_UNLOCKED`, `ADMIN_MODE_UNLOCKED_DATA`, `SELF_DESTRUCT_SEQUENCE_ACTIVE_WIPING` if `pin_type` was 'self_destruct', `ADMIN_MODE_CONFIGURING` if `pin_type` was 'admin_recovery_from_bricked' and leads to reset then admin config, or `INITIATING_FACTORY_RESET` if recovery implies immediate reset).
+    2.  **Event:** `unlock_pin_rejected`
+        *   **Next State:** `DEVICE_IN_STANDBY_MODE` (or `DEVICE_BRICKED_AWAITING_ADMIN_RECOVERY_PIN` if `pin_type` was 'admin_recovery_from_bricked' and it failed but more attempts allowed).
+    3.  **Event:** `brute_force_tier1_triggered_on_unlock`
+        *   **Next State:** `BRUTE_FORCE_TIER1_LOCKOUT_DETECTED`
+    4.  **Event:** `brute_force_tier2_triggered_on_unlock`
+        *   **Next State:** `BRUTE_FORCE_TIER2_LOCKOUT_DETECTED`
+    5.  **Event:** `unlock_confirmation_timeout_or_unexpected`
+        *   **Next State:** `AUTOMATION_ERROR_STATE`
+
+---
+**State: `USER_MODE_UNLOCKED`**
+*   ... (Entry Actions as before) ...
+*   **Internal Actions/Events Handled (while in this state):**
+    *   **Event (Automation):** `user_change_own_pin` (Payload: `old_pin_keys`, `new_pin_keys`, `new_pin_confirm_keys`)
+        *   **Action(s):** `at.sequence(config.USER_CHANGE_PIN_START_KEYS)` -> `at.sequence(old_pin_keys)` -> ...
+        *   Observe `LEDs['ACCEPT_PATTERN']` or `LEDs['REJECT_PATTERN']`. (Stays in `USER_MODE_UNLOCKED` or temporary sub-state).
+    *   **Event (Automation):** `user_enroll_self_destruct_pin` (Payload: `user_pin_keys_for_auth`, `new_sd_pin_keys`, `new_sd_pin_confirm_keys`)
+        *   **Action(s):** `at.sequence(config.USER_ENROLL_SD_PIN_START_KEYS)` -> `at.sequence(user_pin_keys_for_auth)` -> ...
+        *   Observe feedback. (Stays in `USER_MODE_UNLOCKED` or temporary sub-state).
+*   **Transitions Out:** (As before: Lock, Power Off, Autolock)
+
+---
+**State: `ADMIN_MODE_UNLOCKED_DATA`**
+*   (Similar to `USER_MODE_UNLOCKED`, but fewer internal actions typically. Transitions: Lock, Power Off)
+
+---
+**State: `SELF_DESTRUCT_MODE_UNLOCKED_DATA`**
+*   **Description:** Self-Destruct PIN was accepted, and device *might* briefly allow data access before or during wipe. (This depends heavily on device behavior).
 *   **Entry Actions:**
-    *   Execute POST sequence (e.g., LED sequence Red->Green->Blue).
-*   **Exit Actions:** None.
-*   **Internal Actions/Events Handled:** None.
+    *   Log "Self-Destruct PIN accepted. Checking for temporary data access."
+    *   `at.confirm_led_pattern(LEDs['ENUM_SELF_DESTRUCT'] or LEDs['SELF_DESTRUCT_WIPE_ACTIVE_PATTERN'])`
+    *   Try `at.confirm_enum(timeout=5)` (If it enumerates, data *might* be accessible).
 *   **Transitions Out:**
-    1.  **Event:** `post_successful_oob_mode_detected`
-        *   **Condition(s):** POST completed without errors AND hardware/firmware indicates "Out-of-Box" status.
-        *   **Action(s) during transition:** Log "POST successful. Device is in OOB state."
-        *   **Next State:** `OOB_MODE`
-    2.  **Event:** `post_successful_standby_mode_detected`
-        *   **Condition(s):** POST completed without errors AND hardware/firmware indicates "Standby" status.
-        *   **Action(s) during transition:** Log "POST successful. Device is configured."
-        *   **Next State:** `STANDBY_MODE`
-    3.  **Event:** `post_successful_user_forced_enrollment_mode_detected`
-        *   **Condition(s):** POST completed without errors AND hardware/firmware indicates "User-Forced Enrollment" status.
-        *   **Action(s) during transition:** Log "POST successful. Device is in User-Forced Enrollment state."
-        *   **Next State:** `USER_FORCED_ENROLLMENT`
-    4.  **Event:** `post_successful_brute_force_tier1_detected`
-        *   **Condition(s):** POST completed without errors AND hardware/firmware indicates "Brute Forced" status.
-        *   **Action(s) during transition:** Log "POST successful. Device is in Brute Forced (Tier1) state."
-        *   **Next State:** `BRUTE_FORCE_TIER1_LOCKOUT`
-    5.  **Event:** `post_successful_brute_force_tier2_detected`
-        *   **Condition(s):** POST completed without errors AND hardware/firmware indicates "Brute Forced" status.
-        *   **Action(s) during transition:** Log "POST successful. Device is in Brute Forced (Tier2) state."
-        *   **Next State:** `BRUTE_FORCE_TIER2_LOCKOUT`
-    6.  **Event:** `post_unsuccessful_error_mode_detected`
-        *   **Condition(s):** POST completed with errors AND hardware/firmware indicates "Error" status number (e.g., red LED blink count indicate error number, blue LED indicates end of error).
-        *   **Action(s) during transition:** Log "POST unsuccessful. Device is in Error state."
-        *   **Next State:** `ERROR_MODE`
+    1.  **Event:** `self_destruct_wipe_process_dominant`
+        *   **Action(s):** LED pattern changes to clear wiping indication.
+        *   **Next State:** `SELF_DESTRUCT_SEQUENCE_ACTIVE_WIPING`
 
 ---
-**State: `OOB_MODE`**
-*   **Description:** Out-of-Box Experience. Device requires initial Admin PIN enrollment. No data access.
-*   **Entry Actions:**
-    *   Set OOB-specific LED pattern (e.g., Solid Red, or specific blinking pattern indicating "needs setup").
-    *   Log "Device in OOB_MODE. Awaiting initial Admin PIN enrollment."
-*   **Exit Actions:** Clear OOB LED pattern.
-*   **Internal Actions/Events Handled:** None.
-*   **Transitions Out:**
-    1.  **Event:** `admin_pin_enroll_procedure_initiated` (e.g., specific button press combo held for X seconds)
-        *   **Condition(s):** Correct hardware interaction to start PIN enrollment.
-        *   **Action(s) during transition:** Update LED to indicate "Admin PIN enrollment active". Log event.
-        *   **Next State:** `ADMIN_MODE_CONFIGURING` (with context: `is_initial_admin_enrollment=True`)
-    2.  **Event:** `request_enter_diagnostic_mode`
-        *   **Condition(s):** Correct key sequence for diagnostics from OOB is entered.
-        *   **Action(s) during transition:** Log "Attempting to enter Diagnostic Mode from OOB."
-        *   **Next State:** `DIAGNOSTIC_MODE_ACTIVE`
-    3.  **Event:** `request_power_off`
-        *   **Condition(s):** Power button held.
-        *   **Action(s) during transition:** Log "Powering off from OOB_MODE."
-        *   **Next State:** `OFF` (via a `SHUTTING_DOWN` transient state if needed)
+**State: `AWAITING_ADMIN_CONFIG_MODE_ENTRY`** & **`ADMIN_MODE_CONFIGURING`**
+*   (As previously defined)
 
 ---
-**State: `STANDBY`**
-*   **Description:** Device is configured, idle, and locked. Awaiting a valid PIN sequence for Admin, User, Recovery, or Self-Destruct. Default state after successful boot for a configured device or after locking.
-*   **Entry Actions:**
-    *   Set Standby LED pattern (e.g., Solid Red, or a "breathing" red).
-    *   Reset internal PIN attempt counters for this standby session.
-    *   Log "Device in STANDBY. Awaiting PIN."
-*   **Exit Actions:** Clear Standby LED pattern.
-*   **Internal Actions/Events Handled:** None.
-*   **Transitions Out:**
-    1.  **Event:** `pin_input_sequence_started` (e.g., first key pressed that's part of a PIN sequence)
-        *   **Condition(s):** None.
-        *   **Action(s) during transition:** Update LED to indicate "PIN entry in progress" (e.g., flicker per key press). Log event.
-        *   **Next State:** `AWAITING_PIN_ENTRY`
-    2.  **Event:** `request_enter_sleep_mode`
-        *   **Condition(s):** No PIN entry in progress AND (e.g., inactivity timer expires OR specific "sleep" button press).
-        *   **Action(s) during transition:** Log "Entering Sleep Mode from Standby."
-        *   **Next State:** `SLEEP_MODE`
-    3.  **Event:** `request_user_forced_enrollment_procedure`
-        *   **Condition(s):** User Forced Enrollment feature is enabled in device config AND correct hardware interaction occurs.
-        *   **Action(s) during transition:** Log "User Forced Enrollment procedure initiated from Standby." Update LED.
-        *   **Next State:** `USER_FORCED_ENROLLMENT_AWAIT_ADMIN_AUTH`
-    4.  **Event:** `request_enter_diagnostic_mode`
-        *   **Condition(s):** Correct key sequence for diagnostics is entered.
-        *   **Action(s) during transition:** Log "Attempting to enter Diagnostic Mode from Standby."
-        *   **Next State:** `DIAGNOSTIC_MODE_ACTIVE`
-    5.  **Event:** `request_power_off`
-        *   **Condition(s):** Power button held.
-        *   **Action(s) during transition:** Log "Powering off from STANDBY."
-        *   **Next State:** `OFF`
+**State: `ADMIN_MODE_CONFIGURING` (Revised Transitions Out for Admin Actions)**
+*   ... (Entry Actions as before) ...
+*   **Transitions Out (Examples for `#DEF_ADMIN_MODE_CONTENTS`):**
+    1.  **Event (Automation):** `admin_select_enroll_user_pin`
+        *   **Action(s):** `at.sequence(config.ADMIN_NAV_TO_ENROLL_USER_PIN_KEYS)`
+        *   **Next State:** `ADMIN_MODE_AWAITING_PIN_FOR_CHANGE_OR_ENROLL` (Payload: `pin_type_to_enroll='user'`)
+    2.  **Event (Automation):** `admin_select_change_admin_pin`
+        *   **Action(s):** `at.sequence(config.ADMIN_NAV_TO_CHANGE_ADMIN_PIN_KEYS)`
+        *   **Next State:** `ADMIN_MODE_AWAITING_PIN_FOR_CHANGE_OR_ENROLL` (Payload: `pin_type_to_enroll='admin_new'`)
+    3.  **Event (Automation):** `admin_select_enroll_self_destruct_pin`
+        *   **Action(s):** `at.sequence(config.ADMIN_NAV_TO_ENROLL_SD_PIN_KEYS)`
+        *   **Next State:** `ADMIN_MODE_AWAITING_PIN_FOR_CHANGE_OR_ENROLL` (Payload: `pin_type_to_enroll='self_destruct'`)
+    4.  **Event (Automation):** `admin_select_enroll_recovery_pin` (Assuming 4 recovery PINs might mean selecting which one or a general enroll)
+        *   **Action(s):** `at.sequence(config.ADMIN_NAV_TO_ENROLL_RECOVERY_PIN_KEYS)`
+        *   **Next State:** `ADMIN_MODE_AWAITING_PIN_FOR_CHANGE_OR_ENROLL` (Payload: `pin_type_to_enroll='recovery'`)
+    5.  **Event (Automation):** `admin_select_set_brute_force_counter`
+        *   **Action(s):** `at.sequence(config.ADMIN_NAV_TO_SET_BF_COUNTER_KEYS)`
+        *   **Next State:** `ADMIN_MODE_AWAITING_COUNTER_VALUE_INPUT` (Payload: `counter_type='brute_force'`)
+    6.  **Event (Automation):** `admin_select_set_min_pin_length`
+        *   **Action(s):** `at.sequence(config.ADMIN_NAV_TO_SET_MIN_PIN_KEYS)`
+        *   **Next State:** `ADMIN_MODE_AWAITING_COUNTER_VALUE_INPUT` (Payload: `counter_type='min_pin_length'`)
+    7.  **Event (Automation):** `admin_select_toggle_feature` (Payload: `feature_name`, `keys_to_navigate_to_feature`, `keys_to_toggle_feature`)
+        *   **Action(s):** `at.sequence(payload['keys_to_navigate_to_feature'])`
+        *   **Next State:** `ADMIN_MODE_TOGGLING_FEATURE` (Payload: `feature_name`, `keys_to_toggle_feature`)
+    8.  **Event (Automation):** `admin_select_user_reset`
+        *   **Condition(s):** `not at.is_provision_lock_enabled()`.
+        *   **Action(s):** `at.sequence(config.ADMIN_NAV_TO_USER_RESET_KEYS)` -> `at.sequence(config.CONFIRM_ACTION_KEY)`
+        *   **Next State:** `ADMIN_MODE_INITIATING_USER_RESET`
+    9.  **Event (Automation):** `exit_admin_mode`
+        *   **Action(s):** `at.sequence(config.ADMIN_EXIT_KEYS)`
+        *   **Next State:** `LOCKING_DEVICE` (typically locks when exiting admin)
+    10. **Event (Automation):** `request_power_off_from_admin_config`
+        *   **Next State:** `POWERING_OFF`
 
 ---
-**State: `AWAITING_PIN_ENTRY`**
-*   **Description:** Device has received initial input indicating a PIN sequence is being entered. Actively waiting for subsequent digits and the confirmation/enter key.
-*   **Entry Actions:**
-    *   Start PIN entry timeout timer.
-    *   LED feedback for active PIN entry (e.g., blinking green per digit, or specific color).
-    *   Log "Awaiting full PIN sequence."
-*   **Exit Actions:**
-    *   Stop PIN entry timeout timer.
-    *   Clear active PIN entry LED feedback.
-*   **Internal Actions/Events Handled:**
-    *   `digit_entered(digit)`: Append to buffer, update LED feedback. Reset timeout slightly.
-    *   `clear_pin_entry_button_pressed`: Clear PIN buffer, reset LED. (Stays in `AWAITING_PIN_ENTRY`)
-*   **Transitions Out:**
-    1.  **Event:** `pin_sequence_submitted` (Payload: `buffered_pin_digits`)
-        *   **Condition(s):** `is_pin_valid(buffered_pin_digits, type='admin')`
-        *   **Action(s) during transition:** Log "Admin PIN correct." Reset brute force counter for this PIN type if applicable.
-        *   **Next State:** `ADMIN_MODE_UNLOCKED_DATA_ACCESS` (or `ADMIN_MODE_CONFIGURING` if they are distinct entry points post-login)
-    2.  **Event:** `pin_sequence_submitted` (Payload: `buffered_pin_digits`)
-        *   **Condition(s):** `is_pin_valid(buffered_pin_digits, type='user')`
-        *   **Action(s) during transition:** Log "User PIN correct." Reset brute force counter for this PIN type.
-        *   **Next State:** `USER_MODE_UNLOCKED_DATA_ACCESS`
-    3.  **Event:** `pin_sequence_submitted` (Payload: `buffered_pin_digits`)
-        *   **Condition(s):** `is_pin_valid(buffered_pin_digits, type='recovery')` AND `is_provision_lock_active()` AND current state implies recovery is possible (e.g. from `BRICKED_AWAITING_ADMIN_RECOVERY_PIN` or a specific admin function).
-        *   **Action(s) during transition:** Log "Recovery PIN correct."
-        *   **Next State:** `ADMIN_MODE_CONFIGURING` (with context `recovery_mode_active=True`)
-    4.  **Event:** `pin_sequence_submitted` (Payload: `buffered_pin_digits`)
-        *   **Condition(s):** `is_pin_valid(buffered_pin_digits, type='self_destruct')`
-        *   **Action(s) during transition:** Log "Self-Destruct PIN validated."
-        *   **Next State:** `SELF_DESTRUCT_SEQUENCE_ACTIVE`
-    5.  **Event:** `pin_sequence_submitted` (Payload: `buffered_pin_digits`, `pin_type_attempted`)
-        *   **Condition(s):** `NOT is_pin_valid(buffered_pin_digits, type=pin_type_attempted)` AND `get_brute_force_attempts(pin_type_attempted) >= MAX_ATTEMPTS_TIER1` AND `get_brute_force_attempts(pin_type_attempted) < MAX_ATTEMPTS_TIER2`
-        *   **Action(s) during transition:** Log "Invalid PIN. Max attempts for Tier 1 reached." Increment global brute force counter. Update LED to Tier 1 lockout pattern.
-        *   **Next State:** `BRUTE_FORCE_TIER1_LOCKOUT`
-    6.  **Event:** `pin_sequence_submitted` (Payload: `buffered_pin_digits`, `pin_type_attempted`)
-        *   **Condition(s):** `NOT is_pin_valid(buffered_pin_digits, type=pin_type_attempted)` AND `get_brute_force_attempts(pin_type_attempted) >= MAX_ATTEMPTS_TIER2`
-        *   **Action(s) during transition:** Log "Invalid PIN. Max attempts for Tier 2 reached." Increment global brute force counter. Update LED to Tier 2 lockout pattern.
-        *   **Next State:** `BRUTE_FORCE_TIER2_LOCKOUT` (This might then immediately check provision lock for next step)
-    7.  **Event:** `pin_sequence_submitted` (Payload: `buffered_pin_digits`, `pin_type_attempted`)
-        *   **Condition(s):** `NOT is_pin_valid(buffered_pin_digits, type=pin_type_attempted)` AND `get_brute_force_attempts(pin_type_attempted) < MAX_ATTEMPTS_TIER1`
-        *   **Action(s) during transition:** Log "Invalid PIN. Attempts remaining..." Increment brute force counter for `pin_type_attempted`. Provide brief error LED (e.g., quick red flash).
-        *   **Next State:** `STANDBY` (Returns to standby to allow re-attempt or different action)
-    8.  **Event:** `pin_entry_timeout_expired`
-        *   **Condition(s):** No valid PIN submitted within the timeout.
-        *   **Action(s) during transition:** Log "PIN entry timed out."
-        *   **Next State:** `STANDBY`
-    9.  **Event:** `cancel_pin_entry_requested` (e.g. "Cancel" button pressed during PIN entry)
-        *   **Condition(s):** None.
-        *   **Action(s) during transition:** Log "PIN entry cancelled by user."
-        *   **Next State:** `STANDBY`
+**State: `ADMIN_MODE_NAVIGATING_MENU`**
+*   **Description:** Intermediate state if admin menus are complex and require multiple key presses to reach an option. (Often too granular, can be part of action trigger).
+*   **Entry Actions:** `at.sequence(event_data.kwargs['navigation_keys'])` -> `confirm_led_or_timeout()`
+*   **Transitions Out:** To next navigation step or target action state.
 
 ---
-**State: `ADMIN_MODE_CONFIGURING`**
-*   **Description:** Admin is authenticated. Device is in a mode specifically for configuration changes (enrolling/deleting PINs, setting device feature toggles, initiating factory reset if allowed). Data partition may or may not be accessible depending on device design; assume NOT accessible for this specific config state unless explicitly transitioned to data access.
-*   **Entry Actions:**
-    *   Set Admin Configuration LED pattern (e.g., Blinking Green, or cycling colors).
-    *   If `is_initial_admin_enrollment == True` (context from OOB):
-        *   Guide Admin through initial PIN enrollment process (specific LED prompts, waiting for Phidget sequence).
-        *   Log "Initial Admin PIN enrollment process started."
-    *   Else (regular admin login to config mode):
-        *   Log "Admin entered Configuration Mode."
-    *   Load current device configuration settings for modification.
-*   **Exit Actions:**
-    *   Clear Admin Configuration LED pattern.
-    *   If `is_initial_admin_enrollment == True` and PIN successfully set, save new Admin PIN checksum.
-    *   Unset `is_initial_admin_enrollment` context.
-    *   If any config changes were made and not yet committed, prompt/warn or auto-commit.
-*   **Internal Actions/Events Handled (These are commands, not state changes):**
-    *   `select_menu_item(item_name)`: e.g., "Enroll User PIN", "Toggle Features", "Change Admin PIN".
-    *   `process_enroll_user_pin_sequence(phidget_keys)`
-    *   `process_change_admin_pin_sequence(old_pin_keys, new_pin_keys)`
-    *   `process_toggle_feature(feature_id, new_state)` (e.g. LED_FLICKER, READ_ONLY_DEFAULT)
-    *   `process_set_brute_force_counter(value)`
-    *   `process_set_min_pin_length(value)`
-    *   (Each of these internal actions would have its own LED feedback and logic using `at` controller)
+**State: `ADMIN_MODE_AWAITING_PIN_FOR_CHANGE_OR_ENROLL`**
+*   **Description:** Admin action selected, device is prompting for a new PIN to be entered.
+*   **Entry Actions (Payload: `pin_type_to_enroll`):**
+    *   `self.current_pin_enroll_type = event_data.kwargs['pin_type_to_enroll']`
+    *   `at.await_led_state(LEDs['ADMIN_NEW_PIN_ENTRY_PROMPT'], timeout=5)`
+    *   Log "Ready to enter new PIN for {self.current_pin_enroll_type}."
 *   **Transitions Out:**
-    1.  **Event:** `admin_config_exit_requested` (e.g., "Exit" menu option selected, or specific button press)
-        *   **Condition(s):** If `is_initial_admin_enrollment == True`, then `new_admin_pin_successfully_enrolled == True`. (Cannot exit initial enrollment without setting a PIN).
-        *   **Action(s) during transition:** Commit any pending configuration changes. Log "Exiting Admin Configuration Mode."
-        *   **Next State:** `STANDBY`
-    2.  **Event:** `request_admin_data_access` (e.g., "Access Drive" menu option)
-        *   **Condition(s):** If `is_initial_admin_enrollment == True`, then `new_admin_pin_successfully_enrolled == True`.
-        *   **Action(s) during transition:** Log "Admin requesting data access from config mode."
-        *   **Next State:** `ADMIN_MODE_UNLOCKED_DATA_ACCESS`
-    3.  **Event:** `initiate_factory_reset_from_admin_config` (e.g., "Factory Reset" menu option selected and confirmed)
-        *   **Condition(s):** `NOT is_provision_lock_active()` (Device prevents reset if provision locked).
-        *   **Action(s) during transition:** Log "Factory reset initiated by Admin from Configuration Mode."
-        *   **Next State:** `FACTORY_RESETTING_IN_PROGRESS`
-    4.  **Event:** `admin_session_timeout_expired`
-        *   **Condition(s):** Admin inactivity timer in config mode expires.
-        *   **Action(s) during transition:** Log "Admin configuration session timed out. Locking."
-        *   **Next State:** `STANDBY`
-    5.  **Event:** `request_power_off`
-        *   **Next State:** `OFF`
+    1.  **Event (Automation):** `submit_new_pin_for_enrollment` (Payload: `new_pin_keys`, `new_pin_confirm_keys`)
+        *   **Next State:** `ADMIN_MODE_ENTERING_NEW_PIN`
 
 ---
-**State: `ADMIN_MODE_UNLOCKED_DATA_ACCESS`**
-*   **Description:** Admin is authenticated, and the data partition is accessible according to current device settings (R/W or R/O if toggled).
-*   **Entry Actions:**
-    *   Set Admin Data Access LED pattern (e.g., Solid Green for R/W, Solid Yellow for R/O session).
-    *   Mount data partition (if not already mounted from a previous state like config).
-    *   Log "Admin Unlocked for Data Access." If R/O, log that too.
-*   **Exit Actions:**
-    *   Unmount data partition (important for security before locking).
-    *   Clear Admin Data Access LED pattern.
-*   **Internal Actions/Events Handled:**
-    *   `file_system_activity_detected`: (Handled by OS, FSM might just be aware).
-    *   `request_toggle_current_session_to_read_only` (if not already R/O): Updates LED, sets internal flag.
-    *   `request_toggle_current_session_to_read_write` (if in R/O session and allowed): Updates LED, sets internal flag.
+**State: `ADMIN_MODE_ENTERING_NEW_PIN`**
+*   **Description:** Automation is inputting the first instance of the new PIN.
+*   **Entry Actions (Payload: `new_pin_keys`, `new_pin_confirm_keys`):**
+    *   `at.sequence(event_data.kwargs['new_pin_keys'])`
+    *   `at.await_led_state(LEDs['ADMIN_NEW_PIN_CONFIRM_PROMPT'], timeout=5)`
 *   **Transitions Out:**
-    1.  **Event:** `lock_device_requested` (e.g., "Lock" button, USB eject, inactivity timeout different from config timeout)
-        *   **Condition(s):** None.
-        *   **Action(s) during transition:** Log "Locking device from Admin Data Access."
-        *   **Next State:** `STANDBY`
-    2.  **Event:** `request_enter_admin_configuration_mode` (e.g., specific key combo or menu if available while drive mounted)
-        *   **Condition(s):** None.
-        *   **Action(s) during transition:** Log "Admin switching to Configuration Mode from Data Access." (May unmount drive).
+    1.  **Event:** `new_pin_entry_accepted_await_confirmation`
+        *   **Next State:** `ADMIN_MODE_AWAITING_NEW_PIN_CONFIRMATION` (Payload: `new_pin_confirm_keys` from previous state)
+    2.  **Event:** `new_pin_entry_rejected_or_timeout` (e.g. too short, invalid char)
+        *   **Next State:** `ADMIN_MODE_CONFIGURING` (or retry `ADMIN_MODE_AWAITING_PIN_FOR_CHANGE_OR_ENROLL`)
+
+---
+**State: `ADMIN_MODE_AWAITING_NEW_PIN_CONFIRMATION`**
+*   **Description:** Automation is inputting the PIN a second time for confirmation.
+*   **Entry Actions (Payload: `new_pin_confirm_keys`):**
+    *   `at.sequence(event_data.kwargs['new_pin_confirm_keys'])`
+    *   `is_accepted = at.await_led_state(LEDs['ACCEPT_PATTERN'], timeout=5)`
+    *   `is_rejected = False`
+    *   If not `is_accepted`: `is_rejected = at.confirm_led_pattern(LEDs['REJECT_PATTERN'], clear_buffer=False)`
+*   **Transitions Out:**
+    1.  **Event:** `new_pin_enroll_action_successful`
+        *   **Condition(s):** `is_accepted == True`.
         *   **Next State:** `ADMIN_MODE_CONFIGURING`
-    3.  **Event:** `request_enter_sleep_mode`
-        *   **Condition(s):** None.
-        *   **Action(s) during transition:** Log "Entering Sleep Mode from Admin Data Access."
-        *   **Next State:** `SLEEP_MODE`
-    4.  **Event:** `request_power_off`
-        *   **Next State:** `OFF`
+    2.  **Event:** `new_pin_enroll_action_failed_mismatch_or_rejected`
+        *   **Condition(s):** `is_rejected == True` or timeout.
+        *   **Next State:** `ADMIN_MODE_CONFIGURING` (Log failure, user might need to retry action)
 
 ---
-**State: `USER_MODE_UNLOCKED_DATA_ACCESS`**
-*   **Description:** User is authenticated, data partition accessible as per their permissions and device R/O settings.
+**State: `ADMIN_MODE_AWAITING_COUNTER_VALUE_INPUT`**
+*   **Description:** Admin action selected, device is prompting for numeric counter input.
+*   **Entry Actions (Payload: `counter_type`):**
+    *   `self.current_counter_type = event_data.kwargs['counter_type']`
+    *   `at.await_led_state(LEDs['ADMIN_COUNTER_ENTRY_PROMPT'], timeout=5)`
+    *   Log "Ready to enter value for counter: {self.current_counter_type}."
+*   **Transitions Out:**
+    1.  **Event (Automation):** `submit_counter_value` (Payload: `counter_value_keys`)
+        *   **Next State:** `ADMIN_MODE_ENTERING_COUNTER_VALUE`
+
+---
+**State: `ADMIN_MODE_ENTERING_COUNTER_VALUE`**
+*   **Description:** Automation is inputting digits for the counter.
+*   **Entry Actions (Payload: `counter_value_keys`):**
+    *   `at.sequence(event_data.kwargs['counter_value_keys'])`
+    *   `at.press(config.CONFIRM_ACTION_KEY)` (or specific key to finalize counter input)
+    *   `is_accepted = at.await_led_state(LEDs['ACCEPT_PATTERN'], timeout=5)`
+*   **Transitions Out:**
+    1.  **Event:** `counter_set_action_successful`
+        *   **Condition(s):** `is_accepted == True`.
+        *   **Next State:** `ADMIN_MODE_CONFIGURING`
+    2.  **Event:** `counter_set_action_failed`
+        *   **Next State:** `ADMIN_MODE_CONFIGURING` (Log failure)
+
+---
+**State: `ADMIN_MODE_TOGGLING_FEATURE`**
+*   **Description:** Automation is sending sequence to toggle a feature and confirming.
+*   **Entry Actions (Payload: `feature_name`, `keys_to_toggle_feature`):**
+    *   `at.sequence(event_data.kwargs['keys_to_toggle_feature'])`
+    *   `is_accepted = at.await_led_state(LEDs['ACCEPT_PATTERN'] or LEDs['ADMIN_MODE'], timeout=5)` (Feedback can vary)
+*   **Transitions Out:**
+    1.  **Event:** `feature_toggle_successful`
+        *   **Condition(s):** `is_accepted == True`.
+        *   **Next State:** `ADMIN_MODE_CONFIGURING`
+    2.  **Event:** `feature_toggle_failed`
+        *   **Next State:** `ADMIN_MODE_CONFIGURING` (Log failure)
+
+---
+**State: `ADMIN_MODE_INITIATING_USER_RESET`**
+*   **Description:** User Reset (Factory Default) command confirmed from Admin Mode.
 *   **Entry Actions:**
-    *   Set User Data Access LED pattern (e.g., Solid Blue for R/W, Solid Cyan for R/O session).
-    *   Mount data partition.
-    *   Log "User Unlocked for Data Access." If R/O, log that too.
-*   **Exit Actions:**
-    *   Unmount data partition.
-    *   Clear User Data Access LED pattern.
+    *   Log "User Reset from Admin Mode confirmed by automation."
+    *   Device should show specific feedback then proceed to reset.
+*   **Transitions Out:**
+    1.  **Event:** `user_reset_process_started_from_admin`
+        *   **Action(s):** `at.confirm_led_pattern(LEDs['FACTORY_RESET_CONFIRMATION_FROM_ADMIN_PATTERN'])`
+        *   **Next State:** `FACTORY_RESET_IN_PROGRESS`
+
+---
+**State: `AWAITING_UFE_START_CONFIRMATION`**
+*   **Description:** UFE hardware sequence sent from Standby, awaiting UFE mode LED confirmation.
+*   **Entry Actions:**
+    *   `is_ufe_mode_ok = at.await_led_state(LEDs['UFE_AWAIT_ADMIN_AUTH_PATTERN'], timeout=5)`
+*   **Transitions Out:**
+    1.  **Event:** `ufe_start_successful_await_admin_auth`
+        *   **Condition(s):** `is_ufe_mode_ok == True`.
+        *   **Next State:** `UFE_AWAITING_ADMIN_PIN_AUTH`
+    2.  **Event:** `ufe_start_failed_to_confirm`
+        *   **Next State:** `DEVICE_IN_STANDBY_MODE` (Log warning)
+
+---
+**State: `UFE_AWAITING_ADMIN_PIN_AUTH`**
+*   **Description:** UFE mode active, awaiting Admin PIN to authorize.
+*   **Entry Actions:** Log "UFE: Awaiting Admin PIN."
+*   **Transitions Out:**
+    1.  **Event (Automation):** `submit_admin_pin_for_ufe` (Payload: `admin_pin_sequence`)
+        *   `at.sequence(payload['admin_pin_sequence'])`
+        *   `is_admin_auth_ok = at.await_led_state(LEDs['UFE_AWAIT_NEW_USER_PIN_PATTERN'], timeout=10)` (Or `ACCEPT_PATTERN` then this)
+        *   If `is_admin_auth_ok`: `self.ufe_admin_auth_successful()`
+        *   Else (check for `REJECT_PATTERN`): `self.ufe_admin_auth_failed()`
+    2.  **Event (Internal):** `ufe_admin_auth_successful`
+        *   **Next State:** `UFE_AWAITING_NEW_USER_PIN_ENROLL`
+    3.  **Event (Internal):** `ufe_admin_auth_failed`
+        *   **Next State:** `DEVICE_IN_STANDBY_MODE` (Log failure)
+    4.  **Event (Timeout/Cancel):** `ufe_admin_auth_timeout_or_cancel`
+        *   **Next State:** `DEVICE_IN_STANDBY_MODE`
+
+---
+**State: `UFE_AWAITING_NEW_USER_PIN_ENROLL`**
+*   **Description:** UFE Admin Auth OK, device prompting for new User PIN.
+*   **Entry Actions:** Log "UFE: Awaiting new User PIN."
+*   **Transitions Out:**
+    1.  **Event (Automation):** `submit_new_user_pin_for_ufe` (Payload: `new_user_pin_keys`, `new_user_pin_confirm_keys`)
+        *   (Similar logic to `ADMIN_MODE_ENTERING_NEW_PIN` & `ADMIN_MODE_AWAITING_NEW_PIN_CONFIRMATION` but for UFE context)
+        *   If success: `self.ufe_new_user_pin_enroll_successful()`
+        *   Else: `self.ufe_new_user_pin_enroll_failed()`
+    2.  **Event (Internal):** `ufe_new_user_pin_enroll_successful`
+        *   **Action(s):** Device should return to Standby.
+        *   **Next State:** `DEVICE_IN_STANDBY_MODE`
+    3.  **Event (Internal):** `ufe_new_user_pin_enroll_failed`
+        *   **Next State:** `UFE_AWAITING_NEW_USER_PIN_ENROLL` (For retry, or `DEVICE_IN_STANDBY_MODE` after max retries)
+
+---
+**State: `BRUTE_FORCE_TIER1_LOCKOUT_DETECTED`**
+*   **Description:** Device showing Tier 1 Brute Force lockout LEDs. Automation must wait or power cycle.
+*   **Entry Actions:**
+    *   `at.confirm_led_pattern(LEDs['BRUTE_FORCED_TIER1_PATTERN'])`
+    *   Log "Brute Force Tier 1 Lockout detected. Waiting for lockout period or power cycle."
+    *   Start Tier 1 lockout timer (e.g., 1-2 minutes).
+*   **Transitions Out:**
+    1.  **Event (Timer Expires):** `tier1_lockout_period_expired`
+        *   **Action(s):** `at.await_led_state(LEDs['STANDBY_MODE'], timeout=5)` (Device should revert to Standby)
+        *   **Next State:** `DEVICE_IN_STANDBY_MODE` (or `AUTOMATION_ERROR_STATE` if not)
+    2.  **Event (Automation):** `force_power_cycle_during_tier1_lockout`
+        *   **Next State:** `POWERING_OFF` (Then `POWERING_ON` -> `VERIFYING_POST`. BF counter might persist or reset depending on device).
+    3.  **Event (Device):** `last_try_login_attempted_in_tier1` (If applicable, from `DEF_BRUTE_FORCE_1_TRIGGER_DETAILS`)
+        *   (Leads to `AWAITING_PIN_INPUT` with special context, then `AWAITING_UNLOCK_CONFIRMATION`)
+        *   If this last try fails: It could trigger `USER_RESET (FACTORY_DEFAULT)` or transition to `BRUTE_FORCE_TIER2_LOCKOUT_DETECTED`.
+            *   `self.initiate_factory_reset(source_state='BRUTE_FORCE_TIER1_LAST_FAIL_NO_PL')` if `!at.is_provision_lock_enabled()`
+            *   Else (if it escalates to Tier 2): `self.to_BRUTE_FORCE_TIER2_LOCKOUT_DETECTED()`
+
+---
+**State: `BRUTE_FORCE_TIER2_LOCKOUT_DETECTED`**
+*   **Description:** Device showing Tier 2 Brute Force lockout LEDs. Outcome depends on Provision Lock.
+*   **Entry Actions:**
+    *   `at.confirm_led_pattern(LEDs['BRUTE_FORCED_TIER2_PATTERN'])`
+    *   Log "Brute Force Tier 2 Lockout detected."
+    *   `is_pl_enabled = at.is_provision_lock_enabled()`
+*   **Transitions Out:**
+    1.  **Event (Internal):** `tier2_lockout_provision_lock_enabled`
+        *   **Condition(s):** `is_pl_enabled == True`.
+        *   **Next State:** `DEVICE_BRICKED_AWAITING_ADMIN_RECOVERY_PIN`
+    2.  **Event (Internal):** `tier2_lockout_provision_lock_disabled_initiating_reset`
+        *   **Condition(s):** `is_pl_enabled == False`.
+        *   **Next State:** `INITIATING_FACTORY_RESET` (Payload: `source_state='BRUTE_FORCE_TIER2_NO_PL'`)
+
+---
+**State: `DEVICE_BRICKED_AWAITING_ADMIN_RECOVERY_PIN`**
+*   **Description:** Device is bricked (BF Tier 2 + Provision Lock). Only Admin Recovery PIN might save it.
+*   **Entry Actions:**
+    *   `at.confirm_led_solid(LEDs['DEVICE_BRICKED_AWAIT_RECOVERY_PATTERN'], timeout=10)`
+    *   Log "Device bricked. Awaiting Admin Recovery PIN."
+    *   `self.admin_recovery_attempts = 0`
+*   **Transitions Out:**
+    1.  **Event (Automation):** `submit_admin_recovery_pin` (Payload: `recovery_pin_sequence`)
+        *   `self.admin_recovery_attempts += 1`
+        *   `at.sequence(payload['recovery_pin_sequence'])`
+        *   `is_recovery_accepted = at.await_led_state(LEDs['FACTORY_RESET_START_AFTER_RECOVERY_PATTERN'] or LEDs['ACCEPT_PATTERN'], timeout=10)`
+        *   `is_recovery_rejected = False`
+        *   If not `is_recovery_accepted`: `is_recovery_rejected = at.confirm_led_pattern(LEDs['REJECT_PATTERN'], clear_buffer=False)`
+        *   If `is_recovery_accepted`: `self.admin_recovery_successful()`
+        *   Else if `is_recovery_rejected` AND `self.admin_recovery_attempts < MAX_ADMIN_RECOVERY_ATTEMPTS`: `self.admin_recovery_pin_rejected_retry()`
+        *   Else (`is_recovery_rejected` AND attempts exhausted): `self.admin_recovery_failed_permanently_bricked()`
+    2.  **Event (Internal):** `admin_recovery_successful`
+        *   **Next State:** `INITIATING_FACTORY_RESET` (Payload: `source_state='ADMIN_RECOVERY_SUCCESS'`)
+    3.  **Event (Internal):** `admin_recovery_pin_rejected_retry`
+        *   **Next State:** `DEVICE_BRICKED_AWAITING_ADMIN_RECOVERY_PIN` (Stays to allow more attempts)
+    4.  **Event (Internal):** `admin_recovery_failed_permanently_bricked`
+        *   **Next State:** `DEVICE_PERMANENTLY_BRICKED_DETECTED`
+    5.  **Event (Automation):** `request_power_off_from_bricked_state`
+        *   **Next State:** `POWERING_OFF` (Device should remain bricked on next power on)
+
+---
+**State: `DEVICE_PERMANENTLY_BRICKED_DETECTED`**
+*   **Description:** Device LEDs indicate it's unrecoverable.
+*   **Entry Actions:**
+    *   `at.confirm_led_solid(LEDs['PERMANENTLY_BRICKED_PATTERN'], timeout=10)`
+    *   Log "DEVICE PERMANENTLY BRICKED. No further automated actions possible."
+*   **Transitions Out:**
+    1.  **Event (Automation):** `acknowledge_permanent_brick_and_power_off`
+        *   **Next State:** `POWERING_OFF`
+
+---
+**State: `INITIATING_FACTORY_RESET`**
+*   **Description:** Factory Reset command issued (from Admin, Brute Force, Self-Destruct, OOB, Standby), awaiting process start.
+*   **Entry Actions (Payload: `source_state`):**
+    *   Log "Factory Reset initiated from {event_data.kwargs['source_state']}."
+    *   Device should show feedback then start reset. `at.await_led_state(LEDs['FACTORY_RESET_IN_PROGRESS_PATTERN'], timeout=10)`
+*   **Transitions Out:**
+    1.  **Event:** `factory_reset_process_started`
+        *   **Next State:** `FACTORY_RESET_IN_PROGRESS`
+    2.  **Event:** `factory_reset_start_failed`
+        *   **Next State:** `AUTOMATION_ERROR_STATE` (or `DEVICE_PERMANENTLY_BRICKED_DETECTED` if reset is critical)
+
+---
+**State: `FACTORY_RESET_IN_PROGRESS`**
+*   **Description:** Observing Factory Reset LED pattern.
+*   **Entry Actions:**
+    *   `at.confirm_led_pattern(LEDs['FACTORY_RESET_IN_PROGRESS_PATTERN'])`
+    *   Log "Factory Reset in progress. Awaiting completion and OOB mode."
+    *   Start long timer (e.g., 1-2 minutes).
+*   **Transitions Out:**
+    1.  **Event:** `factory_reset_completed_oob_detected`
+        *   **Condition(s):** `at.await_led_state(LEDs['OOB_MODE_PATTERN'] or LEDs['STANDBY_MODE'], timeout=LONG_RESET_TIMEOUT)` indicating reset finished, device likely in OOB.
+        *   **Next State:** `VERIFYING_POST` (as device usually reboots and goes through POST after reset) or directly to `DEVICE_IN_OOB_MODE` if POST is implicitly confirmed by OOB pattern.
+    2.  **Event:** `factory_reset_failed_or_timeout`
+        *   **Next State:** `AUTOMATION_ERROR_STATE` or `DEVICE_PERMANENTLY_BRICKED_DETECTED`.
+
+---
+**State: `SELF_DESTRUCT_SEQUENCE_ACTIVE_WIPING`**
+*   (As previously defined, leading to `FACTORY_RESET_IN_PROGRESS` or `DEVICE_IN_OOB_MODE` or error state)
+
+---
+**State: `AWAITING_DIAGNOSTIC_MODE_ENTRY`**
+*   **Description:** Diagnostic mode entry sequence sent, awaiting confirmation.
+*   **Entry Actions:**
+    *   `is_diag_ok = at.await_led_state(LEDs['DIAGNOSTIC_MODE_VERSION_DISPLAY_PATTERN'], timeout=10)`
+*   **Transitions Out:**
+    1.  **Event:** `diagnostic_mode_entry_successful`
+        *   **Condition(s):** `is_diag_ok == True`.
+        *   **Next State:** `DIAGNOSTIC_MODE_DISPLAYING_INFO`
+    2.  **Event:** `diagnostic_mode_entry_failed`
+        *   **Next State:** (Source state, e.g., `DEVICE_IN_OOB_MODE` or `DEVICE_IN_STANDBY_MODE`, log error)
+
+---
+**State: `DIAGNOSTIC_MODE_DISPLAYING_INFO`**
+*   **Description:** Device is displaying version/ID info. Automation might try to capture this or wait.
+*   **Entry Actions:**
+    *   Log "Diagnostic Mode: Observing version/ID display."
+    *   Wait for a fixed duration or specific LED change indicating end of info display.
+    *   `at.await_led_state(LEDs['DIAGNOSTIC_KEYPAD_TEST_PROMPT_PATTERN'], timeout=20)`
+*   **Transitions Out:**
+    1.  **Event:** `diagnostic_info_display_complete_await_keypad_test`
+        *   **Next State:** `DIAGNOSTIC_MODE_KEYPAD_TEST_ACTIVE`
+    2.  **Event:** `exit_diagnostic_mode_requested_during_info` (If a key press exits)
+        *   **Next State:** (Source state, e.g. `DEVICE_IN_OOB_MODE` or `DEVICE_IN_STANDBY_MODE`)
+    3.  **Event:** `diagnostic_mode_timeout_or_error`
+        *   **Next State:** `AUTOMATION_ERROR_STATE`
+
+---
+**State: `DIAGNOSTIC_MODE_KEYPAD_TEST_ACTIVE`**
+*   **Description:** Keypad test is active within Diagnostics. Automation can press keys and observe feedback.
+*   **Entry Actions:** Log "Diagnostic Mode: Keypad test active."
 *   **Internal Actions/Events Handled:**
-    *   `file_system_activity_detected`.
-    *   `user_request_change_own_pin_sequence(phidget_keys_old_pin, phidget_keys_new_pin)`
-    *   `user_request_enroll_self_destruct_pin_sequence(phidget_keys_sd_pin)`
+    *   **Event (Automation):** `test_diagnostic_keypad_button` (Payload: `key_to_press`, `expected_led_feedback_for_key`)
+        *   `at.press(payload['key_to_press'])`
+        *   `at.confirm_led_pattern(payload['expected_led_feedback_for_key'])` (Log pass/fail for this key)
 *   **Transitions Out:**
-    1.  **Event:** `lock_device_requested`
-        *   **Next State:** `STANDBY`
-    2.  **Event:** `request_enter_sleep_mode`
-        *   **Next State:** `SLEEP_MODE`
-    3.  **Event:** `request_power_off`
-        *   **Next State:** `OFF`
+    1.  **Event (Automation):** `exit_diagnostic_mode_after_keypad_test`
+        *   `at.sequence(config.DIAGNOSTIC_EXIT_KEYS)`
+        *   **Next State:** (Source state, e.g. `DEVICE_IN_OOB_MODE` or `DEVICE_IN_STANDBY_MODE` after confirming exit pattern)
+    2.  **Event (Device Timeout):** `diagnostic_keypad_test_timeout` (If device auto-exits)
+        *   **Next State:** (Source state)
 
 ---
-**State: `READ_ONLY_SESSION_ACTIVE`**
-*   **Description:** This might be better modeled as a boolean flag (`is_current_session_read_only`) within `ADMIN_MODE_UNLOCKED_DATA_ACCESS` and `USER_MODE_UNLOCKED_DATA_ACCESS` rather than a completely separate top-level state, unless the device has very distinct global behavior or LED patterns ONLY for read-only that override the Admin/User LED. If it's a flag, the Entry/Exit/Internal actions of the parent state would check this flag.
-*   **If a separate state:**
-    *   **Entry Actions:** Specific Read-Only LED (e.g., Solid Yellow regardless of Admin/User). Log "Session is now Read-Only."
-    *   **Exit Actions:** Clear Read-Only LED. Log "Session no longer Read-Only."
-    *   **Transitions Out:**
-        1.  **Event:** `toggle_read_write_requested`
-            *   **Condition(s):** User/Admin has permission to switch back.
-            *   **Next State:** (The Admin or User unlocked data access state it came from).
-        2.  `lock_device_requested` -> `STANDBY`
-        3.  `request_enter_sleep_mode` -> `SLEEP_MODE`
-        4.  `request_power_off` -> `OFF`
-
----
-**State: `DIAGNOSTIC_MODE_ACTIVE`**
-*   **Description:** Device is running internal diagnostics. Limited user interaction, specific LED feedback.
-*   **Entry Actions:**
-    *   Set Diagnostic LED pattern (e.g., Rapidly blinking Yellow/Orange).
-    *   Log "Entered Diagnostic Mode."
-    *   Initiate diagnostic routines (e.g., memory check, crypto engine test, storage health).
-*   **Exit Actions:**
-    *   Clear Diagnostic LED pattern.
-    *   Log diagnostic results.
-*   **Internal Actions/Events Handled:**
-    *   `diagnostic_routine_step_complete(step_name, status)`: Update LED or log progress.
-*   **Transitions Out:**
-    1.  **Event:** `diagnostic_routines_completed_pass`
-        *   **Condition(s):** All diagnostic tests passed.
-        *   **Action(s) during transition:** Log "Diagnostics Passed."
-        *   **Next State:** `STANDBY` (or `OOB_MODE` if entered from there and still OOB)
-    2.  **Event:** `diagnostic_routines_completed_fail` (Payload: `error_codes`)
-        *   **Condition(s):** One or more diagnostic tests failed.
-        *   **Action(s) during transition:** Log "Diagnostics Failed. Error codes: {error_codes}."
-        *   **Next State:** `BRICKED_AWAITING_ADMIN_RECOVERY_PIN` (if potentially fixable by admin/reset) or `PERMANENTLY_BRICKED` (if critical failure).
-    3.  **Event:** `exit_diagnostic_mode_requested` (e.g., specific button press)
-        *   **Condition(s):** None.
-        *   **Action(s) during transition:** Abort ongoing diagnostics if stoppable. Log "Diagnostic mode exited by user."
-        *   **Next State:** `STANDBY` (or `OOB_MODE` if entered from there)
-    4.  **Event:** `request_power_off`
-        *   **Next State:** `OFF`
-
----
-**State: `SELF_DESTRUCT_SEQUENCE_ACTIVE`**
-*   **Description:** Self-Destruct PIN has been validated. Device is actively wiping data or has completed wiping.
-*   **Entry Actions:**
-    *   Set Self-Destruct LED pattern (e.g., Rapidly blinking Red, or specific sequence).
-    *   Log "SELF-DESTRUCT SEQUENCE ACTIVATED. Wiping data."
-    *   Initiate irreversible data wipe procedures.
-*   **Exit Actions:**
-    *   Log "Data wipe complete (or process terminated if applicable)." Clear Self-Destruct LED pattern.
-*   **Internal Actions/Events Handled:**
-    *   `data_wipe_progress_update(percentage)`: (If device provides this).
-*   **Transitions Out:**
-    1.  **Event:** `data_wipe_completed`
-        *   **Condition(s):** Wipe procedure finishes successfully.
-        *   **Action(s) during transition:** Log "Self-Destruct data wipe completed. Device will reset to factory defaults."
-        *   **Next State:** `FACTORY_RESETTING_IN_PROGRESS` (which will then lead to `OOB_MODE`)
-    2.  **Event:** `data_wipe_failed_critical`
-        *   **Condition(s):** Wipe procedure encounters an unrecoverable error.
-        *   **Action(s) during transition:** Log "CRITICAL: Self-Destruct data wipe FAILED."
-        *   **Next State:** `PERMANENTLY_BRICKED` (Device should be unusable and indicate severe error).
-    3.  **Event:** `request_power_off` (This might be blocked by firmware during active wipe)
-        *   **Condition(s):** Firmware allows power off during/after wipe initiation.
-        *   **Next State:** `OFF`
-
----
-**State: `USER_FORCED_ENROLLMENT_AWAIT_ADMIN_AUTH`**
-*   **Description:** User Forced Enrollment (UFE) procedure has been initiated from Standby. Device is now waiting for a valid Admin PIN to authorize the enrollment of a new User PIN.
-*   **Entry Actions:**
-    *   Set UFE Admin Auth LED pattern (e.g., Alternating Red/Green, or specific prompt for Admin).
-    *   Log "User Forced Enrollment: Awaiting Admin PIN for authorization."
-    *   Start Admin Auth timeout timer for UFE.
-*   **Exit Actions:**
-    *   Clear UFE Admin Auth LED pattern.
-    *   Stop Admin Auth timeout timer.
-*   **Internal Actions/Events Handled:** (Similar to `AWAITING_PIN_ENTRY` but specifically for Admin PIN in this context)
-    *   `admin_digit_entered_for_ufe_auth(digit)`
-*   **Transitions Out:**
-    1.  **Event:** `admin_pin_submitted_for_ufe_auth` (Payload: `admin_pin_digits`)
-        *   **Condition(s):** `is_pin_valid(admin_pin_digits, type='admin')`
-        *   **Action(s) during transition:** Log "Admin PIN validated for UFE. Proceeding to new User PIN enrollment."
-        *   **Next State:** `USER_FORCED_ENROLLMENT_AWAIT_NEW_USER_PIN`
-    2.  **Event:** `admin_pin_submitted_for_ufe_auth` (Payload: `admin_pin_digits`)
-        *   **Condition(s):** `NOT is_pin_valid(admin_pin_digits, type='admin')`
-        *   **Action(s) during transition:** Log "Invalid Admin PIN for UFE. Returning to Standby." Provide brief error LED. (Brute force for Admin PIN might apply here too).
-        *   **Next State:** `STANDBY`
-    3.  **Event:** `ufe_admin_auth_timeout_expired`
-        *   **Condition(s):** No valid Admin PIN submitted within timeout.
-        *   **Action(s) during transition:** Log "UFE Admin authorization timed out."
-        *   **Next State:** `STANDBY`
-    4.  **Event:** `cancel_ufe_procedure_requested`
-        *   **Next State:** `STANDBY`
-    5.  **Event:** `request_power_off`
-        *   **Next State:** `OFF`
-
----
-**State: `USER_FORCED_ENROLLMENT_AWAIT_NEW_USER_PIN`**
-*   **Description:** Admin has authorized UFE. Device is now waiting for the sequence of Phidget key presses to define the new User PIN.
-*   **Entry Actions:**
-    *   Set UFE New User PIN Entry LED pattern (e.g., Blinking Blue, prompting for new User PIN).
-    *   Log "User Forced Enrollment: Awaiting new User PIN entry."
-    *   Start new User PIN entry timeout timer.
-*   **Exit Actions:**
-    *   Clear UFE New User PIN Entry LED pattern.
-    *   Stop new User PIN entry timeout timer.
-*   **Internal Actions/Events Handled:**
-    *   `new_user_pin_digit_entered(digit)`
-    *   `new_user_pin_confirmation_digit_entered(digit)` (if PIN needs to be entered twice)
-*   **Transitions Out:**
-    1.  **Event:** `new_user_pin_sequence_enrollment_complete` (Payload: `new_user_pin_digits`)
-        *   **Condition(s):** New User PIN meets complexity requirements (length, etc.) AND (if confirmation used) PINs match.
-        *   **Action(s) during transition:** Save new User PIN checksum. Log "New User PIN successfully enrolled via UFE."
-        *   **Next State:** `STANDBY` (Device is now configured with the new User PIN and locked).
-    2.  **Event:** `new_user_pin_sequence_enrollment_failed` (Payload: `reason` e.g., "mismatch", "too_short")
-        *   **Condition(s):** New User PIN fails validation.
-        *   **Action(s) during transition:** Log "New User PIN enrollment failed: {reason}." Provide error LED.
-        *   **Next State:** `USER_FORCED_ENROLLMENT_AWAIT_NEW_USER_PIN` (Allow retry, possibly with limited attempts) OR `STANDBY` (if attempts exhausted or procedure cancelled).
-    3.  **Event:** `ufe_new_user_pin_entry_timeout_expired`
-        *   **Next State:** `STANDBY`
-    4.  **Event:** `cancel_ufe_procedure_requested`
-        *   **Next State:** `STANDBY`
-    5.  **Event:** `request_power_off`
-        *   **Next State:** `OFF`
-
----
-**State: `BRUTE_FORCE_TIER1_LOCKOUT`**
-*   **Description:** Device has entered a temporary lockout due to N successive invalid PIN attempts (for any single PIN type or globally, TBD). Limited functionality.
-*   **Entry Actions:**
-    *   Set Tier 1 Lockout LED pattern (e.g., Slow Pulsing Red).
-    *   Log "BRUTE_FORCE_TIER1_LOCKOUT active. Device temporarily locked."
-    *   Start Tier 1 lockout duration timer (e.g., 1 minute).
-*   **Exit Actions:**
-    *   Clear Tier 1 Lockout LED pattern.
-    *   Stop Tier 1 lockout timer.
-*   **Internal Actions/Events Handled:**
-    *   Most key presses ignored, except perhaps a specific sequence to show remaining lockout time if supported.
-*   **Transitions Out:**
-    1.  **Event:** `tier1_lockout_duration_expired`
-        *   **Condition(s):** Timer completes.
-        *   **Action(s) during transition:** Log "Tier 1 lockout expired. Returning to Standby." (Brute force counters might be partially reset or retain state).
-        *   **Next State:** `STANDBY`
-    2.  **Event:** `power_cycle_detected` (If power cycle bypasses Tier 1 - depends on device non-volatile memory for BF count)
-        *   **Condition(s):** Device is power cycled.
-        *   **Action(s) during transition:** Log "Power cycle during Tier 1 lockout."
-        *   **Next State:** `INITIALIZING` (which then might re-evaluate BF counters if they persist)
-    3.  **Event:** `request_power_off`
-        *   **Next State:** `OFF`
-
----
-**State: `BRUTE_FORCE_TIER2_LOCKOUT`**
-*   **Description:** Device has entered a more severe lockout due to continued invalid PIN attempts after Tier 1, or a higher threshold reached. May require longer timeout or Admin intervention.
-*   **Entry Actions:**
-    *   Set Tier 2 Lockout LED pattern (e.g., Rapid Pulsing Red, or Solid Red + Orange).
-    *   Log "BRUTE_FORCE_TIER2_LOCKOUT active."
-    *   Start Tier 2 lockout duration timer (e.g., 5 minutes, or indefinite until specific action).
-*   **Exit Actions:**
-    *   Clear Tier 2 Lockout LED pattern.
-    *   Stop Tier 2 lockout timer.
-*   **Internal Actions/Events Handled:**
-    *   Key presses likely ignored.
-*   **Transitions Out:**
-    1.  **Event:** `tier2_lockout_resolved_by_timeout_or_action` (This state's exit logic is complex based on Provision Lock)
-        *   **Condition(s):** `NOT is_provision_lock_active()` AND (Tier 2 timer expires OR specific non-PIN reset action if available).
-        *   **Action(s) during transition:** Log "Tier 2 lockout resolved (no provision lock). Initiating factory reset."
-        *   **Next State:** `FACTORY_RESETTING_IN_PROGRESS` (Device forces a reset if not provision locked)
-    2.  **Event:** `tier2_lockout_provision_lock_active_transition`
-        *   **Condition(s):** `is_provision_lock_active()` (This might be an immediate check on entering Tier 2, making this transition automatic if PL is on).
-        *   **Action(s) during transition:** Log "Tier 2 lockout with Provision Lock active. Awaiting Admin Recovery PIN."
-        *   **Next State:** `BRICKED_AWAITING_ADMIN_RECOVERY_PIN`
-    3.  **Event:** `request_power_off`
-        *   **Next State:** `OFF`
-
----
-**State: `BRICKED_AWAITING_ADMIN_RECOVERY_PIN`**
-*   **Description:** Device is in a "bricked" state due to severe brute force with Provision Lock enabled. Only a valid Admin Recovery PIN can potentially reset it.
-*   **Entry Actions:**
-    *   Set Bricked/Admin Recovery LED pattern (e.g., Solid Orange, or specific "SOS" like pattern).
-    *   Log "DEVICE BRICKED (Provision Lock). Awaiting Admin Recovery PIN."
-    *   Initialize Admin Recovery PIN attempt counter.
-*   **Exit Actions:**
-    *   Clear Bricked/Admin Recovery LED pattern.
-*   **Internal Actions/Events Handled:** (Awaiting Admin Recovery PIN input)
-    *   `admin_recovery_pin_digit_entered(digit)`
-*   **Transitions Out:**
-    1.  **Event:** `admin_recovery_pin_sequence_submitted` (Payload: `recovery_pin_digits`)
-        *   **Condition(s):** `is_pin_valid(recovery_pin_digits, type='admin_recovery')`
-        *   **Action(s) during transition:** Log "Admin Recovery PIN validated. Device will be factory reset."
-        *   **Next State:** `FACTORY_RESETTING_IN_PROGRESS`
-    2.  **Event:** `admin_recovery_pin_sequence_submitted` (Payload: `recovery_pin_digits`)
-        *   **Condition(s):** `NOT is_pin_valid(recovery_pin_digits, type='admin_recovery')` AND `get_admin_recovery_attempts() >= MAX_ADMIN_RECOVERY_ATTEMPTS`
-        *   **Action(s) during transition:** Log "Max Admin Recovery PIN attempts failed. Device permanently bricked."
-        *   **Next State:** `PERMANENTLY_BRICKED`
-    3.  **Event:** `admin_recovery_pin_sequence_submitted` (Payload: `recovery_pin_digits`)
-        *   **Condition(s):** `NOT is_pin_valid(recovery_pin_digits, type='admin_recovery')` AND `get_admin_recovery_attempts() < MAX_ADMIN_RECOVERY_ATTEMPTS`
-        *   **Action(s) during transition:** Log "Invalid Admin Recovery PIN. Attempts remaining..." Increment recovery attempt counter. Provide brief error LED.
-        *   **Next State:** `BRICKED_AWAITING_ADMIN_RECOVERY_PIN` (Stays in state for more attempts)
-    4.  **Event:** `request_power_off`
-        *   **Next State:** `OFF` (State of bricking should persist across power cycles)
-
----
-**State: `PERMANENTLY_BRICKED`**
-*   **Description:** Device is unrecoverable due to critical POST failure, failed Admin Recovery, or failed Self-Destruct wipe. No user/admin actions possible.
-*   **Entry Actions:**
-    *   Set Permanent Bricked LED pattern (e.g., All LEDs solid RED, or specific non-blinking error pattern).
-    *   Log "DEVICE PERMANENTLY BRICKED. No further operations possible."
-    *   Firmware should disable most/all interfaces.
-*   **Exit Actions:** (Likely none, as it shouldn't exit this state except by power off)
-*   **Internal Actions/Events Handled:** None. All inputs ignored.
-*   **Transitions Out:**
-    1.  **Event:** `request_power_off`
-        *   **Next State:** `OFF` (On next power on, it should re-enter `INITIALIZING` and likely detect the bricked status again, returning here or to a specific POST failure state that leads here).
-
----
-**State: `FACTORY_RESETTING_IN_PROGRESS`**
-*   **Description:** Device is actively performing a factory reset (wiping config, user data, PINs). This is a transient state.
-*   **Entry Actions:**
-    *   Set Factory Reset LED pattern (e.g., Cycling through all LED colors, or wiping animation).
-    *   Log "Factory reset in progress. Wiping all data and settings."
-    *   Initiate firmware routine for factory reset.
-*   **Exit Actions:**
-    *   Clear Factory Reset LED pattern.
-*   **Internal Actions/Events Handled:**
-    *   `factory_reset_progress_update(percentage)` (If available)
-*   **Transitions Out:**
-    1.  **Event:** `factory_reset_completed_successfully`
-        *   **Condition(s):** Firmware confirms reset is complete.
-        *   **Action(s) during transition:** Log "Factory reset completed. Device is now in OOB state."
-        *   **Next State:** `OOB_MODE`
-    2.  **Event:** `factory_reset_failed_critical`
-        *   **Condition(s):** Firmware reports an error during the reset process.
-        *   **Action(s) during transition:** Log "CRITICAL: Factory reset FAILED."
-        *   **Next State:** `PERMANENTLY_BRICKED` (A failed reset is very bad).
-    3.  **Event:** `request_power_off` (May be blocked by firmware during active reset)
-        *   **Next State:** `OFF`
-
----
-**State: `SLEEP_MODE`**
-*   **Description:** Device is in a low-power state. Quick resume to `STANDBY` is expected. LEDs are typically off.
-*   **Entry Actions:**
-    *   Turn off all primary LEDs (or set a very dim sleep indicator if applicable).
-    *   Log "Entering Sleep Mode."
-    *   Reduce power to non-essential components.
-*   **Exit Actions:**
-    *   Log "Exiting Sleep Mode."
-    *   Restore power to components needed for Standby.
-*   **Internal Actions/Events Handled:** None.
-*   **Transitions Out:**
-    1.  **Event:** `wake_up_stimulus_detected` (e.g., any key press, USB bus activity if configured to wake on USB)
-        *   **Condition(s):** None.
-        *   **Action(s) during transition:** Log "Wake-up stimulus detected."
-        *   **Next State:** `STANDBY` (Should not re-run full POST unless it's a "deep sleep" equivalent to power off).
-    2.  **Event:** `request_power_off` (e.g. holding power button even in sleep)
-        *   **Next State:** `OFF`
+**State: `DEVICE_IN_SLEEP_MODE` & `AWAKENING_FROM_SLEEP`**
+*   **Description:** For devices that support a distinct sleep mode controllable/detectable by automation.
+*   **`DEVICE_IN_SLEEP_MODE` Entry:** `at.confirm_led_solid(LEDs['SLEEP_MODE'], ...)`
+*   **`DEVICE_IN_SLEEP_MODE` Transitions Out:**
+    1.  **Event (Automation):** `wake_device_from_sleep`
+        *   `at.press(config.WAKE_KEY)` (or any key if it wakes)
+        *   **Next State:** `AWAKENING_FROM_SLEEP`
+*   **`AWAKENING_FROM_SLEEP` Entry:** Awaiting Standby or previous active state.
+    *   `at.await_led_state(LEDs['STANDBY_MODE'], timeout=5)`
+*   **`AWAKENING_FROM_SLEEP` Transitions Out:**
+    1.  **Event:** `device_awake_standby_confirmed` -> `DEVICE_IN_STANDBY_MODE`
+    2.  **Event:** `device_awaken_failed` -> `AUTOMATION_ERROR_STATE`
 
 ---
 
-**IV. REUSABLE CONDITIONS / ACTIONS (Functions/Methods the FSM will need):**
-*(List helper functions that will be used in conditions or actions. This helps identify what methods your FSM class will need, often interacting with `at` controller via your `automation_toolkit`)*
+**IV. REUSABLE CONDITIONS / ACTIONS (for `at` controller and FSM logic):**
 
-*   **PIN Validation & Handling:**
-    *   `is_pin_valid(pin_digits_sequence, expected_pin_type)` -> bool (types: 'admin', 'user', 'recovery_admin', 'self_destruct')
-    *   `get_pin_attempt_count(pin_type_or_global)` -> int
-    *   `increment_pin_attempt_count(pin_type_or_global)`
-    *   `reset_pin_attempt_count(pin_type_or_global)`
-    *   `get_max_pin_attempts(tier_level)` -> int (e.g., tier1, tier2, recovery_admin_attempts)
-    *   `check_pin_complexity(pin_digits_sequence)` -> bool
-*   **Device Configuration & Status:**
-    *   `is_provision_lock_active()` -> bool
-    *   `is_oob_status()` -> bool (checks if Admin PIN is set/device is virgin)
-    *   `is_user_forced_enrollment_feature_enabled()` -> bool
-    *   `get_device_feature_toggle_state(feature_id)` -> bool
-    *   `set_device_feature_toggle_state(feature_id, new_state)`
-    *   `commit_pending_config_changes()`
-    *   `is_initial_admin_enrollment_context()` -> bool (flag set when entering config from OOB)
-    *   `set_initial_admin_enrollment_context(boolean)`
-    *   `is_current_session_read_only()` -> bool (flag for current unlocked session)
-    *   `set_current_session_read_only(boolean)`
-*   **LED Management (Wrappers around `at` controller calls):**
-    *   `set_led_pattern(pattern_name_or_definition)` (e.g., "STANDBY", "OOB", "ADMIN_CONFIG", "ERROR_TIER1")
-    *   `clear_all_leds()`
-*   **Hardware Interaction (Wrappers around `at`):**
-    *   `initiate_phidget_pin_entry_sequence(prompt_message_or_led)` -> buffered_pin_digits_or_timeout
-    *   `execute_phidget_sequence_for_action(action_name, payload)`
-    *   `mount_data_partition()`
-    *   `unmount_data_partition()`
-    *   `initiate_device_self_destruct_wipe()`
-    *   `initiate_device_factory_reset()`
-    *   `run_diagnostic_routines()` -> pass/fail_with_codes
-    *   `power_down_components_for_sleep()`
-    *   `power_up_components_from_sleep()`
-*   **Logging:**
-    *   `log_fsm_event(message, level='info')`
-*   **Timers (May need a simple timer mechanism or use `transitions` built-in state timeouts):**
-    *   `start_timer(timer_name, duration_seconds, timeout_event_to_trigger)`
-    *   `stop_timer(timer_name)`
+This section lists helper functions, conditions, and actions that the FSM's state transition logic will rely on. These are typically implemented as methods within the `UnifiedController` (`at`) or as direct FSM logic that uses `at`'s capabilities.
+
+**A. PIN & Key Sequence Operations (Interacting with `at.sequence`, `at.press`):**
+*   `at.sequence(key_list, press_duration_ms, pause_duration_ms)`: Sends a sequence of key presses.
+    *   *Usage:* Entering PINs, navigating menus, triggering special functions.
+*   `at.press(key_name, duration_ms)`: Presses a single key.
+    *   *Usage:* Confirming actions, simple commands like "lock."
+*   *FSM Responsibility:* The FSM needs to know *which* sequences or keys to send for each operation (e.g., `config.ADMIN_PIN_SEQUENCE`, `config.OOB_ADMIN_ENROLL_START_KEYS`). These would be predefined constants or configurations.
+
+**B. LED State & Pattern Verification (Interacting with `at.confirm_led_solid`, `at.confirm_led_pattern`, etc.):**
+*   `at.confirm_led_solid(target_led_state_dict, minimum_duration_s, timeout_s, clear_buffer_bool)` -> bool
+    *   *Usage:* Verifying stable states like `STANDBY_MODE`, `ADMIN_MODE`, `ALL_OFF`.
+*   `at.confirm_led_pattern(target_led_pattern_list, clear_buffer_bool)` -> bool
+    *   *Usage:* Verifying dynamic sequences like `STARTUP` (POST), `ACCEPT_PATTERN`, `REJECT_PATTERN`, `BRUTE_FORCED_PATTERN`.
+*   `at.await_led_state(target_led_state_dict, timeout_s, fail_leds_list, clear_buffer_bool)` -> bool
+    *   *Usage:* Waiting for a specific LED state to appear, e.g., waiting for `ADMIN_NEW_PIN_ENTRY_PROMPT`.
+*   `at.await_and_confirm_led_pattern(target_led_pattern_list, timeout_s, clear_buffer_bool)` -> bool
+    *   *Usage:* Waiting for the *start* of a pattern and then confirming the whole pattern, e.g., `ENUM` pattern after PIN entry.
+*   `at.snapshot_current_leds_and_log()` (Hypothetical debug function)
+    *   *Usage:* In `AUTOMATION_ERROR_STATE` to log the exact LED state when an error occurred.
+*   *FSM Responsibility:* The FSM needs to know which `LEDs[...]` definition corresponds to each expected device feedback.
+
+**C. USB Device Enumeration & Access:**
+*   `at.confirm_enum(stable_min_s, timeout_s)` -> bool (or raises error)
+    *   *Usage:* Verifying the device's data partition is accessible via USB after unlock (User, Admin Data).
+*   `at.unmount_drive_if_needed()` (Hypothetical)
+    *   *Usage:* Cleanly unmounting a drive before locking or powering off if the automation explicitly mounted it. (Often OS-level, but `at` might wrap it).
+
+**D. Device Configuration & Status Checks (May involve Admin Mode interaction or persistent state):**
+*   `at.is_provision_lock_enabled()` -> bool
+    *   *Usage:* Determining behavior for Brute Force Tier 2, User Reset.
+    *   *Implementation Detail:* This might involve navigating Admin Mode to read the setting if not cached by the automation, or reading a status bit if the device exposes it directly.
+*   `at.is_feature_enabled(feature_name)` -> bool (e.g., "SELF_DESTRUCT_PIN", "UNATTENDED_AUTO_LOCK")
+    *   *Usage:* Conditional logic in FSM or test scripts.
+    *   *Implementation Detail:* Similar to `is_provision_lock_enabled()`.
+*   `at.get_device_firmware_version()` -> str (Hypothetical)
+    *   *Usage:* Logging, compatibility checks. Might involve Diagnostic Mode or Admin Mode.
+*   `at.get_brute_force_attempt_counter()` -> int (Hypothetical)
+    *   *Usage:* More precise Brute Force handling.
+*   `at.get_min_pin_length_setting()` -> int (Hypothetical)
+
+**E. Power Control (Interacting with `at.on`, `at.off`):**
+*   `at.on(phidget_channel_name)` (e.g., `at.on("usb3")`, `at.on("connect")`)
+*   `at.off(phidget_channel_name)`
+*   *FSM Responsibility:* Knowing which channels control power aspects.
+
+**F. FSM Internal State Management & Timers:**
+*   `self.current_pin_type`: Variable within FSM to track context (e.g. if PIN entry is for User, Admin, SD).
+*   `self.admin_recovery_attempts`: Counter for Admin Recovery PIN tries.
+*   `self.fsm_timer_start(timer_name, duration_s, timeout_event_name)`
+*   `self.fsm_timer_cancel(timer_name)`
+    *   *Usage:* For state-specific timeouts (e.g., Brute Force lockout period, waiting for Self-Destruct wipe). The `transitions` library has some built-in timeout capabilities for states, or this could be a simple helper.
+
+**G. Logging:**
+*   `self.logger.info/warning/error/critical/debug(...)`: Used throughout FSM actions and transitions.
+*   `_log_state_change_details(event_data)`: Centralized logging for all state transitions.
+
+**H. Hypothetical Higher-Level `at` Abstractions (Could be built upon primitives):**
+*   `at.determine_initial_mode_after_post()` -> str ('OOB', 'STANDBY', 'UFE', 'BRUTE_FORCE', 'ERROR')
+    *   *Usage:* Simplifies `VERIFYING_POST` transitions.
+    *   *Implementation Detail:* Would internally use `await_led_state` or `confirm_one_of_patterns` for various known post-POST LED states.
+*   `at.navigate_admin_menu_to(target_option_enum_or_name)` -> bool
+    *   *Usage:* Simplifies reaching a specific Admin Mode option.
+    *   *Implementation Detail:* Would use pre-defined key sequences for menu navigation.
+*   `at.perform_admin_pin_enroll(pin_type_to_enroll, new_pin_keys, new_pin_confirm_keys)` -> bool
+    *   *Usage:* Encapsulates the multi-step PIN enrollment process within Admin Mode.
+*   `at.perform_admin_set_counter(counter_type, counter_value_keys)` -> bool
+    *   *Usage:* Encapsulates setting a counter value in Admin Mode.
+
+**I. Error Reason Propagation:**
+*   When an `at` method fails or an unexpected condition occurs, the FSM event that transitions to an error state (e.g., `post_sequence_failed`, `critical_error_occurred`) should be triggered with a `reason` keyword argument.
+    *   Example: `self.post_sequence_failed(reason="STARTUP_PATTERN_MISMATCH")`
+    *   This `reason` is then available in `event_data.kwargs['reason']` within the `on_enter_ERROR_STATE` or `after='_handle_error_details'` callbacks for better logging and debugging.
 
 ---
 
-This Markdown provides a comprehensive template. The next step is for you to go through it meticulously, align it with your Apricorn device's exact behavior (referencing its PDF manual for sequences, LED patterns, and specific rules), and fill in all the blanks. Pay close attention to:
-*   **Correct LED patterns** for each state/action.
-*   **Specific Phidget key sequences** for events.
-*   **Conditions** that are truly enforced by the device.
-*   **Exact sequence of events** for complex operations like Brute Force or User Forced Enrollment.
-
-Once this diagram is solid, translating it into `python-transitions` code will be much more straightforward and less error-prone.
+This exhaustive document should now cover all the features outlined in `device_markdown_map.md` from an automation FSM perspective. Remember that actual implementation would require defining all the placeholder `LEDs[...]` patterns and `config...._KEYS` sequences.
