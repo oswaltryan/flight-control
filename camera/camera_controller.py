@@ -7,6 +7,9 @@ import logging # Standard library logging
 import cv2
 import sys # Import sys to check platform
 import numpy as np # Import numpy for array operations
+import collections # For deque, for instant replay
+import datetime # For timestamping replay files
+import os # For path manipulation for replay files
 
 # Get the logger for this module. Its name will be 'camera.camera_controller'.
 # Configuration (handlers, level, format) comes from the global setup.
@@ -16,6 +19,14 @@ DEFAULT_FPS = 30
 CAMERA_BUFFER_SIZE_FRAMES = 5
 MIN_LOGGABLE_STATE_DURATION = 0.01 # Seconds. States held for less than this won't be logged as "held".
 DEFAULT_DURATION_TOLERANCE_SEC = 0.5 # NEW: Default tolerance for duration checks
+
+# --- Instant Replay Configuration ---
+DEFAULT_REPLAY_POST_FAIL_DURATION_SEC = 5.0
+DEFAULT_REPLAY_FPS_FOR_OUTPUT = DEFAULT_FPS # Use camera's default FPS for replay output
+_CAMERA_CONTROLLER_FILE_DIR = os.path.dirname(os.path.abspath(__file__))
+_PROJECT_ROOT_FROM_CAMERA = os.path.dirname(_CAMERA_CONTROLLER_FILE_DIR)
+DEFAULT_REPLAY_OUTPUT_DIR = os.path.join(_PROJECT_ROOT_FROM_CAMERA, "logs", "replays")
+
 
 # --- PRIMARY (USER-TUNED) LED CONFIGURATIONS ---
 PRIMARY_LED_CONFIGURATIONS = {
@@ -73,7 +84,10 @@ def get_capture_backend():
 
 
 class LogitechLedChecker:
-    def __init__(self, camera_id: int, logger_instance=None, led_configs=None, display_order: list = None, duration_tolerance_sec: float = DEFAULT_DURATION_TOLERANCE_SEC):
+    def __init__(self, camera_id: int, logger_instance=None, led_configs=None,
+                 display_order: list = None, duration_tolerance_sec: float = DEFAULT_DURATION_TOLERANCE_SEC,
+                 replay_post_failure_duration_sec: float = DEFAULT_REPLAY_POST_FAIL_DURATION_SEC,
+                 replay_output_dir: str = DEFAULT_REPLAY_OUTPUT_DIR):
         self.logger = logger_instance if logger_instance else logger
         self.cap = None
         self.is_camera_initialized = False
@@ -82,6 +96,30 @@ class LogitechLedChecker:
         self._ordered_keys_for_display_cache = None
         self.explicit_display_order = display_order
         self.duration_tolerance_sec = duration_tolerance_sec
+
+        # --- Instant Replay Initialization ---
+        self.replay_post_failure_duration_sec = replay_post_failure_duration_sec
+        self.replay_output_dir = replay_output_dir
+        self.is_recording_replay = False
+        self.replay_buffer = collections.deque()
+        self.replay_start_time = 0.0
+        self.replay_context_name = ""
+        self.replay_failure_reason = ""
+        self.replay_frame_width = None
+        self.replay_frame_height = None
+        self.replay_fps = float(DEFAULT_REPLAY_FPS_FOR_OUTPUT) # Ensure it's float
+
+        if self.replay_output_dir:
+            try:
+                os.makedirs(self.replay_output_dir, exist_ok=True)
+                self.logger.info(f"Instant replay output directory: {self.replay_output_dir}")
+            except OSError as e:
+                self.logger.error(f"Failed to create replay output directory {self.replay_output_dir}: {e}. Replays will not be saved.", exc_info=True)
+                self.replay_output_dir = None # Disable replay saving if dir creation fails
+        else:
+            self.logger.warning("Replay output directory is not set. Replays will not be saved.")
+        # --- End Instant Replay Initialization ---
+
 
         if led_configs is not None:
             self.led_configs = led_configs
@@ -152,6 +190,20 @@ class LogitechLedChecker:
                     raise IOError(f"Cannot open webcam {self.camera_id}{backend_name_str} or with default backend.")
 
             self.is_camera_initialized = True
+            # Attempt to set FPS - this is often a request, camera might not obey
+            if self.cap.set(cv2.CAP_PROP_FPS, DEFAULT_FPS):
+                self.logger.info(f"Requested FPS {DEFAULT_FPS} for camera ID {self.camera_id}.")
+            else:
+                self.logger.warning(f"Could not set FPS {DEFAULT_FPS} for camera ID {self.camera_id}.")
+            
+            # Read current FPS from camera if possible
+            actual_fps = self.cap.get(cv2.CAP_PROP_FPS)
+            if actual_fps > 0:
+                self.replay_fps = float(actual_fps) # Use actual camera FPS for replay if available
+                self.logger.info(f"Camera ID {self.camera_id} actual FPS: {actual_fps:.2f}. Using this for replay timing.")
+            else:
+                self.logger.warning(f"Could not get actual FPS from camera ID {self.camera_id}. Using default {self.replay_fps:.2f} for replay.")
+
             self.logger.info(f"Camera Controller initialized successfully with camera ID: {self.camera_id}.")
         except Exception as e:
             self.logger.error(f"Failed to initialize camera {self.camera_id}: {e}", exc_info=True)
@@ -174,6 +226,7 @@ class LogitechLedChecker:
             self.logger.error(f"Exception while clearing camera buffer: {e}", exc_info=True)
 
     def _check_roi_for_color(self, frame, led_config_item: dict) -> bool:
+        # This method remains largely the same, operates on a given frame
         roi_rect = led_config_item["roi"]
         hsv_lower_orig = np.array(led_config_item["hsv_lower"])
         hsv_upper_orig = np.array(led_config_item["hsv_upper"])
@@ -206,16 +259,156 @@ class LogitechLedChecker:
 
     def _get_current_led_state_from_camera(self) -> dict:
         if not self.is_camera_initialized or not self.cap: return {}
+        
+        frame_for_processing = None
         try:
             ret, frame = self.cap.read()
-            if not ret or frame is None: return {}
+            if not ret or frame is None:
+                if self.is_recording_replay:
+                    self.logger.warning("Replay: Frame capture failed during active recording.")
+                return {}
+            frame_for_processing = frame # Keep a reference to the captured frame
+
+            # --- Instant Replay Frame Buffering ---
+            if self.is_recording_replay and frame_for_processing is not None:
+                current_capture_time = time.time()
+                # Make a copy for the buffer to avoid issues if frame is modified later (though it shouldn't be here)
+                self.replay_buffer.append((current_capture_time, frame_for_processing.copy())) 
+                if self.replay_frame_width is None or self.replay_frame_height is None:
+                    h, w = frame_for_processing.shape[:2]
+                    self.replay_frame_width = w
+                    self.replay_frame_height = h
+                    self.logger.debug(f"Replay: Frame dimensions set to {w}x{h} at {self.replay_fps:.2f} FPS.")
+            # --- End Instant Replay Frame Buffering ---
+
         except Exception as e:
             self.logger.error(f"Exception while capturing frame: {e}", exc_info=True)
             return {}
+        
         detected_led_states = {}
-        for led_key, config_item in self.led_configs.items():
-            detected_led_states[led_key] = 1 if self._check_roi_for_color(frame, config_item) else 0
+        if frame_for_processing is not None:
+            for led_key, config_item in self.led_configs.items():
+                detected_led_states[led_key] = 1 if self._check_roi_for_color(frame_for_processing, config_item) else 0
         return detected_led_states
+
+    def _start_replay_recording(self, context_name: str):
+        if not self.replay_output_dir:
+            self.logger.debug(f"Replay recording not started for '{context_name}': output directory not available or configured.")
+            return
+        if self.is_recording_replay: # Avoid nested recordings by the same instance.
+            self.logger.debug(f"Replay: Recording already active for context '{self.replay_context_name}'. Ignoring start for '{context_name}'.")
+            return
+
+        self.logger.debug(f"Replay: Starting recording for context '{context_name}'.")
+        self.is_recording_replay = True
+        self.replay_buffer.clear()
+        self.replay_start_time = time.time()
+        self.replay_context_name = context_name
+        self.replay_failure_reason = "" 
+        self.replay_frame_width = None # Reset, will be set by the first frame
+        self.replay_frame_height = None
+
+    def _save_replay_video(self):
+        if not self.is_recording_replay or not self.replay_buffer or not self.replay_output_dir:
+            if not self.replay_buffer and self.is_recording_replay : self.logger.debug("Replay: No frames in buffer to save.")
+            # Ensure recording flag is reset if we bail early for other reasons
+            # self.is_recording_replay = False # Moved to _stop_replay_recording
+            return
+
+        if self.replay_frame_width is None or self.replay_frame_height is None:
+            self.logger.error("Replay: Frame dimensions not set. Cannot save video.")
+            # self.is_recording_replay = False
+            # self.replay_buffer.clear()
+            return
+
+        timestamp_str = datetime.datetime.now().strftime("%Y%m%d_%H%M%S_%f")[:-3] # Milliseconds
+        # Sanitize context and reason for filename
+        sane_context = "".join(c if c.isalnum() or c in ('_', '-') else '_' for c in self.replay_context_name)
+        sane_reason = "".join(c if c.isalnum() or c in ('_', '-') else '_' for c in self.replay_failure_reason)
+        filename_base = f"replay_{sane_context}_{sane_reason}_{timestamp_str}.mp4"
+        filepath = os.path.join(self.replay_output_dir, filename_base)
+
+        self.logger.info(f"Replay: Saving video to {filepath} ({len(self.replay_buffer)} base frames + post-failure frames).")
+
+        fourcc = cv2.VideoWriter_fourcc(*'mp4v') 
+        
+        video_writer = None
+        try:
+            video_writer = cv2.VideoWriter(filepath, fourcc, self.replay_fps,
+                                           (self.replay_frame_width, self.replay_frame_height))
+            if not video_writer.isOpened():
+                self.logger.error(f"Replay: Failed to open VideoWriter for {filepath}.")
+                return
+
+            for _, frame_data in self.replay_buffer:
+                # Ensure frame matches dimensions before writing
+                fh, fw = frame_data.shape[:2]
+                if fw == self.replay_frame_width and fh == self.replay_frame_height:
+                    video_writer.write(frame_data)
+                else:
+                    # If dimensions mismatch, try to resize (though this indicates an issue)
+                    self.logger.warning(f"Replay: Frame dim mismatch ({fw}x{fh} vs {self.replay_frame_width}x{self.replay_frame_height}). Resizing frame for {filepath}.")
+                    resized_frame = cv2.resize(frame_data, (self.replay_frame_width, self.replay_frame_height))
+                    video_writer.write(resized_frame)
+            
+            self.logger.info(f"Replay: Successfully wrote frames to {filepath}.")
+
+        except Exception as e:
+            self.logger.error(f"Replay: Error during video writing for {filepath}: {e}", exc_info=True)
+        finally:
+            if video_writer:
+                video_writer.release()
+            # Buffer clearing and flag reset is handled by _stop_replay_recording
+
+    def _stop_replay_recording(self, success: bool, failure_reason: str = "unspecified_failure"):
+        if not self.is_recording_replay:
+            return
+
+        self.replay_failure_reason = failure_reason.replace(" ", "_").replace(":", "").lower()
+
+        if not success and self.replay_buffer and self.replay_output_dir:
+            self.logger.debug(f"Replay: Failure detected (Reason: {self.replay_failure_reason}). Recording post-failure duration of {self.replay_post_failure_duration_sec}s.")
+            
+            post_failure_start_time = time.time()
+            frames_after_failure = 0
+            
+            if self.replay_frame_width is None or self.replay_frame_height is None:
+                self.logger.error("Replay: Frame dimensions not set prior to post-failure recording. Cannot continue.")
+                self.is_recording_replay = False 
+                self.replay_buffer.clear()
+                return
+
+            while time.time() - post_failure_start_time < self.replay_post_failure_duration_sec:
+                if not self.cap or not self.cap.isOpened():
+                    self.logger.warning("Replay: Camera not available for post-failure recording.")
+                    break
+                
+                ret, frame = self.cap.read()
+                if ret and frame is not None:
+                    current_h, current_w = frame.shape[:2]
+                    if current_w == self.replay_frame_width and current_h == self.replay_frame_height:
+                        self.replay_buffer.append((time.time(), frame.copy()))
+                        frames_after_failure += 1
+                    else:
+                        self.logger.warning(f"Replay: Frame size changed during post-failure recording. Expected {self.replay_frame_width}x{self.replay_frame_height}, got {current_w}x{current_h}. Frame skipped.")
+                else:
+                    self.logger.warning("Replay: Failed to capture frame during post-failure recording.")
+                
+                time.sleep(1.0 / self.replay_fps if self.replay_fps > 0 else 0.01)
+
+            self.logger.debug(f"Replay: Captured {frames_after_failure} additional frames post-failure.")
+            self._save_replay_video() 
+        
+        elif success:
+             self.logger.debug(f"Replay: Success for context '{self.replay_context_name}'. Clearing buffer without saving video.")
+        
+        # Always clean up
+        self.replay_buffer.clear()
+        self.is_recording_replay = False
+        self.replay_context_name = ""
+        self.replay_failure_reason = ""
+        # Keep replay_frame_width/height as they might be useful if another recording starts soon with same camera settings.
+        # Or reset them: self.replay_frame_width = None; self.replay_frame_height = None;
 
     def _matches_state(self, current_state: dict, target_state: dict, fail_leds: list = None) -> bool:
         if not current_state: return False
@@ -271,12 +464,21 @@ class LogitechLedChecker:
             if duration >= MIN_LOGGABLE_STATE_DURATION:
                 self.logger.info(f"{self._format_led_display_string(state_dict)} ({duration:.2f}s{reason_suffix})")
 
-
     def confirm_led_solid(self, state: dict, minimum: float = 2, timeout: float = 10,
-                          fail_leds: list = None, clear_buffer: bool = True) -> bool:
+                          fail_leds: list = None, clear_buffer: bool = True, manage_replay: bool = True) -> bool:
+        context_name = "confirm_led_solid"
+        if manage_replay: self._start_replay_recording(context_name)
+        
+        success_flag = False
+        failure_detail = "unknown_failure"
+        
         formatted_target_state = self._format_led_display_string(state)
         self.logger.debug(f"Waiting for LED solid {formatted_target_state}, minimum {minimum:.2f}s (tol: {self.duration_tolerance_sec:.2f}s), timeout {timeout:.2f}s")
-        if not self.is_camera_initialized: self.logger.error("Camera not initialized for confirm_led_solid."); return False
+        if not self.is_camera_initialized: 
+            self.logger.error("Camera not initialized for confirm_led_solid.")
+            failure_detail = "camera_not_initialized"
+            if manage_replay: self._stop_replay_recording(success=False, failure_reason=failure_detail)
+            return False
         
         last_state_info = [None, 0.0] 
         initial_capture_time = time.time()
@@ -284,25 +486,20 @@ class LogitechLedChecker:
 
         if clear_buffer: 
             self._clear_camera_buffer()
-            initial_leds_for_log = self._get_current_led_state_from_camera()
-            if not initial_leds_for_log: initial_leds_for_log = {} 
-            last_state_info[0] = initial_leds_for_log
-            last_state_info[1] = initial_capture_time 
-        else: 
-            initial_leds_for_log = self._get_current_led_state_from_camera()
-            if not initial_leds_for_log: initial_leds_for_log = {}
-            last_state_info[0] = initial_leds_for_log 
-            last_state_info[1] = initial_capture_time
+        # Always get an initial state for logging and continuity, even if not clearing hardware buffer
+        initial_leds_for_log = self._get_current_led_state_from_camera()
+        if not initial_leds_for_log: initial_leds_for_log = {} 
+        last_state_info[0] = initial_leds_for_log
+        last_state_info[1] = initial_capture_time 
 
         overall_start_time = time.time()
         continuous_target_match_start_time = None
-        
         effective_minimum = max(0, minimum - self.duration_tolerance_sec)
 
         try:
             while time.time() - overall_start_time < timeout:
                 current_time = time.time()
-                current_leds = self._get_current_led_state_from_camera()
+                current_leds = self._get_current_led_state_from_camera() # This now buffers for replay
 
                 if not current_leds: 
                     self._handle_state_change_logging({}, current_time, last_state_info) 
@@ -320,116 +517,161 @@ class LogitechLedChecker:
                     if target_held_duration >= effective_minimum:
                         self.logger.info(f"{self._format_led_display_string(last_state_info[0])} ({target_held_duration:.2f}s)")
                         self.logger.info(f"LED solid confirmed: {formatted_target_state} for {target_held_duration:.2f}s (required ~{effective_minimum:.2f}s)")
-                        return True
+                        success_flag = True
+                        return True # Goes to finally
                 else: 
                     continuous_target_match_start_time = None 
                 
-                time.sleep(1 / DEFAULT_FPS if DEFAULT_FPS > 0 else 0.1)
+                time.sleep(1 / self.replay_fps if self.replay_fps > 0 else 0.1) # Use replay_fps for sleep consistency
             
+            # Timeout occurred
             self._log_final_state(last_state_info, time.time(), reason_suffix=" at timeout")
             log_method = self.logger.warning
             if continuous_target_match_start_time is not None:
                 held_duration = time.time() - continuous_target_match_start_time
+                failure_detail = f"timeout_target_active_for_{held_duration:.2f}s_needed_{effective_minimum:.2f}s"
                 log_method(f"Timeout: Target {formatted_target_state} was active for {held_duration:.2f}s, "
                            f"but did not meet full minimum {effective_minimum:.2f}s (original min: {minimum:.2f}s) within {timeout:.2f}s overall timeout.")
             else:
+                failure_detail = f"timeout_target_not_solid_for_{effective_minimum:.2f}s"
                 log_method(f"Timeout: Target {formatted_target_state} not confirmed solid for {effective_minimum:.2f}s (original min: {minimum:.2f}s) within {timeout:.2f}s.")
-            return False
+            success_flag = False
+            return False # Goes to finally
         finally:
-            pass
+            if manage_replay: self._stop_replay_recording(success=success_flag, failure_reason=failure_detail)
 
 
-    def confirm_led_solid_strict(self, state: dict, minimum: float, clear_buffer: bool = True) -> bool:
+    def confirm_led_solid_strict(self, state: dict, minimum: float, clear_buffer: bool = True, manage_replay: bool = True) -> bool:
+        context_name = "confirm_led_solid_strict"
+        if manage_replay: self._start_replay_recording(context_name)
+        
+        success_flag = False
+        failure_detail = "unknown_failure"
+
         formatted_target_state = self._format_led_display_string(state)
         effective_minimum = max(0.0, minimum - self.duration_tolerance_sec)
         self.logger.info(f"Waiting for LED strictly solid {formatted_target_state}, effective duration {effective_minimum:.2f}s (original min: {minimum:.2f}s, tol: {self.duration_tolerance_sec:.2f}s)")
         
-        if not self.is_camera_initialized: self.logger.error("Camera not initialized for confirm_led_solid_strict."); return False
+        if not self.is_camera_initialized:
+            self.logger.error("Camera not initialized for confirm_led_solid_strict.")
+            failure_detail = "camera_not_initialized"
+            if manage_replay: self._stop_replay_recording(success=False, failure_reason=failure_detail)
+            return False # Early exit, finally will still run if it were structured differently
         
         last_state_info = [None, 0.0] 
         if clear_buffer: 
             self._clear_camera_buffer()
-        else:
-            prime_time_for_pre_state = time.time()
-            prime_state_for_pre_state = self._get_current_led_state_from_camera()
-            if prime_state_for_pre_state: 
-                last_state_info[0] = prime_state_for_pre_state
-                last_state_info[1] = prime_time_for_pre_state
+        
+        # Always get an initial state
+        prime_time_for_pre_state = time.time()
+        prime_state_for_pre_state = self._get_current_led_state_from_camera()
+        if prime_state_for_pre_state: 
+            last_state_info[0] = prime_state_for_pre_state
+            last_state_info[1] = prime_time_for_pre_state
         
         strict_overall_start_time = time.time() 
-        initial_check_time = time.time()
-        initial_leds = self._get_current_led_state_from_camera()
-        if not initial_leds: initial_leds = {} 
+        # initial_check_time = time.time() # Redundant if prime_time_for_pre_state is used for last_state_info[1]
+        initial_leds = last_state_info[0] if last_state_info[0] is not None else {}
 
         self.logger.info(f"{self._format_led_display_string(initial_leds)}")
-        self._handle_state_change_logging(initial_leds, initial_check_time, last_state_info)
+        # _handle_state_change_logging is implicitly called by _get_current_led_state_from_camera setting up last_state_info
 
-        if not self._matches_state(initial_leds, state, fail_leds=None):
+        if not self._matches_state(initial_leds, state, fail_leds=None): # fail_leds=None for strict state match
+            failure_detail = "initial_state_not_target"
             self.logger.warning(f"Strict confirm for {formatted_target_state} FAILED. Initial state is not target.")
-            return False
-        
-        target_state_began_at = last_state_info[1] 
+            success_flag = False
+            # No direct return here; let success_flag be false and fall through to finally
+        else: # Initial state matches
+            target_state_began_at = last_state_info[1] 
+            try: # This try block is for the main logic after initial state matches
+                while time.time() - target_state_began_at < effective_minimum :
+                    current_time = time.time()
 
-        try:
-            while time.time() - target_state_began_at < effective_minimum :
-                current_time = time.time()
+                    if current_time - strict_overall_start_time > (effective_minimum + 5.0): # Operation timeout
+                        self._log_final_state(last_state_info, current_time, reason_suffix=" at strict op timeout")
+                        failure_detail = f"operation_timeout_aiming_for_{effective_minimum:.2f}s"
+                        self.logger.warning(f"Strict confirm for {formatted_target_state} FAILED due to operation timeout (aiming for {effective_minimum:.2f}s).")
+                        success_flag = False
+                        # This return False will be caught by the outer finally
+                        if manage_replay: self._stop_replay_recording(success=success_flag, failure_reason=failure_detail)
+                        return False 
 
-                if current_time - strict_overall_start_time > (effective_minimum + 5.0): 
-                    self._log_final_state(last_state_info, current_time, reason_suffix=" at strict op timeout")
-                    self.logger.warning(f"Strict confirm for {formatted_target_state} FAILED due to operation timeout (aiming for {effective_minimum:.2f}s).")
-                    return False
+                    current_leds = self._get_current_led_state_from_camera()
 
-                current_leds = self._get_current_led_state_from_camera()
-
-                if not current_leds: 
-                    self._handle_state_change_logging({}, current_time, last_state_info) 
-                    self.logger.warning(f"Strict confirm for {formatted_target_state} FAILED. Frame capture error at {current_time - strict_overall_start_time:.2f}s.")
-                    return False
-                
-                logged_a_change = self._handle_state_change_logging(current_leds, current_time, last_state_info)
-
-                if not self._matches_state(current_leds, state, fail_leds=None):
-                    if not logged_a_change and last_state_info[0] is not None: 
-                        self.logger.info(f"{self._format_led_display_string(last_state_info[0])} ({current_time - last_state_info[1]:.2f}s, broke strict sequence)")
+                    if not current_leds: 
+                        self._handle_state_change_logging({}, current_time, last_state_info) 
+                        failure_detail = "frame_capture_error"
+                        self.logger.warning(f"Strict confirm for {formatted_target_state} FAILED. Frame capture error at {current_time - strict_overall_start_time:.2f}s.")
+                        success_flag = False
+                        if manage_replay: self._stop_replay_recording(success=success_flag, failure_reason=failure_detail)
+                        return False 
                     
-                    actual_held_duration_before_break = last_state_info[1] - target_state_began_at
-                    self.logger.warning(
-                        f"Strict confirm for {formatted_target_state} FAILED. State broke sequence. "
-                        f"Target was held for {actual_held_duration_before_break:.2f}s. Needed to hold for {effective_minimum:.2f}s without break.")
-                    return False
+                    logged_a_change = self._handle_state_change_logging(current_leds, current_time, last_state_info)
+
+                    if not self._matches_state(current_leds, state, fail_leds=None):
+                        if not logged_a_change and last_state_info[0] is not None: 
+                            self.logger.info(f"{self._format_led_display_string(last_state_info[0])} ({current_time - last_state_info[1]:.2f}s, broke strict sequence)")
+                        
+                        actual_held_duration_before_break = current_time - target_state_began_at # More accurate held time before break
+                        # If logged_a_change is true, last_state_info[1] would be the time of the break.
+                        # If logged_a_change is false, it means it broke from the target state, so current_time is the break time.
+                        # The duration calculation here needs to be careful about what last_state_info[1] represents.
+                        # Let's use current_time - target_state_began_at for how long it was "good"
+                        
+                        failure_detail = f"state_broke_sequence_held_{actual_held_duration_before_break:.2f}s_needed_{effective_minimum:.2f}s"
+                        self.logger.warning(
+                            f"Strict confirm for {formatted_target_state} FAILED. State broke sequence. "
+                            f"Target was held for {actual_held_duration_before_break:.2f}s. Needed to hold for {effective_minimum:.2f}s without break.")
+                        success_flag = False
+                        if manage_replay: self._stop_replay_recording(success=success_flag, failure_reason=failure_detail)
+                        return False 
+                    
+                    time.sleep(1 / self.replay_fps if self.replay_fps > 0 else 0.1)
                 
-                time.sleep(1 / DEFAULT_FPS if DEFAULT_FPS > 0 else 0.1)
-            
-            self._log_final_state(last_state_info, time.time(), reason_suffix=" on success") 
-            self.logger.info(f"LED strictly solid confirmed: {formatted_target_state} for at least {effective_minimum:.2f}s (original min: {minimum:.2f}s, tol: {self.duration_tolerance_sec:.2f}s)")
-            return True
-        finally:
-            pass
+                # If loop completes, minimum duration met
+                self._log_final_state(last_state_info, time.time(), reason_suffix=" on success") 
+                self.logger.info(f"LED strictly solid confirmed: {formatted_target_state} for at least {effective_minimum:.2f}s (original min: {minimum:.2f}s, tol: {self.duration_tolerance_sec:.2f}s)")
+                success_flag = True
+                # No return here, success_flag is set, fall through to finally
+            except Exception as e_strict: # Catch unexpected errors within the try
+                failure_detail = f"exception_in_loop_{type(e_strict).__name__}"
+                self.logger.error(f"Exception in strict confirm loop: {e_strict}", exc_info=True)
+                success_flag = False
+                # No direct return here, fall through to finally
+
+        # This is the final decision point before replay is stopped.
+        if manage_replay: self._stop_replay_recording(success=success_flag, failure_reason=failure_detail)
+        return success_flag
 
 
     def await_led_state(self, state: dict, timeout: float = 1,
-                        fail_leds: list = None, clear_buffer: bool = True) -> bool:
+                        fail_leds: list = None, clear_buffer: bool = True, manage_replay: bool = True) -> bool:
+        context_name = "await_led_state"
+        if manage_replay: self._start_replay_recording(context_name)
+
+        success_flag = False
+        failure_detail = "unknown_failure"
+
         formatted_target_state = self._format_led_display_string(state)
         self.logger.info(f"Awaiting LED state {formatted_target_state}, timeout {timeout:.2f}s")
-        if not self.is_camera_initialized: self.logger.error("Camera not initialized for await_led_state."); return False
+        if not self.is_camera_initialized:
+            self.logger.error("Camera not initialized for await_led_state.")
+            failure_detail = "camera_not_initialized"
+            if manage_replay: self._stop_replay_recording(success=False, failure_reason=failure_detail)
+            return False
         
         last_state_info = [None, 0.0]
-        initial_capture_time = time.time()
-        initial_leds_for_log = {}
+        # initial_capture_time = time.time() # Used if not clearing buffer or as base time
 
         if clear_buffer: 
             self._clear_camera_buffer()
-            initial_leds_for_log = self._get_current_led_state_from_camera()
-            if not initial_leds_for_log: initial_leds_for_log = {}
-            self.logger.info(f"{self._format_led_display_string(initial_leds_for_log)}")
-            last_state_info[0] = initial_leds_for_log
-            last_state_info[1] = initial_capture_time
-        else:
-            initial_leds_for_log = self._get_current_led_state_from_camera()
-            if not initial_leds_for_log: initial_leds_for_log = {}
-            self.logger.info(f"{self._format_led_display_string(initial_leds_for_log)}")
-            last_state_info[0] = initial_leds_for_log
-            last_state_info[1] = initial_capture_time
+        
+        # Always get an initial state for logging
+        initial_leds_for_log = self._get_current_led_state_from_camera()
+        if not initial_leds_for_log: initial_leds_for_log = {}
+        self.logger.info(f"{self._format_led_display_string(initial_leds_for_log)}")
+        last_state_info[0] = initial_leds_for_log
+        last_state_info[1] = time.time() # Use current time after getting initial state
 
         await_start_time = time.time()
         try:
@@ -450,127 +692,213 @@ class LogitechLedChecker:
                          self.logger.info(f"{self._format_led_display_string(current_leds)} (0.00s+ when target observed)")
 
                     self.logger.info(f"Target state {formatted_target_state} observed.")
-                    return True
+                    success_flag = True
+                    return True # Goes to finally
                 
-                time.sleep(1 / DEFAULT_FPS if DEFAULT_FPS > 0 else 0.1)
+                time.sleep(1 / self.replay_fps if self.replay_fps > 0 else 0.1)
 
+            # Timeout occurred
             self._log_final_state(last_state_info, time.time(), reason_suffix=" at timeout")
-            self.logger.warning(f"Timeout: {formatted_target_state} not observed within {timeout:.2f}s.");
-            return False
+            failure_detail = f"timeout_target_{formatted_target_state.replace(' ','_')}_not_observed"
+            self.logger.warning(f"Timeout: {formatted_target_state} not observed within {timeout:.2f}s.")
+            success_flag = False
+            return False # Goes to finally
         finally:
-            pass
+            if manage_replay: self._stop_replay_recording(success=success_flag, failure_reason=failure_detail)
 
 
-    def confirm_led_pattern(self, pattern: list, clear_buffer: bool = True) -> bool:
+    def confirm_led_pattern(self, pattern: list, clear_buffer: bool = True, manage_replay: bool = True) -> bool:
+        context_name = "confirm_led_pattern"
+        if manage_replay: self._start_replay_recording(context_name)
+
+        success_flag = False
+        failure_detail = "unknown_failure_or_empty_pattern" 
+
         self.logger.debug(f"Attempting to match LED pattern (tol: {self.duration_tolerance_sec:.2f}s)...")
-        if not pattern: self.logger.warning("Empty pattern provided."); return False
-        if not self.is_camera_initialized: self.logger.error("Camera not initialized for confirm_led_pattern."); return False
+        if not pattern: 
+            self.logger.warning("Empty pattern provided.")
+            failure_detail = "empty_pattern"
+            if manage_replay: self._stop_replay_recording(success=False, failure_reason=failure_detail)
+            return False
+        if not self.is_camera_initialized:
+            self.logger.error("Camera not initialized for confirm_led_pattern.")
+            failure_detail = "camera_not_initialized"
+            if manage_replay: self._stop_replay_recording(success=False, failure_reason=failure_detail)
+            return False
         
         if clear_buffer: 
             self._clear_camera_buffer()
+            # Get an initial state reading after clearing buffer for logging context if needed
+            self._get_current_led_state_from_camera() # This will also buffer a frame if replay is on
+
 
         ordered_keys = self._get_ordered_led_keys_for_display()
         current_step_idx = 0
+        # Calculate a generous overall timeout for the entire pattern
         max_dur_sum = sum(p.get('duration', (0,1))[1] for p in pattern if p.get('duration',[0,0])[1] != float('inf'))
         inf_steps = sum(1 for p in pattern if p.get('duration',[0,0])[1] == float('inf'))
-        overall_timeout = max_dur_sum + inf_steps * 5.0 + len(pattern) * 3.0 + 10.0 
+        # Add buffer for transitions, processing, and potential inf_steps
+        overall_timeout = max_dur_sum + inf_steps * 10.0 + len(pattern) * 5.0 + 15.0 
         pattern_start_time = time.time()
 
-        while current_step_idx < len(pattern):
-            if time.time() - pattern_start_time > overall_timeout:
-                self.logger.error(f"Overall pattern timeout ({overall_timeout:.2f}s) at step {current_step_idx + 1}."); return False
+        try:
+            while current_step_idx < len(pattern):
+                if time.time() - pattern_start_time > overall_timeout:
+                    failure_detail = f"overall_pattern_timeout_at_step_{current_step_idx + 1}"
+                    self.logger.error(f"Overall pattern timeout ({overall_timeout:.2f}s) at step {current_step_idx + 1}. Failure detail: {failure_detail}")
+                    success_flag = False; return False # Goes to finally
 
-            step_cfg = pattern[current_step_idx]
-            target_state_for_step = {k: v for k, v in step_cfg.items() if k != 'duration'}
-            min_d_orig, max_d_orig = step_cfg.get('duration', (0, float('inf')))
-            
-            min_d_check = max(0.0, min_d_orig - self.duration_tolerance_sec)
-            max_d_check = max_d_orig + self.duration_tolerance_sec
-            if max_d_orig == float('inf'):
-                max_d_check = float('inf')
-
-
-            target_state_str_for_step = self._format_led_display_string(target_state_for_step, ordered_keys)
-            
-            # MODIFIED: Removed the verbose per-step debug log line below
-            # self.logger.debug(f"Pattern step {current_step_idx+1}/{len(pattern)}: Target {target_state_str_for_step}, "
-            #                   f"Orig Dur: ({min_d_orig:.2f}, {max_d_orig if max_d_orig == float('inf') else f'{max_d_orig:.2f}'}), "
-            #                   f"Check Dur: ({min_d_check:.2f}, {max_d_check if max_d_check == float('inf') else f'{max_d_check:.2f}'})s")
-                        
-            step_seen_at = None 
-            step_loop_start_time = time.time() 
-
-            while True: 
-                loop_check_time = time.time()
-                if loop_check_time - pattern_start_time > overall_timeout: 
-                    self.logger.error(f"Timeout waiting for step {current_step_idx+1} ({target_state_str_for_step}) to appear."); return False
+                step_cfg = pattern[current_step_idx]
+                target_state_for_step = {k: v for k, v in step_cfg.items() if k != 'duration'}
+                min_d_orig, max_d_orig = step_cfg.get('duration', (0, float('inf')))
                 
-                current_leds = self._get_current_led_state_from_camera()
-                if not current_leds: time.sleep(0.03); continue 
-                
-                if self._matches_state(current_leds, target_state_for_step):
-                    step_seen_at = loop_check_time 
-                    break 
+                min_d_check = max(0.0, min_d_orig - self.duration_tolerance_sec)
+                max_d_check = max_d_orig + self.duration_tolerance_sec
+                if max_d_orig == float('inf'): # Ensure inf remains inf
+                    max_d_check = float('inf')
 
-                if current_step_idx == 0 and min_d_orig == 0.0 and (loop_check_time - step_loop_start_time > 0.25): 
-                    break 
-                
-                step_appearance_timeout_val = max(1.0, max_d_orig / 2 if max_d_orig != float('inf') else 5.0) 
-                if loop_check_time - step_loop_start_time > step_appearance_timeout_val :
-                    self.logger.warning(f"Pattern FAILED: Step {current_step_idx+1} ({target_state_str_for_step}) not seen within {step_appearance_timeout_val:.2f}s of trying for it."); return False
-                time.sleep(1 / DEFAULT_FPS if DEFAULT_FPS > 0 else 0.03)
+                target_state_str_for_step = self._format_led_display_string(target_state_for_step, ordered_keys)
+                            
+                step_seen_at = None 
+                step_loop_start_time = time.time() 
 
-            if step_seen_at is None: 
-                if current_step_idx == 0 and min_d_orig == 0.0: 
-                    self.logger.info(f"{target_state_str_for_step}  0.00s ({current_step_idx + 1:02d}/{len(pattern):02d}) - Skipped (original min_d was 0)")
-                    current_step_idx += 1; continue
-                else: 
-                    self.logger.error(f"Pattern FAILED: Step {current_step_idx + 1} ({target_state_str_for_step}) internal logic error, never detected."); return False
+                # Loop to see the target state for the current step
+                while True: 
+                    loop_check_time = time.time()
+                    if loop_check_time - pattern_start_time > overall_timeout: 
+                        failure_detail = f"timeout_waiting_for_step_{current_step_idx + 1}_to_appear"
+                        self.logger.error(f"Timeout waiting for step {current_step_idx+1} ({target_state_str_for_step}) to appear. Failure detail: {failure_detail}")
+                        success_flag = False; return False 
 
-            while True: 
-                loop_check_time = time.time()
-                if loop_check_time - pattern_start_time > overall_timeout:
-                    self.logger.error(f"Timeout while holding pattern step {current_step_idx+1} ({target_state_str_for_step})"); return False
-                
-                current_leds = self._get_current_led_state_from_camera()
-                if not current_leds: time.sleep(0.03); continue
-
-                held_time = loop_check_time - step_seen_at 
-                
-                if self._matches_state(current_leds, target_state_for_step): 
-                    if max_d_check != float('inf') and held_time > max_d_check:
-                        self.logger.warning(f"Pattern FAILED: Step {current_step_idx+1} ({target_state_str_for_step}) held for {held_time:.2f}s > max_check {max_d_check:.2f}s (orig_max: {max_d_orig:.2f}s)."); return False
+                    current_leds = self._get_current_led_state_from_camera()
+                    if not current_leds: time.sleep(0.03); continue 
                     
-                    is_last_step_of_pattern = (current_step_idx == len(pattern) - 1)
-                    if is_last_step_of_pattern and held_time >= min_d_check: 
-                        self.logger.info(f"{target_state_str_for_step}  {held_time:.2f}s+ ({current_step_idx + 1:02d}/{len(pattern):02d})")
-                        current_step_idx += 1; break 
-                else: 
-                    if held_time >= min_d_check: 
-                        self.logger.info(f"{target_state_str_for_step}  {held_time:.2f}s ({current_step_idx + 1:02d}/{len(pattern):02d})")
-                        current_step_idx += 1; break 
-                    else: 
-                        self.logger.warning(f"Pattern FAILED: Step {current_step_idx+1} ({target_state_str_for_step}) changed to {self._format_led_display_string(current_leds, ordered_keys)} "
-                                           f"after {held_time:.2f}s (min_check {min_d_check:.2f}s required, orig_min: {min_d_orig:.2f}s)."); return False
-                time.sleep(1 / DEFAULT_FPS if DEFAULT_FPS > 0 else 0.03)
-        
-        if current_step_idx == len(pattern): self.logger.info("LED pattern confirmed"); return True
-        self.logger.warning(f"Pattern ended inconclusively. Processed {current_step_idx}/{len(pattern)} steps."); return False
+                    if self._matches_state(current_leds, target_state_for_step):
+                        step_seen_at = loop_check_time 
+                        break # Seen the target state, now check duration
+
+                    # Special handling for first step if its min duration is 0 (can be skipped if not immediately present)
+                    if current_step_idx == 0 and min_d_orig == 0.0 and (loop_check_time - step_loop_start_time > 0.25): 
+                        # If first step is 0-duration and not seen quickly, assume it's "skipped"
+                        break # Will proceed to step_seen_at is None check
+                    
+                    # Timeout for *this specific step* to appear. More aggressive than overall_timeout.
+                    # Based on max_d_orig or a fixed value for inf duration steps
+                    step_appearance_timeout_val = max(1.0, max_d_orig / 2 if max_d_orig != float('inf') else 5.0) + 2.0 # Add buffer
+                    if loop_check_time - step_loop_start_time > step_appearance_timeout_val :
+                        failure_detail = f"step_{current_step_idx + 1}_state_{target_state_str_for_step.replace(' ','_')}_not_seen_within_{step_appearance_timeout_val:.2f}s"
+                        self.logger.warning(f"Pattern FAILED: Step {current_step_idx+1} ({target_state_str_for_step}) not seen within {step_appearance_timeout_val:.2f}s of trying for it. Failure detail: {failure_detail}")
+                        success_flag = False; return False
+                    time.sleep(1 / self.replay_fps if self.replay_fps > 0 else 0.03)
+
+                if step_seen_at is None: # Only true if first step, min_d_orig == 0, and it wasn't seen quickly
+                    if current_step_idx == 0 and min_d_orig == 0.0: 
+                        self.logger.info(f"{target_state_str_for_step}  0.00s ({current_step_idx + 1:02d}/{len(pattern):02d}) - Skipped (original min_d was 0)")
+                        current_step_idx += 1; continue # Successfully "matched" a zero-duration step by skipping
+                    else: # Should not happen if logic above is correct
+                        failure_detail = f"step_{current_step_idx + 1}_state_{target_state_str_for_step.replace(' ','_')}_never_detected_internal_logic"
+                        self.logger.error(f"Pattern FAILED: Step {current_step_idx + 1} ({target_state_str_for_step}) internal logic error, never detected. Failure detail: {failure_detail}");
+                        success_flag = False; return False
+
+                # Loop to hold the target state for the required duration
+                while True: 
+                    loop_check_time = time.time()
+                    if loop_check_time - pattern_start_time > overall_timeout:
+                        failure_detail = f"timeout_holding_step_{current_step_idx + 1}_state_{target_state_str_for_step.replace(' ','_')}"
+                        self.logger.error(f"Timeout while holding pattern step {current_step_idx+1} ({target_state_str_for_step}). Failure detail: {failure_detail}");
+                        success_flag = False; return False
+                    
+                    current_leds = self._get_current_led_state_from_camera()
+                    if not current_leds: time.sleep(0.03); continue
+
+                    held_time = loop_check_time - step_seen_at 
+                    
+                    if self._matches_state(current_leds, target_state_for_step): # Still in target state
+                        if max_d_check != float('inf') and held_time > max_d_check:
+                            failure_detail = f"step_{current_step_idx + 1}_state_{target_state_str_for_step.replace(' ','_')}_held_too_long_{held_time:.2f}s_max_{max_d_check:.2f}s"
+                            self.logger.warning(f"Pattern FAILED: Step {current_step_idx+1} ({target_state_str_for_step}) held for {held_time:.2f}s > max_check {max_d_check:.2f}s (orig_max: {max_d_orig:.2f}s). Failure detail: {failure_detail}");
+                            success_flag = False; return False
+                        
+                        is_last_step_of_pattern = (current_step_idx == len(pattern) - 1)
+                        if is_last_step_of_pattern and held_time >= min_d_check: 
+                            self.logger.info(f"{target_state_str_for_step}  {held_time:.2f}s+ ({current_step_idx + 1:02d}/{len(pattern):02d})")
+                            current_step_idx += 1; break # Matched last step
+                        # If not last step, just continue holding and checking time, or wait for state change
+                    else: # State changed from target
+                        if held_time >= min_d_check: 
+                            self.logger.info(f"{target_state_str_for_step}  {held_time:.2f}s ({current_step_idx + 1:02d}/{len(pattern):02d})")
+                            current_step_idx += 1; break # Matched current step, state changed appropriately for next step
+                        else: # State changed too early
+                            current_led_str = self._format_led_display_string(current_leds, ordered_keys)
+                            failure_detail = f"step_{current_step_idx + 1}_state_{target_state_str_for_step.replace(' ','_')}_changed_to_{current_led_str.replace(' ','_')}_early_held_{held_time:.2f}s_min_{min_d_check:.2f}s"
+                            self.logger.warning(f"Pattern FAILED: Step {current_step_idx+1} ({target_state_str_for_step}) changed to {current_led_str} "
+                                               f"after {held_time:.2f}s (min_check {min_d_check:.2f}s required, orig_min: {min_d_orig:.2f}s). Failure detail: {failure_detail}");
+                            success_flag = False; return False
+                    time.sleep(1 / self.replay_fps if self.replay_fps > 0 else 0.03)
+            
+            if current_step_idx == len(pattern):
+                self.logger.info("LED pattern confirmed")
+                success_flag = True
+                return True # Goes to finally
+            
+            # Fallback if loop finishes unexpectedly
+            failure_detail = f"ended_inconclusively_processed_{current_step_idx}_of_{len(pattern)}"
+            self.logger.warning(f"Pattern ended inconclusively. Processed {current_step_idx}/{len(pattern)} steps. Failure detail: {failure_detail}")
+            success_flag = False
+            return False # Goes to finally
+        finally:
+            if manage_replay: self._stop_replay_recording(success=success_flag, failure_reason=failure_detail)
 
 
-    def await_and_confirm_led_pattern(self, pattern: list, timeout: float, clear_buffer: bool = True) -> bool:
-        if not pattern: self.logger.warning("Empty pattern for await_and_confirm."); return False 
-        if not self.is_camera_initialized: self.logger.error("Camera not init for await_and_confirm."); return False
+    def await_and_confirm_led_pattern(self, pattern: list, timeout: float, clear_buffer: bool = True, manage_replay: bool = True) -> bool:
+        context_name = "await_and_confirm_led_pattern"
+        if manage_replay: self._start_replay_recording(context_name)
+
+        success_flag = False
+        failure_detail = "unknown_failure_or_empty_pattern"
+
+        if not pattern: 
+            self.logger.warning("Empty pattern for await_and_confirm.")
+            failure_detail = "empty_pattern"
+            if manage_replay: self._stop_replay_recording(success=False, failure_reason=failure_detail)
+            return False
+        if not self.is_camera_initialized:
+            self.logger.error("Camera not init for await_and_confirm.")
+            failure_detail = "camera_not_initialized"
+            if manage_replay: self._stop_replay_recording(success=False, failure_reason=failure_detail)
+            return False
             
         self.logger.debug(f"Awaiting first state of pattern (timeout: {timeout:.2f}s), steps: {len(pattern)}.")
         first_state_target = {k: v for k, v in pattern[0].items() if k != 'duration'}
         
-        if self.await_led_state(first_state_target, timeout=timeout, clear_buffer=clear_buffer):
-            return self.confirm_led_pattern(pattern, clear_buffer=False) 
-        
-        self.logger.warning(f"Pattern not started: First state {self._format_led_display_string(first_state_target)} not observed in {timeout:.2f}s."); return False
+        try:
+            # Call await_led_state with manage_replay=False as this is an inner call
+            # Replay for await_led_state is managed by this parent function's replay session
+            if self.await_led_state(first_state_target, timeout=timeout, clear_buffer=clear_buffer, manage_replay=False):
+                # If first state seen, now try to confirm the whole pattern starting from there
+                # Call confirm_led_pattern with manage_replay=False
+                pattern_confirmed = self.confirm_led_pattern(pattern, clear_buffer=False, manage_replay=False)
+                success_flag = pattern_confirmed # Set based on the pattern confirmation
+                if not pattern_confirmed:
+                    # confirm_led_pattern itself will log specific reasons. This is the higher-level failure.
+                    failure_detail = "pattern_confirmation_failed_after_await" 
+                # If pattern_confirmed is true, success_flag is true, failure_detail might not be used by _stop_replay if success
+                return pattern_confirmed # Goes to finally
+            else: # await_led_state failed to find the first state
+                formatted_first_state = self._format_led_display_string(first_state_target).replace(' ','_')
+                failure_detail = f"first_state_{formatted_first_state}_not_observed_in_{timeout:.2f}s"
+                self.logger.warning(f"Pattern not started: First state {self._format_led_display_string(first_state_target)} not observed in {timeout:.2f}s. Failure detail: {failure_detail}")
+                success_flag = False
+                return False # Goes to finally
+        finally:
+            if manage_replay: self._stop_replay_recording(success=success_flag, failure_reason=failure_detail)
 
     def release_camera(self):
+        if self.is_recording_replay:
+            self.logger.info("Replay: Active recording stopped due to camera release. Discarding buffered frames.")
+            self.replay_buffer.clear() # Clear buffer
+            self.is_recording_replay = False # Ensure flag is reset
+
         if self.cap and self.cap.isOpened(): self.cap.release(); self.logger.info(f"Camera ID {self.camera_id} released.")
         else: self.logger.debug(f"Camera ID {self.camera_id} was not open or already released.")
         self.cap = None; self.is_camera_initialized = False
