@@ -25,7 +25,7 @@ script_logger = logging.getLogger("MyAutomationScript") # Or use global_at_logge
 
 def run_sequence():
     fsm.power_on()
-    fsm.confirm_standby_mode()
+    fsm.standby_mode()
     fsm.unlock_admin()
     fsm.lock_admin()
     fsm.power_off()

@@ -17,6 +17,138 @@ from .unified_controller import UnifiedController
 # --- FSM Class Definition ---
 class SimplifiedDeviceFSM:
 
+    # DUT: dict = {
+    #     "name": None,
+    #     "battery": False,
+    #     "batteryVBUS": False,
+    #     "VBUS": False,
+    #     "bridgeFW": Devices[cfg.PROD.name]['bridgeFW'],
+    #     "mcuFW": [],
+    #     "mcuFWHumanReadable": "",
+    #     "fips": Devices[cfg.PROD.name]['fips'],
+    #     "legacyProduct": Devices[cfg.PROD.name]['legacy'],
+    #     "factoryKeypadTest": Devices[cfg.PROD.name]['factoryKeypadTest'],
+    #     "resetKeypadTest": Devices[cfg.PROD.name]['resetKeypadTest'],
+    #     "secureKey": Devices[cfg.PROD.name]['secureKey'],
+    #     "usb3": False,
+    #     "diskPath": "",
+    #     "mounted": False,
+    #     "serialNumber": "",
+    #     "devKeypadSerialNumber": "",
+
+    #     "CMFR": False,
+    #     "modelID1": Devices[cfg.PROD.name]['model_id_digit_1'],
+    #     "modelID2": Devices[cfg.PROD.name]['model_id_digit_2'],
+    #     "hardwareID1": Devices[cfg.PROD.name]['hardware_major'],
+    #     "hardwareID2": Devices[cfg.PROD.name]['hardware_minor'],
+    #     "scbPartNumber": Devices[cfg.PROD.name]['singleCodeBasePartNumber'],
+    #     "singleCodeBase": Devices[cfg.PROD.name]['singleCodeBase'],
+    #     "oobTrace": int(Devices['scriptConfig']["usbmonoob"]),
+    #     "port": int(Devices[cfg.PROD.name]["usbmonport"]),
+    #     "resetTrace": int(Devices['scriptConfig']["usbmonreset"]),
+    #     "unlockTrace": int(Devices['scriptConfig']["usbmonunlock"]),
+    #     "SPITrace": int(Devices['scriptConfig']["usbmonSPI"]),
+        
+    #     "lastFunctionExitMode": "",
+    #     "adminMode": False,
+    #     "bridgeChipTestMode": False,
+    #     "diagnosticMode": False,
+    #     "errorMode": False,
+    #     "factoryMode": False,
+    #     "oobMode": True,
+    #     "sleepMode": True,
+    #     "standbyMode": False,
+    #     "onDemandSelfTest": False,
+    #     "startupSelfTest": False,
+    #     "basicDisk": True,
+    #     "removableMedia": False,
+        
+    #     "bruteForceCounter": 10,
+    #     "bruteForceCounterHalfwayPoint": 5,
+    #     "bruteForceCounterFirstHalf": 0,
+    #     "bruteForceCounterSecondHalf": 0,
+    #     "enrollingBruteForce": False,
+    #     "enrollmentBruteForce": False,
+    #     "bruteForcedFirstHalf": False,
+    #     "bruteForcedSecondHalf": False,
+    #     "lastTryLogin": False,
+    #     "deletePINs": False,
+        
+    #     "ledFlicker": False,
+        
+    #     "lockOverride": False,
+    #     "manufacturerResetEnum": False,
+    #     "manufacturerResetInitiate": False,
+    #     "manufacturerResetKeypadTest": False,
+    #     "manufacturerResetReadyMode": False,
+    #     "userResetInitiate": False,
+    #     "userResetWarning": False,
+    #     "resetVBUSInterruptTesting": False,
+    #     "generatingEncryptionKey": False,
+    #     "selfDestructVBUSInterrupt": False,
+    #     "selfDestructVBUSInterruptPIN": {},
+    #     "maxPINCounter": 16,
+    #     "minPINCounter": int(Devices[cfg.PROD.name]["minpin"]),
+    #     "defaultMinPINCounter": int(Devices[cfg.PROD.name]["minpin"]),
+    #     "enrollingMinPIN": False,
+    #     "enrollmentMinPIN": False,
+    #     "provisionLock": False,
+    #     "provisionLockBricked": False,
+    #     "provisionLockSoftBricked": False,
+    #     "provisionLockRecover": False,
+    #     "provisionLockRecoverCounter": 5,
+    #     "readOnlyEnabled": False,
+    #     "readWriteEnabled": True,
+    #     "unattendedAutoLockCounter": 0,
+    #     "enrollingUnattendedAutoLock": False,
+    #     "enrollmentUnattendedAutoLock": False,
+    #     "unattendedAutoLockEnum": False,
+    #     "unattendedAutoLockTimeout": 0,
+    #     "userForcedEnrollment": False,
+    #     "userForcedEnrollmentUsed": False,
+    #     "adminPIN": {},
+    #     "oldAdminPIN": {},
+    #     "enrolledAdmin": False,
+    #     "enrollingAdmin": False,
+    #     "enrollmentAdmin": False,
+    #     "adminEnum": False,
+    #     "adminLogin": False,
+    #     "recoveryPIN": {1: {}, 2: {}, 3: {}, 4: {}},
+    #     "oldRecoveryPIN": {1: {}, 2: {}, 3: {}, 4: {}},
+    #     "enrolledRecovery": {1: False, 2: False, 3: False, 4: False},
+    #     "enrollingRecovery": False,
+    #     "enrollmentRecovery": {1: False, 2: False, 3: False, 4: False},
+    #     "loginRecovery": {1: False, 2: False, 3: False, 4: False},
+    #     "usedRecovery": {1: False, 2: False, 3: False, 4: False},
+        
+    #     "selfDestructEnabled": False,
+    #     "selfDestructPIN": {},
+    #     "oldSelfDestructPIN": {},
+    #     "enrolledSelfDestruct": False,
+    #     "enrollingSelfDestruct": False,
+    #     "enrollmentSelfDestruct": False,
+    #     "selfDestructEnum": False,
+    #     "selfDestructUsed": False,
+    #     "userCount": Devices[cfg.PROD.name]['userCount'],
+    #     "userPIN": {1: None, 2: None, 3: None, 4: None},
+    #     "oldUserPIN": {1: None, 2: None, 3: None, 4: None},
+    #     "enrolledUser": {1: False, 2: False, 3: False, 4: False},
+    #     "enrollingUser": False,
+    #     "enrollmentUser": {1: False, 2: False, 3: False, 4: False},
+    #     "enumUser": {1: False, 2: False, 3: False, 4: False},
+    #     "changeLoginUser": {1: False, 2: False, 3: False, 4: False},
+    #     "psuedoUserPIN": None,
+    #     "devFWUnlockDrive": False,
+    #     "devResultSPI": 0,
+    #     "modeOrientationDisable": False,
+    #     "modeOrientationCounter": 0,
+    #     "orientationData": {'expectedState': "OFF", 'currentState': None, 'pinNumber': None},
+    #     "fileHash": {},
+    #     "executeSpeedTest": False,
+    #     "windowsEnumTesting": False,
+    #     "httpAddress": ""
+    # }
+
     STATES: List[str] = ['OFF', 'STARTUP_SELF_TEST', 'STANDBY_MODE', 'UNLOCKED_ADMIN']
 
     logger: logging.Logger
@@ -36,9 +168,10 @@ class SimplifiedDeviceFSM:
             after_state_change='_log_state_change_details'
         )
         self.state = self.machine.initial
+        self.source_state = self.machine.initial
 
         # Define transition triggers (methods will be dynamically created by transitions)
-        self.confirm_standby_mode: callable
+        self.standby_mode: callable
         self.power_on: callable
         self.power_off: callable
         self.post_successful_standby_detected: callable
@@ -49,17 +182,17 @@ class SimplifiedDeviceFSM:
 
         # --- Transitions ---
         self.machine.add_transition(trigger='power_on', source='OFF', dest='STARTUP_SELF_TEST')                         # Power on, confirm Startup Self-Test
-        self.machine.add_transition(trigger='confirm_standby_mode', source='STARTUP_SELF_TEST', dest='STANDBY_MODE')    # Confirm Standby Mode
+        self.machine.add_transition(trigger='standby_mode', source='STARTUP_SELF_TEST', dest='STANDBY_MODE')            # Confirm Standby Mode
         self.machine.add_transition(trigger='power_off', source='STANDBY_MODE', dest='OFF')                             # Power off, confirm DUT LEDs off
         self.machine.add_transition(trigger='unlock_admin', source='STANDBY_MODE', dest='UNLOCKED_ADMIN')               # Unlock DUT using Admin PIN
         self.machine.add_transition(trigger='lock_admin', source='UNLOCKED_ADMIN', dest='STANDBY_MODE')                 # Lock DUT from Admin enum
 
 
     def _log_state_change_details(self, event_data: EventData) -> None:
-        source_state: str = event_data.transition.source
+        self.source_state: str = event_data.transition.source
         event_name: str = event_data.event.name
         current_state: str = self.state # self.state is updated by the Machine
-        self.logger.debug(f"State changed: {source_state} -> {current_state} (Event: {event_name})")
+        self.logger.info(f"State changed: {self.source_state} -> {current_state} (Event: {event_name})")
         if event_data.kwargs: # Log any extra data passed with the event trigger
             self.logger.debug(f"  Event details: {event_data.kwargs}")
 
@@ -96,29 +229,40 @@ class SimplifiedDeviceFSM:
             self.post_failed(details="POST_ANIMATION_MISMATCH") # Pass details
             return
 
-    def on_enter_STANDBY_MODE(self, event_data: EventData) -> None:
+    def on_exit_STARTUP_SELF_TEST(self, event_data: EventData) -> None:
+        self.confirm_standby_mode()
+        
+    def on_exit_STANDBY_MODE(self, event_data: EventData) -> None:
+        if self.source_state == "STARTUP_SELF_TEST":
+            self.enter_admin_pin()
 
-       self.logger.info(f"Confirming Standby Mode...")
-       
-       # Or, using the lower-level primitive directly as before:
-       standby_confirmed_ok: bool = self.at.confirm_led_solid(
-            LEDs['STANDBY_MODE'], 
-            minimum=3.0, 
+    def on_exit_UNLOCKED_ADMIN(self, event_data: EventData) -> None:
+        self.logger.info(f"Locking DUT from Unlocked Admin...")
+        self.at.press("lock")
+        self.confirm_standby_mode()
+
+    ####################################################################################
+
+    def confirm_standby_mode(self):
+        self.logger.info(f"Confirming Standby Mode...")
+        
+        standby_confirmed: bool = self.at.confirm_led_solid(
+            LEDs['STANDBY_MODE'],
+            minimum=3.0,
             timeout=5.0,
-            clear_buffer=True # Expecting a stable state now
+            clear_buffer=True
         )
-
-       if not standby_confirmed_ok:
+        if not standby_confirmed:
             self.logger.error(f"Failed to confirm stable STANDBY_MODE LEDs. Device state uncertain. Triggering critical error.")
             self.critical_error_detected(details="STANDBY_LED_CONFIRMATION_FAILED") # Pass details
             return
-       self.logger.info("Stable STANDBY_MODE LEDs confirmed.")
-        
-    def on_enter_UNLOCKED_ADMIN(self, event_data: EventData) -> None:
+        self.logger.info("Stable STANDBY_MODE LEDs confirmed.")
+        return standby_confirmed
+    
+    def enter_admin_pin(self):
         self.logger.info("Unlocking DUT with Admin PIN...")
 
         self.at.sequence(["key1", "key1", "key2", "key2", "key3", "key3", "key4", "key4", "unlock"])
-        # 1. Confirm the POST animation (using low-level AT method)
         unlock_admin_ok: bool = self.at.await_and_confirm_led_pattern(LEDs['ENUM'], timeout = 15, clear_buffer=True)
 
         if not unlock_admin_ok:
@@ -127,71 +271,3 @@ class SimplifiedDeviceFSM:
             return
         
         self.at.confirm_enum()
-
-    def on_exit_UNLOCKED_ADMIN(self, event_data: EventData) -> None:
-        self.logger.info(f"Locking DUT from Unlocked Admin...")
-        self.at.press("lock")
-
-# --- Main Execution Logic (Example for direct testing of this FSM module) ---
-if __name__ == '__main__':
-    print("WARNING: Running flight_control_fsm.py directly. Setting up paths for test.")
-    import sys
-    SCRIPT_DIR_FSM = os.path.dirname(os.path.abspath(__file__))
-    PROJECT_ROOT_FSM = os.path.dirname(SCRIPT_DIR_FSM)
-    if PROJECT_ROOT_FSM not in sys.path:
-        sys.path.insert(0, PROJECT_ROOT_FSM)
-
-    main_log: logging.Logger
-    try:
-        from utils.logging_config import setup_logging
-        setup_logging() # Configure with project defaults
-    except ImportError:
-        logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
-        logging.warning("Could not import custom logging_config for FSM direct test. Using basicConfig.")
-    main_log = logging.getLogger("__main__FSM_Test")
-
-    at_controller_test: Optional['UnifiedController'] = None
-    try:
-        # This assumes automation_toolkit.py can successfully create 'at'
-        from automation_toolkit import get_at_controller
-        at_controller_test = get_at_controller()
-        if at_controller_test is None:
-            raise RuntimeError("Failed to get 'at' controller for FSM direct test.")
-        main_log.info("Successfully obtained 'at' controller for FSM direct test.")
-    except Exception as e_test_at:
-        main_log.critical(f"Could not get/initialize 'at' controller for FSM direct test: {e_test_at}. Aborting.", exc_info=True)
-        sys.exit(1)
-
-    main_log.info("Initializing SimplifiedDeviceFSM for direct test...")
-    device_fsm_test = SimplifiedDeviceFSM(at_controller=at_controller_test)
-    main_log.info(f"FSM (direct test) initial state: {device_fsm_test.state}")
-
-    main_log.info("\n>>> FSM Direct Test: Simulating power on request...")
-    # Physical device should be connected and ready to show POST -> Standby sequence
-    if hasattr(device_fsm_test, 'power_on_requested'): 
-        device_fsm_test.power_on_requested() 
-    else:
-        main_log.error("FSM instance does not have 'power_on_requested' trigger.")
-        
-    main_log.info(f"FSM (direct test) state after power_on_requested & internal processing: {device_fsm_test.state}")
-
-    if device_fsm_test.state == 'STANDBY_MODE':
-        main_log.info("\n>>> FSM Direct Test: Device is in Standby. Simulating power off request...")
-        time.sleep(1) 
-        if hasattr(device_fsm_test, 'power_off_requested'):
-            device_fsm_test.power_off_requested()
-        main_log.info(f"FSM (direct test) state after power_off from Standby: {device_fsm_test.state}")
-    elif device_fsm_test.state == 'ERROR_POST_FAILED':
-        main_log.info("\n>>> FSM Direct Test: Device is in Error. Simulating power off request...")
-        time.sleep(1)
-        if hasattr(device_fsm_test, 'power_off_requested'):
-            # The 'power_off_requested' trigger will call self.at.power_off()
-            device_fsm_test.power_off_requested(details="Shutdown from error by test") # Example of passing details
-        main_log.info(f"FSM (direct test) state after power_off from Error: {device_fsm_test.state}")
-    else:
-        main_log.warning(f"\n>>> FSM Direct Test: Device ended in unexpected state '{device_fsm_test.state}'. Not simulating power off.")
-
-    main_log.info("\nSimplified FSM direct test complete.")
-    if at_controller_test and hasattr(at_controller_test, 'close'):
-        main_log.info("Closing 'at_controller_test' resources from FSM direct test.")
-        at_controller_test.close()

@@ -29,7 +29,7 @@ except ImportError:
 
 # --- Configuration ---
 CAMERA_ID = 0  # Adjust if your camera is not ID 0
-LOG_LEVEL = logging.DEBUG # Use DEBUG to see HSV match details from LogitechLedChecker
+LOG_LEVEL = logging.INFO # Use DEBUG to see HSV match details from LogitechLedChecker
 DEFAULT_VISUALIZATION_COLOR = (200, 200, 200) # BGR for ROIs if "display_color_bgr" not in config
 
 def setup_logging(level=logging.INFO):
