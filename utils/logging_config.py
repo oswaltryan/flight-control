@@ -16,8 +16,8 @@ LOG_LEVEL_CONFIG = {
     "GlobalATController": logging.INFO,
     "GlobalATController.UnifiedInstance": logging.INFO,
     "GlobalATController.UnifiedInstance.Phidget": logging.INFO,
-    "GlobalATController.UnifiedInstance.Camera": logging.DEBUG, # For detailed LED state logs
-    "camera.camera_controller": logging.DEBUG, # If LogitechLedChecker used standalone
+    "GlobalATController.UnifiedInstance.Camera": logging.INFO, # For detailed LED state logs
+    "camera.camera_controller": logging.INFO, # If LogitechLedChecker used standalone
     "hardware.phidget_io_controller": logging.INFO, # If PhidgetController used standalone
     "controllers.unified_controller": logging.INFO, # For UnifiedController's own messages
     "Phidget22": logging.WARNING, # Default verbosity for the Phidget22 library itself

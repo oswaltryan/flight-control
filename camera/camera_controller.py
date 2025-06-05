@@ -432,9 +432,6 @@ class LogitechLedChecker:
 
             self._save_replay_video() 
         
-        elif success:
-             self.logger.debug(f"Replay: Success for method '{self.replay_method_name}'. Clearing buffer without saving video.")
-        
         self.replay_buffer.clear()
         self.is_recording_replay = False
         self.replay_method_name = ""
@@ -620,7 +617,6 @@ class LogitechLedChecker:
             if clear_buffer: self._clear_camera_buffer()
             initial_leds = self._get_current_led_state_from_camera() or {}
             last_state_info = [initial_leds, time.time()]
-            self.logger.info(f"Initial for await: {self._format_led_display_string(initial_leds)}")
             await_start_time = time.time()
             try:
                 while time.time() - await_start_time < timeout:
