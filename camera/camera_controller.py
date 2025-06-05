@@ -305,29 +305,50 @@ class LogitechLedChecker:
                                        OVERLAY_FONT, OVERLAY_FONT_SCALE * 0.8, OVERLAY_TEXT_COLOR_ROI_NAME, 
                                        OVERLAY_FONT_THICKNESS)
 
-        # 2. Draw Timestamp (Top-left)
-        ts_text = f"Replay Time: {timestamp_in_replay:.2f}s"
-        draw_text_with_optional_bg(overlay_frame, ts_text, (OVERLAY_PADDING, current_y_offset), 
-                                   OVERLAY_FONT, OVERLAY_FONT_SCALE, OVERLAY_TEXT_COLOR_MAIN, OVERLAY_FONT_THICKNESS)
-        current_y_offset += OVERLAY_LINE_HEIGHT
+        # # 2. Draw Timestamp (Top-left)
+        # ts_text = f"Replay Time: {timestamp_in_replay:.2f}s"
+        # draw_text_with_optional_bg(overlay_frame, ts_text, (OVERLAY_PADDING, current_y_offset), 
+        #                            OVERLAY_FONT, OVERLAY_FONT_SCALE, OVERLAY_TEXT_COLOR_MAIN, OVERLAY_FONT_THICKNESS)
+        # current_y_offset += OVERLAY_LINE_HEIGHT
 
-        # 3. Draw Method Name (function being executed)
-        method_text = f"Method: {self.replay_method_name}"
-        draw_text_with_optional_bg(overlay_frame, method_text, (OVERLAY_PADDING, current_y_offset),
-                                   OVERLAY_FONT, OVERLAY_FONT_SCALE, OVERLAY_TEXT_COLOR_MAIN, OVERLAY_FONT_THICKNESS)
-        current_y_offset += OVERLAY_LINE_HEIGHT
-
-        # 4. Draw Additional Context (from FSM: script, source_state, destination_state etc.)
+        # 3. Draw Additional Context (from FSM: script, source_state, destination_state etc.)
         if self.replay_extra_context:
-            # Sort keys for a somewhat consistent display order
-            sorted_keys = sorted(self.replay_extra_context.keys(), key=lambda k: (
-                0 if 'script' in k.lower() else 1 if 'source' in k.lower() else 2 if 'dest' in k.lower() or 'active' in k.lower() or 'current' in k.lower() else 3, k
-            ))
-            for key in sorted_keys:
-                value = self.replay_extra_context[key]
-                # Basic formatting for display key
-                display_key = key.replace("replay_", "").replace("_", " ").title()
-                context_text = f"{display_key}: {value}"
+            # Define keys to filter out completely
+            excluded_keys = ["replay_script_name", "replay_fsm_function"]
+
+            # Define renaming map for specific keys
+            rename_map = {
+                "replay_fsm_source_state": "Source",
+                "replay_fsm_current_state": "Destination",
+                # Add other renames here if needed, e.g.,
+                "replay_fsm_trigger_event": "Trigger Event" 
+            }
+
+            # Filter and prepare keys for display
+            display_items = {}
+            for key, value in self.replay_extra_context.items():
+                if key in excluded_keys:
+                    continue
+                
+                display_key_name = rename_map.get(key, key.replace("replay_", "").replace("_", " ").title())
+                display_items[key] = (display_key_name, value)
+
+            # Custom sort order for the display_key_name (after renaming)
+            def custom_sort_key(original_key_name_tuple):
+                original_key = original_key_name_tuple[0] # The original key from replay_extra_context
+                # Prioritize based on original key names for reliable sorting
+                if original_key == "replay_fsm_source_state": return 0
+                if original_key == "replay_fsm_current_state": return 1
+                if original_key == "replay_fsm_trigger_event": return 2 # Example, if you keep this
+                # Add more specific ordering here if needed
+                return 3 # For all other keys
+
+            # Sort the original keys based on the custom logic
+            sorted_original_keys = sorted(display_items.keys(), key=custom_sort_key)
+
+            for original_key in sorted_original_keys:
+                display_key_name, value = display_items[original_key]
+                context_text = f"{display_key_name}: {value}"
                 draw_text_with_optional_bg(overlay_frame, context_text, (OVERLAY_PADDING, current_y_offset),
                                            OVERLAY_FONT, OVERLAY_FONT_SCALE, OVERLAY_TEXT_COLOR_MAIN, OVERLAY_FONT_THICKNESS)
                 current_y_offset += OVERLAY_LINE_HEIGHT
