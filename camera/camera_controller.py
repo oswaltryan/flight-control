@@ -516,7 +516,7 @@ class LogitechLedChecker:
 
             overall_start_time = time.time()
             continuous_target_match_start_time = None
-            effective_minimum = max(0, minimum - self.duration_tolerance_sec)
+            # MODIFIED: effective_minimum calculation is removed. We will check against the strict 'minimum' first.
             try:
                 while time.time() - overall_start_time < timeout:
                     current_time = time.time()
@@ -532,21 +532,30 @@ class LogitechLedChecker:
                         if continuous_target_match_start_time is None:
                             continuous_target_match_start_time = last_state_info[1] 
                         target_held_duration = current_time - continuous_target_match_start_time
-                        if target_held_duration >= effective_minimum:
+                        # MODIFIED: Check against the strict 'minimum' directly.
+                        if target_held_duration >= minimum:
                             self.logger.info(f"{self._format_led_display_string(last_state_info[0])} ({target_held_duration:.2f}s) - Solid Confirmed")
                             success_flag = True; break # Exit while loop
                     else: 
                         continuous_target_match_start_time = None 
                     time.sleep(1 / self.replay_fps if self.replay_fps > 0 else 0.1)
                 
+                # MODIFIED: Add a "forgiveness" block here for the timeout case.
                 if not success_flag: # Timeout occurred if loop finished without success
                     self._log_final_state(last_state_info, time.time(), reason_suffix=" at timeout")
                     if continuous_target_match_start_time is not None:
                         held_duration = time.time() - continuous_target_match_start_time
-                        failure_detail = f"timeout_target_active_for_{held_duration:.2f}s_needed_{effective_minimum:.2f}s"
+                        # FORGIVENESS CHECK: Is the duration we held it for within tolerance?
+                        if held_duration >= (minimum - self.duration_tolerance_sec):
+                            self.logger.warning(f"Timeout for {method_name}, but final duration {held_duration:.2f}s was within tolerance of required {minimum:.2f}s. Passing.")
+                            success_flag = True # Forgive the failure and mark as success.
+                        else:
+                            failure_detail = f"timeout_target_active_for_{held_duration:.2f}s_needed_{minimum:.2f}s"
+                            self.logger.warning(f"Timeout for {method_name}: Target {formatted_target_state} not solid. Reason: {failure_detail}")
                     else:
-                        failure_detail = f"timeout_target_not_solid_for_{effective_minimum:.2f}s"
-                    self.logger.warning(f"Timeout for {method_name}: Target {formatted_target_state} not solid. Reason: {failure_detail}")
+                        failure_detail = f"timeout_target_not_solid_for_{minimum:.2f}s"
+                        self.logger.warning(f"Timeout for {method_name}: Target {formatted_target_state} not solid. Reason: {failure_detail}")
+
             except Exception as e_loop:
                 failure_detail = f"exception_in_solid_loop_{type(e_loop).__name__}"
                 self.logger.error(f"Exception in {method_name} loop: {e_loop}", exc_info=True)
@@ -562,8 +571,8 @@ class LogitechLedChecker:
         success_flag, failure_detail = False, "unknown_strict_failure"
 
         formatted_target_state = self._format_led_display_string(state)
-        effective_minimum = max(0.0, minimum - self.duration_tolerance_sec)
-        self.logger.info(f"Waiting strictly solid {formatted_target_state}, eff_min {effective_minimum:.2f}s (orig min: {minimum:.2f}s)")
+        # MODIFIED: effective_minimum is removed. Log now shows the strict minimum.
+        self.logger.info(f"Waiting strictly solid {formatted_target_state}, min {minimum:.2f}s")
 
         if not self.is_camera_initialized:
             failure_detail = "camera_not_init_strict"; self.logger.error(f"{method_name}: {failure_detail}")
@@ -579,18 +588,30 @@ class LogitechLedChecker:
             else:
                 target_state_began_at = last_state_info[1]; strict_op_start_time = time.time()
                 try:
-                    while time.time() - target_state_began_at < effective_minimum:
+                    # MODIFIED: Check against the strict 'minimum'.
+                    while time.time() - target_state_began_at < minimum:
                         current_time = time.time()
-                        if current_time - strict_op_start_time > (effective_minimum + 5.0): # Operation timeout
-                            failure_detail=f"op_timeout_strict_aiming_{effective_minimum:.2f}s"; self.logger.warning(f"{method_name} FAILED: {failure_detail}"); success_flag=False; break
+                        # MODIFIED: Operation timeout is based on the strict minimum.
+                        if current_time - strict_op_start_time > (minimum + 5.0): # Operation timeout
+                            failure_detail=f"op_timeout_strict_aiming_{minimum:.2f}s"; self.logger.warning(f"{method_name} FAILED: {failure_detail}"); success_flag=False; break
                         current_leds = self._get_current_led_state_from_camera()
                         if not current_leds:
                             failure_detail="frame_capture_err_strict"; self.logger.warning(f"{method_name} FAILED: {failure_detail}"); success_flag=False; break
                         logged_a_change = self._handle_state_change_logging(current_leds, current_time, last_state_info)
+                        
+                        # MODIFIED: Implement two-step check when state breaks.
                         if not self._matches_state(current_leds, state, None):
                             held_for = current_time - target_state_began_at 
                             if not logged_a_change and last_state_info[0] is not None: self.logger.info(f"{self._format_led_display_string(last_state_info[0])} ({current_time - last_state_info[1]:.2f}s, broke strict sequence)")
-                            failure_detail=f"state_broke_strict_held_{held_for:.2f}s_needed_{effective_minimum:.2f}s"; self.logger.warning(f"{method_name} FAILED: {failure_detail}"); success_flag=False; break
+                            
+                            # FORGIVENESS CHECK: If strict check fails, is it within tolerance?
+                            if held_for >= (minimum - self.duration_tolerance_sec):
+                                self.logger.warning(f"Strict sequence broke at {held_for:.2f}s, but this is within tolerance of required {minimum:.2f}s. Passing.")
+                                success_flag = True # Forgive and treat as success.
+                            else:
+                                failure_detail=f"state_broke_strict_held_{held_for:.2f}s_needed_{minimum:.2f}s"; self.logger.warning(f"{method_name} FAILED: {failure_detail}"); success_flag=False
+                            break # Exit the loop whether it was forgiven or a true failure.
+
                         time.sleep(1 / self.replay_fps if self.replay_fps > 0 else 0.1)
                     else: # while loop completed without break (meaning duration met)
                         self._log_final_state(last_state_info, time.time(), reason_suffix=" on success") 
@@ -659,7 +680,10 @@ class LogitechLedChecker:
                     
                     step_cfg = pattern[current_step_idx]; target_state_for_step = {k:v for k,v in step_cfg.items() if k!='duration'}
                     min_d_orig, max_d_orig = step_cfg.get('duration', (0, float('inf')))
-                    min_d_check = max(0.0, min_d_orig-self.duration_tolerance_sec); max_d_check = max_d_orig+self.duration_tolerance_sec if max_d_orig!=float('inf') else float('inf')
+                    # MODIFIED: min_d_check is now the original minimum. Tolerance is NOT subtracted here.
+                    min_d_check = min_d_orig
+                    # MODIFIED: max_d_check still adds tolerance, which is desirable to avoid premature failure.
+                    max_d_check = max_d_orig + self.duration_tolerance_sec if max_d_orig != float('inf') else float('inf')
                     target_state_str = self._format_led_display_string(target_state_for_step, ordered_keys)
                     
                     step_seen_at = None; step_loop_start_time = time.time()
@@ -696,10 +720,19 @@ class LogitechLedChecker:
                                 self.logger.info(f"{target_state_str}  {held_time:.2f}s+ ({current_step_idx + 1:02d}/{len(pattern):02d})")
                                 current_step_idx+=1; break 
                         else: # State changed from target
-                            if held_time >= min_d_check: 
+                            # MODIFIED: --- TWO-STEP FORGIVENESS LOGIC ---
+                            # 1. Strict Check: Did it meet the original minimum duration?
+                            if held_time >= min_d_check:
                                 self.logger.info(f"{target_state_str}  {held_time:.2f}s ({current_step_idx + 1:02d}/{len(pattern):02d})")
-                                current_step_idx+=1; break
-                            else: 
+                                current_step_idx += 1 # Success
+                                break
+                            # 2. Forgiveness Check: If not, was it within tolerance?
+                            elif held_time >= (min_d_orig - self.duration_tolerance_sec):
+                                self.logger.warning(f"{target_state_str} held for {held_time:.2f}s. Shorter than required {min_d_orig:.2f}s but within tolerance. Passing.")
+                                current_step_idx += 1 # Forgiven Success
+                                break
+                            # 3. True Failure: It was too short, even with tolerance.
+                            else:
                                 current_led_str = self._format_led_display_string(current_leds, ordered_keys)
                                 failure_detail=f"step_{current_step_idx+1}_state_{target_state_str.replace(' ','_')}_changed_to_{current_led_str.replace(' ','_')}_early_held_{held_time:.2f}s_min_{min_d_check:.2f}s"; success_flag=False; break
                         time.sleep(1/self.replay_fps if self.replay_fps > 0 else 0.03)
