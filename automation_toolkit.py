@@ -6,17 +6,24 @@ import logging
 import sys
 import os
 import atexit
+import datetime # Make sure datetime is imported
 
-# --- Path Setup for automation_toolkit.py to find 'controllers' AND 'utils' ---
-# This assumes automation_toolkit.py is in project_root.
+# --- Path Setup & Run Context ---
 PROJECT_ROOT_FOR_GLOBAL = os.path.dirname(os.path.abspath(__file__))
 if PROJECT_ROOT_FOR_GLOBAL not in sys.path:
-    sys.path.insert(0, PROJECT_ROOT_FOR_GLOBAL) # Ensures root is in path
+    sys.path.insert(0, PROJECT_ROOT_FOR_GLOBAL)
+
+# Format: YYYY-MM-DD_HH-MM-SS
+RUN_TIMESTAMP = datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+RUN_OUTPUT_DIR = os.path.join(PROJECT_ROOT_FOR_GLOBAL, "logs", RUN_TIMESTAMP)
+os.makedirs(RUN_OUTPUT_DIR, exist_ok=True) # Create the directory
 
 # --- IMPORT AND SETUP LOGGING FIRST ---
 try:
-    from utils.logging_config import setup_logging # utils is found because root is in path
-    setup_logging()
+    from utils.logging_config import setup_logging
+    # Pass the specific log file path for this run
+    run_log_file = os.path.join(RUN_OUTPUT_DIR, "main.log")
+    setup_logging(log_file_path=run_log_file, log_file_mode="w") # "w" to start fresh for each run
 except ImportError as e_log_setup:
     # Basic fallback logging if setup_logging fails
     logging.basicConfig(level=logging.WARNING, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
@@ -44,7 +51,8 @@ try:
         camera_id=DEFAULT_CAMERA_ID,
         display_order=DEFAULT_LED_DISPLAY_ORDER,
         logger_instance=global_at_logger.getChild("UnifiedInstance"),
-        enable_instant_replay=True
+        enable_instant_replay=True,
+        replay_output_dir=RUN_OUTPUT_DIR 
     )
 except Exception as e_at_create:
     global_at_logger.critical(f"Failed to create global 'at' (UnifiedController) instance: {e_at_create}", exc_info=True)
@@ -77,7 +85,6 @@ def get_fsm():
 
 # --- Optional: Resource cleanup ---
 def _cleanup_global_at():
-    global_at_logger.info("Attempting to cleanup global 'at' resources...")
     if at and hasattr(at, 'close'):
         try:
             at.close()

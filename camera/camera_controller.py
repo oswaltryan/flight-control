@@ -28,7 +28,6 @@ DEFAULT_REPLAY_POST_FAIL_DURATION_SEC = 5.0
 DEFAULT_REPLAY_FPS_FOR_OUTPUT = DEFAULT_FPS # Use camera's default FPS for replay output
 _CAMERA_CONTROLLER_FILE_DIR = os.path.dirname(os.path.abspath(__file__))
 _PROJECT_ROOT_FROM_CAMERA = os.path.dirname(_CAMERA_CONTROLLER_FILE_DIR)
-DEFAULT_REPLAY_OUTPUT_DIR = os.path.join(_PROJECT_ROOT_FROM_CAMERA, "logs", "replays")
 
 # --- Overlay Drawing Constants ---
 OVERLAY_FONT = cv2.FONT_HERSHEY_SIMPLEX
@@ -99,7 +98,7 @@ class LogitechLedChecker:
     def __init__(self, camera_id: int, logger_instance=None, led_configs=None,
                  display_order: Optional[List[str]] = None, duration_tolerance_sec: float = DEFAULT_DURATION_TOLERANCE_SEC,
                  replay_post_failure_duration_sec: float = DEFAULT_REPLAY_POST_FAIL_DURATION_SEC,
-                 replay_output_dir: str = DEFAULT_REPLAY_OUTPUT_DIR,
+                 replay_output_dir: str = None,
                  enable_instant_replay: Optional[bool] = None):
         self.logger = logger_instance if logger_instance else logger
         self.cap = None
@@ -130,7 +129,6 @@ class LogitechLedChecker:
         if self.enable_instant_replay and self.replay_output_dir:
             try:
                 os.makedirs(self.replay_output_dir, exist_ok=True)
-                self.logger.info(f"Instant replay output directory: {self.replay_output_dir}")
             except OSError as e:
                 self.logger.error(f"Failed to create replay output directory {self.replay_output_dir}: {e}. Replays will not be saved.", exc_info=True)
                 self.replay_output_dir = None 
@@ -172,7 +170,6 @@ class LogitechLedChecker:
 
         if self.camera_id is None: self.logger.error("Camera ID cannot be None."); return 
         self._initialize_camera()
-        self.logger.info(f"LogitechLedChecker initialized with duration tolerance: {self.duration_tolerance_sec:.3f}s")
 
     def _initialize_camera(self):
         try:
@@ -190,16 +187,13 @@ class LogitechLedChecker:
                     raise IOError(f"Cannot open webcam {self.camera_id}{backend_name_str} or with default backend.")
 
             self.is_camera_initialized = True
-            if self.cap.set(cv2.CAP_PROP_FPS, DEFAULT_FPS): self.logger.info(f"Requested FPS {DEFAULT_FPS} for camera ID {self.camera_id}.")
+            if self.cap.set(cv2.CAP_PROP_FPS, DEFAULT_FPS): pass
             else: self.logger.warning(f"Could not set FPS {DEFAULT_FPS} for camera ID {self.camera_id}.")
             
             actual_fps = self.cap.get(cv2.CAP_PROP_FPS)
             if actual_fps > 0:
                 self.replay_fps = float(actual_fps) 
-                self.logger.info(f"Camera ID {self.camera_id} actual FPS: {actual_fps:.2f}. Using this for replay timing.")
-            else:
-                self.logger.warning(f"Could not get actual FPS from camera ID {self.camera_id}. Using default {self.replay_fps:.2f} for replay.")
-            self.logger.info(f"Camera Controller initialized successfully with camera ID: {self.camera_id}.")
+            self.logger.info(f"Camera Controller initialized successfully at {DEFAULT_FPS} FPS.")
         except Exception as e:
             self.logger.error(f"Failed to initialize camera {self.camera_id}: {e}", exc_info=True)
             self.is_camera_initialized = False
@@ -268,7 +262,6 @@ class LogitechLedChecker:
                     if self.replay_frame_width is None or self.replay_frame_height is None:
                         h, w = frame_for_processing.shape[:2]
                         self.replay_frame_width, self.replay_frame_height = w, h
-                        self.logger.debug(f"Replay: Frame dimensions set {w}x{h} @ {self.replay_fps:.2f} FPS.")
             except Exception as e:
                 self.logger.error(f"Exception while capturing frame: {e}", exc_info=True)
                 return {}
@@ -279,7 +272,6 @@ class LogitechLedChecker:
                 if self.replay_frame_width is None or self.replay_frame_height is None:
                     h, w = frame_for_processing.shape[:2]
                     self.replay_frame_width, self.replay_frame_height = w, h
-                    self.logger.debug(f"Replay: Frame dimensions set {w}x{h} @ {self.replay_fps:.2f} FPS.")
 
         detected_led_states = {}
         if frame_for_processing is not None:
@@ -301,9 +293,9 @@ class LogitechLedChecker:
             cv2.rectangle(overlay_frame, (x, y), (x + w, y + h), roi_box_color, 1)
             text_pos_y = y - OVERLAY_PADDING if y - OVERLAY_PADDING > OVERLAY_LINE_HEIGHT else y + OVERLAY_PADDING + int(OVERLAY_LINE_HEIGHT * 0.8)
             text_pos_x = x + OVERLAY_PADDING
-            draw_text_with_optional_bg(overlay_frame, config_item["name"], (text_pos_x, text_pos_y),
-                                       OVERLAY_FONT, OVERLAY_FONT_SCALE * 0.8, OVERLAY_TEXT_COLOR_ROI_NAME, 
-                                       OVERLAY_FONT_THICKNESS)
+            # draw_text_with_optional_bg(overlay_frame, config_item["name"], (text_pos_x, text_pos_y),
+            #                            OVERLAY_FONT, OVERLAY_FONT_SCALE * 0.8, OVERLAY_TEXT_COLOR_ROI_NAME, 
+            #                            OVERLAY_FONT_THICKNESS)
 
         # # 2. Draw Timestamp (Top-left)
         # ts_text = f"Replay Time: {timestamp_in_replay:.2f}s"
@@ -366,7 +358,6 @@ class LogitechLedChecker:
             self.logger.debug(f"Replay: Recording already active for method '{self.replay_method_name}'. Ignoring start for '{method_name}'.")
             return
 
-        self.logger.debug(f"Replay: Starting recording for method '{method_name}'. Extra context: {extra_context}")
         self.is_recording_replay = True
         self.replay_buffer.clear()
         self.replay_start_time = time.time()
@@ -384,13 +375,9 @@ class LogitechLedChecker:
             self.logger.error("Replay: Frame dimensions not set. Cannot save video.")
             return
 
-        timestamp_str = datetime.datetime.now().strftime("%Y%m%d_%H%M%S_%f")[:-3]
-        sane_method = "".join(c if c.isalnum() or c in ('_','-') else '_' for c in self.replay_method_name)
-        sane_reason = "".join(c if c.isalnum() or c in ('_','-') else '_' for c in self.replay_failure_reason)
-        filename_base = f"replay_{sane_method}_{sane_reason}_{timestamp_str}.mp4"
+        filename_base = f"failure_instant_replay.mp4"
         filepath = os.path.join(self.replay_output_dir, filename_base)
 
-        self.logger.info(f"Replay: Saving video to {filepath} ({len(self.replay_buffer)} frames in buffer).")
         fourcc = cv2.VideoWriter_fourcc(*'mp4v') # Common, good compatibility
         video_writer = None
         try:
@@ -420,10 +407,10 @@ class LogitechLedChecker:
     def _stop_replay_recording(self, success: bool, failure_reason: str = "unspecified_failure"):
         if not self.is_recording_replay: return
 
-        self.replay_failure_reason = failure_reason.replace(" ", "_").replace(":", "").lower() # Sanitize
+        self.replay_failure_reason = failure_reason.replace("_", " ") # Sanitize
 
         if not success and self.replay_buffer and self.replay_output_dir:
-            self.logger.debug(f"Replay: Failure detected (Reason: {self.replay_failure_reason}). Recording post-failure duration of {self.replay_post_failure_duration_sec}s.")
+            self.logger.debug(self.replay_failure_reason)
             post_failure_start_time = time.time(); frames_after_failure = 0
             
             if self.replay_frame_width is None or self.replay_frame_height is None: 
@@ -443,7 +430,6 @@ class LogitechLedChecker:
                 else: self.logger.warning("Replay: Failed to capture frame during post-failure recording.")
                 time.sleep(1.0 / self.replay_fps if self.replay_fps > 0 else 0.01) 
 
-            self.logger.debug(f"Replay: Captured {frames_after_failure} additional frames post-failure.")
             self._save_replay_video() 
         
         elif success:
@@ -661,7 +647,6 @@ class LogitechLedChecker:
         if manage_replay: self._start_replay_recording(method_name, extra_context=replay_extra_context)
         success_flag, failure_detail = False, "unknown_pattern_failure"
 
-        self.logger.debug(f"Attempting pattern (tol: {self.duration_tolerance_sec:.2f}s)...")
         if not pattern: failure_detail="empty_pattern"; self.logger.warning(f"{method_name}: {failure_detail}")
         elif not self.is_camera_initialized: failure_detail="camera_not_init_pattern"; self.logger.error(f"{method_name}: {failure_detail}")
         else:
@@ -710,7 +695,7 @@ class LogitechLedChecker:
                         held_time = time.time() - step_seen_at
                         if self._matches_state(current_leds, target_state_for_step): 
                             if max_d_check!=float('inf') and held_time > max_d_check: 
-                                failure_detail=f"step_{current_step_idx+1}_held_too_long_{target_state_str.replace(' ','_')}"; success_flag=False; break
+                                failure_detail=f"Failure to detect: {target_state_str}"; success_flag=False; break
                             if current_step_idx==len(pattern)-1 and held_time >= min_d_check: 
                                 self.logger.info(f"{target_state_str}  {held_time:.2f}s+ ({current_step_idx + 1:02d}/{len(pattern):02d})")
                                 current_step_idx+=1; break 

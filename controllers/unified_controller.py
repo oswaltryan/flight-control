@@ -23,7 +23,6 @@ try:
         LogitechLedChecker, 
         DEFAULT_DURATION_TOLERANCE_SEC as CAMERA_DEFAULT_TOLERANCE,
         DEFAULT_REPLAY_POST_FAIL_DURATION_SEC as CAMERA_DEFAULT_REPLAY_DURATION, 
-        DEFAULT_REPLAY_OUTPUT_DIR as CAMERA_DEFAULT_REPLAY_DIR
     )
     from Phidget22.PhidgetException import PhidgetException
     from camera.led_dictionaries import LEDs
@@ -46,6 +45,7 @@ class UnifiedController:
                  replay_output_dir: Optional[str] = None,
                  enable_instant_replay: Optional[bool] = None):
         self.logger = logger_instance if logger_instance else module_logger
+        effective_replay_output_dir = replay_output_dir
         self.phidget_config_to_use = script_map_config if script_map_config is not None else DEFAULT_SCRIPT_CHANNEL_MAP_CONFIG
         phidget_ctrl_logger = self.logger.getChild("Phidget")
         camera_ctrl_logger = self.logger.getChild("Camera")
@@ -60,7 +60,7 @@ class UnifiedController:
         self._camera_checker = None
         self.effective_led_duration_tolerance = led_duration_tolerance_sec if led_duration_tolerance_sec is not None else CAMERA_DEFAULT_TOLERANCE
         effective_replay_duration = replay_post_failure_duration_sec if replay_post_failure_duration_sec is not None else CAMERA_DEFAULT_REPLAY_DURATION
-        effective_replay_output_dir = replay_output_dir if replay_output_dir is not None else CAMERA_DEFAULT_REPLAY_DIR
+        effective_replay_output_dir = replay_output_dir
 
         try:
             self._camera_checker = LogitechLedChecker(
