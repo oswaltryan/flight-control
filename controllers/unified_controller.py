@@ -43,7 +43,8 @@ class UnifiedController:
                  logger_instance: Optional[logging.Logger] = None,
                  led_duration_tolerance_sec: Optional[float] = None,
                  replay_post_failure_duration_sec: Optional[float] = None,
-                 replay_output_dir: Optional[str] = None):
+                 replay_output_dir: Optional[str] = None,
+                 enable_instant_replay: Optional[bool] = None):
         self.logger = logger_instance if logger_instance else module_logger
         self.phidget_config_to_use = script_map_config if script_map_config is not None else DEFAULT_SCRIPT_CHANNEL_MAP_CONFIG
         phidget_ctrl_logger = self.logger.getChild("Phidget")
@@ -65,7 +66,7 @@ class UnifiedController:
             self._camera_checker = LogitechLedChecker(
                 camera_id=camera_id, led_configs=led_configs, display_order=display_order,
                 logger_instance=camera_ctrl_logger, duration_tolerance_sec=self.effective_led_duration_tolerance,
-                replay_post_failure_duration_sec=effective_replay_duration, replay_output_dir=effective_replay_output_dir)
+                replay_post_failure_duration_sec=effective_replay_duration, replay_output_dir=effective_replay_output_dir, enable_instant_replay=enable_instant_replay)
             if not self._camera_checker.is_camera_initialized:
                 self.logger.error(f"LogitechLedChecker FAILED to initialize camera {camera_id}.")
         except Exception as e_camera_init:

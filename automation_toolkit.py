@@ -44,6 +44,7 @@ try:
         camera_id=DEFAULT_CAMERA_ID,
         display_order=DEFAULT_LED_DISPLAY_ORDER,
         logger_instance=global_at_logger.getChild("UnifiedInstance"),
+        enable_instant_replay=True
     )
 except Exception as e_at_create:
     global_at_logger.critical(f"Failed to create global 'at' (UnifiedController) instance: {e_at_create}", exc_info=True)

@@ -23,6 +23,7 @@ MIN_LOGGABLE_STATE_DURATION = 0.01 # Seconds. States held for less than this won
 DEFAULT_DURATION_TOLERANCE_SEC = 0.5 # NEW: Default tolerance for duration checks
 
 # --- Instant Replay Configuration ---
+GLOBAL_ENABLE_INSTANT_REPLAY_FEATURE = True
 DEFAULT_REPLAY_POST_FAIL_DURATION_SEC = 5.0
 DEFAULT_REPLAY_FPS_FOR_OUTPUT = DEFAULT_FPS # Use camera's default FPS for replay output
 _CAMERA_CONTROLLER_FILE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -98,7 +99,8 @@ class LogitechLedChecker:
     def __init__(self, camera_id: int, logger_instance=None, led_configs=None,
                  display_order: Optional[List[str]] = None, duration_tolerance_sec: float = DEFAULT_DURATION_TOLERANCE_SEC,
                  replay_post_failure_duration_sec: float = DEFAULT_REPLAY_POST_FAIL_DURATION_SEC,
-                 replay_output_dir: str = DEFAULT_REPLAY_OUTPUT_DIR):
+                 replay_output_dir: str = DEFAULT_REPLAY_OUTPUT_DIR,
+                 enable_instant_replay: Optional[bool] = None):
         self.logger = logger_instance if logger_instance else logger
         self.cap = None
         self.is_camera_initialized = False
@@ -109,6 +111,10 @@ class LogitechLedChecker:
         self.duration_tolerance_sec = duration_tolerance_sec
 
         # --- Instant Replay Initialization ---
+        if enable_instant_replay is not None: # If a value was passed, it takes precedence
+            self.enable_instant_replay = enable_instant_replay
+        else: # Otherwise, use the global default from this file
+            self.enable_instant_replay = GLOBAL_ENABLE_INSTANT_REPLAY_FEATURE
         self.replay_post_failure_duration_sec = replay_post_failure_duration_sec
         self.replay_output_dir = replay_output_dir
         self.is_recording_replay = False
@@ -121,13 +127,16 @@ class LogitechLedChecker:
         self.replay_frame_height = None
         self.replay_fps = float(DEFAULT_REPLAY_FPS_FOR_OUTPUT) 
 
-        if self.replay_output_dir:
+        if self.enable_instant_replay and self.replay_output_dir:
             try:
                 os.makedirs(self.replay_output_dir, exist_ok=True)
                 self.logger.info(f"Instant replay output directory: {self.replay_output_dir}")
             except OSError as e:
                 self.logger.error(f"Failed to create replay output directory {self.replay_output_dir}: {e}. Replays will not be saved.", exc_info=True)
                 self.replay_output_dir = None 
+        elif not self.enable_instant_replay:
+            self.logger.info("Instant replay is disabled via configuration.")
+            self.replay_output_dir = None # Ensure no attempts to save if disabled
         else:
             self.logger.warning("Replay output directory is not set. Replays will not be saved.")
         # --- End Instant Replay Initialization ---
@@ -326,6 +335,9 @@ class LogitechLedChecker:
         return overlay_frame
 
     def _start_replay_recording(self, method_name: str, extra_context: Optional[Dict[str, str]] = None):
+        if not self.enable_instant_replay:
+            self.logger.debug(f"Replay recording not started for method '{method_name}': Instant replay is disabled.")
+            return
         if not self.replay_output_dir:
             self.logger.debug(f"Replay recording not started for method '{method_name}': output directory not available.")
             return
