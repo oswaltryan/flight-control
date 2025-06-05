@@ -1,159 +1,206 @@
-#!/usr/bin/env python3
+# Directory: /scripts/
+# Filename: camera_feed_test.py
 
-import time
-import logging
-import sys
-import cv2 # OpenCV for displaying frames and drawing ROIs
-import numpy as np # For HSV array manipulation
 import os
+import sys
+import logging
+import time
+import cv2
+import numpy as np
+from typing import Dict, Any, Optional
 
-# Make sure the 'camera' module is in the Python path
-SCRIPT_DIR_BASIC = os.path.dirname(os.path.abspath(__file__))
-PROJECT_ROOT_BASIC = os.path.abspath(os.path.join(SCRIPT_DIR_BASIC, '..')) # Go one level up
-if PROJECT_ROOT_BASIC not in sys.path:
-    sys.path.insert(0, PROJECT_ROOT_BASIC)
+# --- Path Setup ---
+# Correctly identify the project root when the script is in a subdirectory (e.g., 'scripts').
+_CURRENT_SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+PROJECT_ROOT_FOR_DISPLAY = os.path.dirname(_CURRENT_SCRIPT_DIR)
 
+# Ensure the project root is in sys.path so modules like 'utils', 'camera', and 'controllers' can be found.
+if PROJECT_ROOT_FOR_DISPLAY not in sys.path:
+    sys.path.insert(0, PROJECT_ROOT_FOR_DISPLAY)
+
+# --- IMPORT AND SETUP LOGGING FIRST ---
 try:
-    # Import the checker class AND the single source of truth for LED configurations
-    from camera.camera_controller import LogitechLedChecker, PRIMARY_LED_CONFIGURATIONS
-except ImportError:
-    import os
-    from camera.camera_controller import LogitechLedChecker, PRIMARY_LED_CONFIGURATIONS
+    from utils.logging_config import setup_logging
+    # Configure logging for this specific script
+    setup_logging(
+        default_log_level=logging.INFO,
+        log_level_overrides={
+            "CameraFeedDisplay": logging.INFO,
+            "CameraFeedDisplay.UnifiedCtrl": logging.INFO, # Logger for UnifiedController instance
+            "CameraFeedDisplay.UnifiedCtrl.Phidget": logging.INFO, # Phidget sub-logger
+            "CameraFeedDisplay.UnifiedCtrl.Camera": logging.DEBUG, # Camera sub-logger for detailed info
+            "camera.camera_controller": logging.INFO, # General camera_controller if not via UnifiedController
+            "hardware.phidget_io_controller": logging.INFO, # General phidget_io_controller
+            "controllers.unified_controller": logging.INFO, # UnifiedController's own messages
+            "Phidget22": logging.WARNING # Suppress verbose Phidget library logs
+        }
+    )
+except ImportError as e_log_setup:
+    logging.basicConfig(level=logging.WARNING, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+    logging.getLogger().critical(f"Failed to import or run setup_logging: {e_log_setup}. Using basic logging.", exc_info=True)
 
+# Get a logger for this script
+display_logger = logging.getLogger("CameraFeedDisplay")
+
+# --- Import Controllers and Camera Components ---
 try:
-    from hardware.phidget_io_controller import PhidgetController
-except ImportError:
-    import os
-    from hardware.phidget_io_controller import PhidgetController
+    # We now import UnifiedController as it orchestrates both camera and Phidgets
+    from controllers.unified_controller import UnifiedController
+    from camera.camera_controller import (
+        PRIMARY_LED_CONFIGURATIONS, # Contains the ROI definitions
+        DEFAULT_FPS, # Default FPS for camera if not detected
+        # Overlay drawing constants from camera_controller.py
+        OVERLAY_FONT, OVERLAY_FONT_SCALE, OVERLAY_FONT_THICKNESS,
+        OVERLAY_TEXT_COLOR_MAIN, OVERLAY_TEXT_COLOR_ROI_NAME,
+        OVERLAY_LINE_HEIGHT, OVERLAY_PADDING
+    )
+    # We'll need access to the internal LogitechLedChecker instance
+    from camera.camera_controller import LogitechLedChecker # Used for type hinting
 
+except ImportError as e_import:
+    display_logger.critical(f"Import Error in camera_feed_test.py: {e_import}. Ensure paths are correct and dependencies are installed.", exc_info=True)
+    sys.exit(1)
 
-# --- Configuration ---
-CAMERA_ID = 0  # Adjust if your camera is not ID 0
-LOG_LEVEL = logging.INFO # Use DEBUG to see HSV match details from LogitechLedChecker
-DEFAULT_VISUALIZATION_COLOR = (200, 200, 200) # BGR for ROIs if "display_color_bgr" not in config
+# --- Helper Function for Drawing Overlays ---
+def draw_text_with_optional_bg(img: np.ndarray, text: str, origin_xy: tuple, font: int, scale: float, color: tuple, thickness: int) -> None:
+    """
+    Draws text on the image. Simplistic, without actual background drawing for this utility.
+    """
+    cv2.putText(img, text, origin_xy, font, scale, color, thickness, lineType=cv2.LINE_AA)
 
-def setup_logging(level=logging.INFO):
-    """Configures basic logging for the test script."""
-    logging.basicConfig(stream=sys.stdout, level=level,
-                        format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+def draw_live_overlays(frame: np.ndarray, checker_instance: LogitechLedChecker, detected_states: Dict[str, int], current_fps: float) -> np.ndarray:
+    """
+    Draws ROIs, LED states, and FPS on the live camera frame.
+    """
+    overlay_frame = frame.copy()
+    current_y_offset = OVERLAY_PADDING
 
+    # 1. Draw Camera FPS (Top-left)
+    fps_text = f"FPS: {current_fps:.2f}"
+    draw_text_with_optional_bg(overlay_frame, fps_text, (OVERLAY_PADDING, current_y_offset + OVERLAY_LINE_HEIGHT),
+                               OVERLAY_FONT, OVERLAY_FONT_SCALE * 1.1, OVERLAY_TEXT_COLOR_MAIN, OVERLAY_FONT_THICKNESS + 1)
+    current_y_offset += OVERLAY_LINE_HEIGHT * 2
+
+    # 2. Prepare and draw Combined LED States (e.g., "LEDs: (R) OFF (G) ON (B) OFF")
+    state_line_parts = []
+    # _get_ordered_led_keys_for_display() is an internal method of LogitechLedChecker
+    ordered_keys = checker_instance._get_ordered_led_keys_for_display()
+    
+    for led_key in ordered_keys:
+        config_item = checker_instance.led_configs.get(led_key)
+        if not config_item:
+            continue
+
+        x, y, w, h = config_item["roi"]
+        roi_box_color = config_item.get("display_color_bgr", (128, 128, 128))
+        cv2.rectangle(overlay_frame, (x, y), (x + w, y + h), roi_box_color, 1)
+
+        text_pos_y = y - OVERLAY_PADDING if y - OVERLAY_PADDING > OVERLAY_LINE_HEIGHT else y + h + OVERLAY_LINE_HEIGHT
+        text_pos_x = x + OVERLAY_PADDING
+        draw_text_with_optional_bg(overlay_frame, config_item["name"], (text_pos_x, text_pos_y),
+                                   OVERLAY_FONT, OVERLAY_FONT_SCALE * 0.8, OVERLAY_TEXT_COLOR_ROI_NAME,
+                                   OVERLAY_FONT_THICKNESS)
+        
+        state_val = detected_states.get(led_key, -1)
+        display_char = config_item["name"][0] if config_item["name"] else led_key[0].upper()
+        state_str = "ON" if state_val == 1 else "OFF" if state_val == 0 else "N/A"
+        state_line_parts.append(f"({display_char}) {state_str}")
+        
+    combined_states_text = "LEDs: " + " ".join(state_line_parts)
+    draw_text_with_optional_bg(overlay_frame, combined_states_text, (OVERLAY_PADDING, current_y_offset + OVERLAY_LINE_HEIGHT),
+                               OVERLAY_FONT, OVERLAY_FONT_SCALE * 0.9, OVERLAY_TEXT_COLOR_MAIN, OVERLAY_FONT_THICKNESS)
+
+    return overlay_frame
+
+# --- Main function to run the camera feed ---
 def main():
-    setup_logging(LOG_LEVEL)
-    script_logger = logging.getLogger("LEDFeedbackScript")
-    script_logger.info("--- Starting LED Configuration Feedback Script ---")
-
-    # Check if PRIMARY_LED_CONFIGURATIONS was imported and is valid
-    if not PRIMARY_LED_CONFIGURATIONS or not isinstance(PRIMARY_LED_CONFIGURATIONS, dict) or not len(PRIMARY_LED_CONFIGURATIONS):
-        script_logger.error("PRIMARY_LED_CONFIGURATIONS not found, is empty, or is invalid in camera_controller.py.")
-        script_logger.error("Please define LED configurations in camera/camera_controller.py before running this script.")
-        return
-
-    script_logger.info("Press 'q' in the OpenCV window to quit.")
-
+    camera_id = 0
+    unified_at_controller: Optional[UnifiedController] = None
+    
+    display_logger.info(f"Initializing UnifiedController (including camera ID {camera_id} and Phidgets)...")
     try:
-        # LogitechLedChecker will implicitly use PRIMARY_LED_CONFIGURATIONS
-        with PhidgetController() as pc:
-            with LogitechLedChecker(camera_id=CAMERA_ID,
-                                    logger_instance=script_logger) as checker:
+        # Initialize UnifiedController, which in turn sets up LogitechLedChecker and PhidgetController
+        unified_at_controller = UnifiedController(
+            camera_id=camera_id,
+            led_configs=PRIMARY_LED_CONFIGURATIONS,
+            display_order=["red", "green", "blue"],
+            logger_instance=display_logger.getChild("UnifiedCtrl"),
+            replay_output_dir=None # Ensure replay recording is off for this utility
+        )
 
-                if not checker.is_camera_initialized:
-                    script_logger.error("Failed to initialize camera. Exiting.")
-                    return
+        # Check if the camera component within UnifiedController is ready
+        if not unified_at_controller.is_camera_ready:
+            display_logger.error("UnifiedController's camera component not initialized. Please check camera ID, connection, and drivers. Exiting.")
+            return
 
-                effective_led_configs = checker.led_configs # These are PRIMARY_LED_CONFIGURATIONS
+        # Ensure we have access to the underlying LogitechLedChecker instance
+        # This is for direct access to its internal methods like _clear_camera_buffer and cap.read()
+        checker_instance_from_at = unified_at_controller._camera_checker
+        if checker_instance_from_at is None:
+            display_logger.error("Internal camera checker instance is None. Exiting.")
+            return
 
-                script_logger.info("Camera initialized. Displaying feedback based on PRIMARY_LED_CONFIGURATIONS...")
+        display_logger.info("Camera initialized successfully. Displaying live feed.")
 
-                pc.on("connect")
+        # --- Turn on the device after camera feed is ready ---
+        display_logger.info("Turning on device (USB3 and Connect lines)...")
+        unified_at_controller.on("usb3")
+        unified_at_controller.on("connect")
+        display_logger.info("Device power sequence initiated.")
+        # Optional: Add a short delay to allow device to boot up and stabilize its LEDs
+        time.sleep(2) 
+        # --- End device turn on ---
 
-                while True:
-                    if not checker.cap or not checker.cap.isOpened():
-                        script_logger.error("Camera capture is not open. Exiting loop.")
-                        break
+        display_logger.info("Press 'q' or 'ESC' to exit the camera feed.")
 
-                    ret, frame = checker.cap.read()
-                    if not ret or frame is None:
-                        script_logger.warning("Failed to grab frame from camera.")
-                        time.sleep(0.1)
-                        continue
+        checker_instance_from_at._clear_camera_buffer() # Clear any buffered frames from the camera
 
-                    display_frame = frame.copy()
-                    official_led_states = checker._get_current_led_state_from_camera()
+        prev_frame_time = time.time()
+        fps_display_value = 0.0
 
-                    for led_key, config in effective_led_configs.items():
-                        # Values from PRIMARY_LED_CONFIGURATIONS in camera_controller.py
-                        roi_rect = config["roi"]
-                        hsv_lower_cfg = np.array(config["hsv_lower"])
-                        hsv_upper_cfg = np.array(config["hsv_upper"])
-                        min_match_percentage_cfg = config["min_match_percentage"]
-                        
-                        # Get display color from config, or use default
-                        draw_color = config.get("display_color_bgr", DEFAULT_VISUALIZATION_COLOR)
-                        # Ensure draw_color is valid, fallback if not
-                        if not (isinstance(draw_color, tuple) and len(draw_color) == 3 and all(isinstance(c, int) for c in draw_color)):
-                            draw_color = DEFAULT_VISUALIZATION_COLOR
+        while True:
+            # Read a frame from the camera via the internal checker instance
+            ret, frame = checker_instance_from_at.cap.read()
+            if not ret or frame is None:
+                display_logger.warning("Failed to grab frame. Retrying...")
+                time.sleep(0.1)
+                continue
 
+            current_frame_time = time.time()
+            fps_display_value = 1.0 / (current_frame_time - prev_frame_time) if (current_frame_time - prev_frame_time) > 0 else 0.0
+            prev_frame_time = current_frame_time
 
-                        x, y, w, h = roi_rect
-                        frame_h_disp, frame_w_disp = display_frame.shape[:2]
-                        x_start, y_start = max(0, x), max(0, y)
-                        x_end, y_end = min(frame_w_disp, x + w), min(frame_h_disp, y + h)
-                        actual_w, actual_h = x_end - x_start, y_end - y_start
+            # Get the current detected LED states, passing the already-read 'frame'
+            # This ensures _get_current_led_state_from_camera doesn't re-read from the camera.
+            detected_led_states = checker_instance_from_at._get_current_led_state_from_camera(input_frame=frame)
+            
+            annotated_frame = draw_live_overlays(frame, checker_instance_from_at, detected_led_states, fps_display_value)
+            
+            cv2.imshow("Live Camera Feed with LED ROIs", annotated_frame)
 
-                        avg_hsv_text = "AvgHSV: N/A"
-                        match_percentage_display = 0.0
+            key = cv2.waitKey(1) & 0xFF
+            if key == ord('q') or key == 27:
+                display_logger.info("Exit key pressed. Terminating camera feed.")
+                break
 
-                        if actual_w > 0 and actual_h > 0:
-                            led_roi_bgr = display_frame[y_start:y_end, x_start:x_end]
-                            if led_roi_bgr.size > 0:
-                                led_roi_hsv = cv2.cvtColor(led_roi_bgr, cv2.COLOR_BGR2HSV)
-                                avg_h, avg_s, avg_v = cv2.mean(led_roi_hsv)[:3]
-                                avg_hsv_text = f"AvgHSV:({int(avg_h)},{int(avg_s)},{int(avg_v)})"
-
-                                # Re-calculate match percentage for display
-                                if hsv_lower_cfg[0] > hsv_upper_cfg[0]:
-                                    mask1 = cv2.inRange(led_roi_hsv, np.array([hsv_lower_cfg[0],hsv_lower_cfg[1],hsv_lower_cfg[2]]), np.array([179,hsv_upper_cfg[1],hsv_upper_cfg[2]]))
-                                    mask2 = cv2.inRange(led_roi_hsv, np.array([0,hsv_lower_cfg[1],hsv_lower_cfg[2]]), np.array([hsv_upper_cfg[0],hsv_upper_cfg[1],hsv_upper_cfg[2]]))
-                                    color_mask = cv2.bitwise_or(mask1, mask2)
-                                else:
-                                    color_mask = cv2.inRange(led_roi_hsv, hsv_lower_cfg, hsv_upper_cfg)
-                                
-                                matching_pixels = cv2.countNonZero(color_mask)
-                                total_pixels_in_roi = actual_w * actual_h
-                                match_percentage_display = matching_pixels / float(total_pixels_in_roi) if total_pixels_in_roi > 0 else 0.0
-                        
-                        is_on_status = "ON" if official_led_states.get(led_key, 0) == 1 else "OFF"
-                        status_text = f"{config.get('name', led_key).upper()}: {is_on_status}"
-                        match_text = f"Match:{match_percentage_display*100:.0f}% (Req:{min_match_percentage_cfg*100:.0f}%)"
-                        
-                        x_draw, y_draw = max(0,x), max(0,y)
-                        cv2.rectangle(display_frame, (x_draw, y_draw), (x_draw + actual_w, y_draw + actual_h), draw_color, 2)
-                        cv2.putText(display_frame, status_text, (x_draw, y_draw - 5 if y_draw > 5 else y_draw + actual_h + 15),
-                                    cv2.FONT_HERSHEY_SIMPLEX, 0.4, draw_color, 1)
-                        # cv2.putText(display_frame, avg_hsv_text, (x_draw, y_draw - 20 if y_draw > 20 else y_draw + actual_h + 30),
-                        #             cv2.FONT_HERSHEY_SIMPLEX, 0.4, draw_color, 1)
-                        # cv2.putText(display_frame, match_text, (x_draw, y_draw - 5 if y_draw > 5 else y_draw + actual_h + 45),
-                        #             cv2.FONT_HERSHEY_SIMPLEX, 0.4, draw_color, 1)
-
-                    cv2.imshow(f"LED Config Feedback (Edit camera_controller.py) - Cam {CAMERA_ID} (q to quit)", display_frame)
-
-                    if cv2.waitKey(1) & 0xFF == ord('q'):
-                        script_logger.info("Quit key pressed. Exiting...")
-                        break
-                    
-                    time.sleep(0.05)
-
-    except ImportError as e:
-        script_logger.critical(f"Failed to import a required module: {e}")
-    except FileNotFoundError:
-        script_logger.critical("Could not find camera_controller.py or PhidgetController. Ensure PYTHONPATH is correct.")
-    except AttributeError as e:
-        script_logger.critical(f"Likely PRIMARY_LED_CONFIGURATIONS is missing or malformed in camera_controller.py: {e}")
     except Exception as e:
-        script_logger.error(f"An unexpected error occurred: {e}", exc_info=True)
+        display_logger.critical(f"An unexpected error occurred in the main camera feed loop: {e}", exc_info=True)
     finally:
+        if unified_at_controller:
+            display_logger.info("Attempting to turn off device before closing UnifiedController...")
+            try:
+                # Optionally turn off the device before cleanup
+                unified_at_controller.off("usb3")
+                unified_at_controller.off("connect")
+                display_logger.info("Device power lines set to OFF.")
+                time.sleep(0.5) # Give it a moment
+            except Exception as e_off:
+                display_logger.warning(f"Error turning off device: {e_off}", exc_info=True)
+
+            display_logger.info("Closing UnifiedController resources...")
+            unified_at_controller.close()
         cv2.destroyAllWindows()
-        script_logger.info("--- LED Configuration Feedback Script Finished ---")
+        display_logger.info("Camera feed display application terminated.")
 
 if __name__ == "__main__":
     main()

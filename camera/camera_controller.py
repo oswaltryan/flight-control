@@ -17,7 +17,7 @@ from typing import Dict, Optional, List, Tuple, Any # For type hinting
 # Configuration (handlers, level, format) comes from the global setup.
 logger = logging.getLogger(__name__)
 
-DEFAULT_FPS = 30
+DEFAULT_FPS = 15
 CAMERA_BUFFER_SIZE_FRAMES = 5
 MIN_LOGGABLE_STATE_DURATION = 0.01 # Seconds. States held for less than this won't be logged as "held".
 DEFAULT_DURATION_TOLERANCE_SEC = 0.5 # NEW: Default tolerance for duration checks
@@ -34,7 +34,7 @@ OVERLAY_FONT = cv2.FONT_HERSHEY_SIMPLEX
 OVERLAY_FONT_SCALE = 0.5 # Adjusted for potentially more text
 OVERLAY_FONT_THICKNESS = 1
 OVERLAY_TEXT_COLOR_MAIN = (255, 255, 255)  # White
-OVERLAY_TEXT_COLOR_ROI_NAME = (200, 200, 0) # Yellowish for ROI names, distinct from ROI box
+OVERLAY_TEXT_COLOR_ROI_NAME = (255, 255, 255) # Yellowish for ROI names, distinct from ROI box
 OVERLAY_BACKGROUND_COLOR = (50, 50, 50)    # Dark grey for text background/shadow effect (optional)
 OVERLAY_LINE_HEIGHT = 18 # Adjusted for font scale
 OVERLAY_PADDING = 5
@@ -239,26 +239,39 @@ class LogitechLedChecker:
         current_match_percentage = matching_pixels / float(total_pixels_in_roi)
         return current_match_percentage >= min_match_percentage
 
-    def _get_current_led_state_from_camera(self) -> dict:
+    def _get_current_led_state_from_camera(self, input_frame: Optional[np.ndarray] = None) -> dict: # ADDED input_frame parameter
         if not self.is_camera_initialized or not self.cap: return {}
-        frame_for_processing = None
-        try:
-            ret, frame = self.cap.read()
-            if not ret or frame is None:
-                if self.is_recording_replay: self.logger.warning("Replay: Frame capture failed during active recording.")
+        
+        frame_for_processing = input_frame # Use the provided frame if available
+        
+        if frame_for_processing is None: # Only read from camera if no frame was provided
+            try:
+                ret, frame = self.cap.read()
+                if not ret or frame is None:
+                    # Original replay warning can stay here if replay is still managed within this method
+                    if self.is_recording_replay: self.logger.warning("Replay: Frame capture failed during active recording.")
+                    return {}
+                frame_for_processing = frame 
+                # If replay recording is enabled, it should still buffer the frame captured here
+                if self.is_recording_replay:
+                    current_capture_time = time.time()
+                    self.replay_buffer.append((current_capture_time, frame_for_processing.copy())) 
+                    if self.replay_frame_width is None or self.replay_frame_height is None:
+                        h, w = frame_for_processing.shape[:2]
+                        self.replay_frame_width, self.replay_frame_height = w, h
+                        self.logger.debug(f"Replay: Frame dimensions set {w}x{h} @ {self.replay_fps:.2f} FPS.")
+            except Exception as e:
+                self.logger.error(f"Exception while capturing frame: {e}", exc_info=True)
                 return {}
-            frame_for_processing = frame 
+        else: # If frame was provided, still handle replay buffering if active
             if self.is_recording_replay:
                 current_capture_time = time.time()
-                self.replay_buffer.append((current_capture_time, frame_for_processing.copy())) 
+                self.replay_buffer.append((current_capture_time, frame_for_processing.copy()))
                 if self.replay_frame_width is None or self.replay_frame_height is None:
                     h, w = frame_for_processing.shape[:2]
                     self.replay_frame_width, self.replay_frame_height = w, h
                     self.logger.debug(f"Replay: Frame dimensions set {w}x{h} @ {self.replay_fps:.2f} FPS.")
-        except Exception as e:
-            self.logger.error(f"Exception while capturing frame: {e}", exc_info=True)
-            return {}
-        
+
         detected_led_states = {}
         if frame_for_processing is not None:
             for led_key, config_item in self.led_configs.items():
