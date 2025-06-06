@@ -6,7 +6,7 @@ import time # For simulating delays if needed
 from typing import List, Dict, Tuple, Any, Optional, Callable # For type hinting
 import os
 from pprint import pprint
-
+import json
 from camera.led_dictionaries import LEDs
 from transitions import Machine, EventData # Import EventData for type hinting
 from usb_tool import find_apricorn_device
@@ -14,140 +14,109 @@ from usb_tool import find_apricorn_device
 
 from .unified_controller import UnifiedController
 
+# --- Load External JSON Configuration ---
+# Get a logger for this module-level operation
+_fsm_module_logger = logging.getLogger(__name__)
+
+# Initialize the variable that will hold the data.
+# Using ALL_CAPS is a convention for module-level constants.
+DEVICE_PROPERTIES: Dict[str, Any] = {}
+
+# --- Path Construction (moved outside the try block) ---
+# This logic is deterministic and guarantees _json_path is always assigned.
+_current_file_path = os.path.abspath(__file__)
+_controllers_dir = os.path.dirname(_current_file_path)
+_project_root = os.path.dirname(_controllers_dir)
+_json_path = os.path.join(_project_root, 'utils', 'device_properties.json')
+
+
+# --- File I/O and Parsing (operations that can fail are kept in the try block) ---
+try:
+    _fsm_module_logger.debug(f"Attempting to load module config from: {_json_path}")
+    with open(_json_path, 'r') as f:
+        DEVICE_PROPERTIES = json.load(f)
+    _fsm_module_logger.info("Successfully loaded module-level DEVICE_PROPERTIES from JSON.")
+except FileNotFoundError:
+    _fsm_module_logger.critical(f"Configuration file not found at '{_json_path}'. Cannot continue.")
+    raise
+except json.JSONDecodeError:
+    _fsm_module_logger.critical(f"Could not parse '{_json_path}'. Check for syntax errors.")
+    raise
+except Exception as e:
+    _fsm_module_logger.critical(f"An unexpected error occurred while loading '{_json_path}': {e}", exc_info=True)
+    raise
+
+class DeviceUnderTest:
+    device_name = "ask3-3639"
+
+    name = device_name
+    battery = False
+    batteryVBUS = False
+    VBUS = True
+    bridgeFW = DEVICE_PROPERTIES[device_name]['bridgeFW']
+    mcuFW = []
+    mcuFWHumanReadable = ""
+    fips = DEVICE_PROPERTIES[device_name]['fips']
+    secureKey = DEVICE_PROPERTIES[device_name]['secureKey']
+    usb3 = False
+    diskPath = ""
+    mounted = False
+    serialNumber = ""
+    devKeypadSerialNumber = ""
+
+    CMFR = False
+    modelID1 = DEVICE_PROPERTIES[device_name]['model_id_digit_1']
+    modelID2 = DEVICE_PROPERTIES[device_name]['model_id_digit_2']
+    hardwareID1 = DEVICE_PROPERTIES[device_name]['hardware_major']
+    hardwareID2 = DEVICE_PROPERTIES[device_name]['hardware_minor']
+    scbPartNumber = DEVICE_PROPERTIES[device_name]['singleCodeBasePartNumber']
+    singleCodeBase = DEVICE_PROPERTIES[device_name]['singleCodeBase']
+    
+    basicDisk = True
+    removableMedia = False
+    
+    bruteForceCounter = 20
+    
+    ledFlicker = False
+    lockOverride = False
+
+    manufacturerResetEnum = False
+
+    maxPINCounter = 16
+    minPINCounter = int(DEVICE_PROPERTIES[device_name]['minpin'])
+    defaultMinPINCounter = int(DEVICE_PROPERTIES[device_name]['minpin'])
+
+    provisionLock = False
+    provisionLockBricked = False
+    provisionLockRecoverCounter = 5
+
+    readOnlyEnabled = False
+
+    unattendedAutoLockCounter = 0
+
+    userForcedEnrollmentUsed = False
+
+    adminPIN = {}
+    oldAdminPIN = {}
+    adminEnum = False
+
+    recoveryPIN = {1: {}, 2: {}, 3: {}, 4: {}}
+    oldRecoveryPIN = {1: {}, 2: {}, 3: {}, 4: {}}
+    usedRecovery = {1: False, 2: False, 3: False, 4: False}
+    
+    selfDestructEnabled = False
+    selfDestructPIN = {}
+    oldSelfDestructPIN = {}
+    selfDestructEnum = False
+    selfDestructUsed = False
+
+    userCount = DEVICE_PROPERTIES[device_name]['userCount']
+    userPIN = {1: None, 2: None, 3: None, 4: None}
+    oldUserPIN = {1: None, 2: None, 3: None, 4: None}
+    enumUser = {1: False, 2: False, 3: False, 4: False}
+
 # --- FSM Class Definition ---
 class SimplifiedDeviceFSM:
-
-    # DUT: dict = {
-    #     "name": None,
-    #     "battery": False,
-    #     "batteryVBUS": False,
-    #     "VBUS": False,
-    #     "bridgeFW": Devices[cfg.PROD.name]['bridgeFW'],
-    #     "mcuFW": [],
-    #     "mcuFWHumanReadable": "",
-    #     "fips": Devices[cfg.PROD.name]['fips'],
-    #     "legacyProduct": Devices[cfg.PROD.name]['legacy'],
-    #     "factoryKeypadTest": Devices[cfg.PROD.name]['factoryKeypadTest'],
-    #     "resetKeypadTest": Devices[cfg.PROD.name]['resetKeypadTest'],
-    #     "secureKey": Devices[cfg.PROD.name]['secureKey'],
-    #     "usb3": False,
-    #     "diskPath": "",
-    #     "mounted": False,
-    #     "serialNumber": "",
-    #     "devKeypadSerialNumber": "",
-
-    #     "CMFR": False,
-    #     "modelID1": Devices[cfg.PROD.name]['model_id_digit_1'],
-    #     "modelID2": Devices[cfg.PROD.name]['model_id_digit_2'],
-    #     "hardwareID1": Devices[cfg.PROD.name]['hardware_major'],
-    #     "hardwareID2": Devices[cfg.PROD.name]['hardware_minor'],
-    #     "scbPartNumber": Devices[cfg.PROD.name]['singleCodeBasePartNumber'],
-    #     "singleCodeBase": Devices[cfg.PROD.name]['singleCodeBase'],
-    #     "oobTrace": int(Devices['scriptConfig']["usbmonoob"]),
-    #     "port": int(Devices[cfg.PROD.name]["usbmonport"]),
-    #     "resetTrace": int(Devices['scriptConfig']["usbmonreset"]),
-    #     "unlockTrace": int(Devices['scriptConfig']["usbmonunlock"]),
-    #     "SPITrace": int(Devices['scriptConfig']["usbmonSPI"]),
-        
-    #     "lastFunctionExitMode": "",
-    #     "adminMode": False,
-    #     "bridgeChipTestMode": False,
-    #     "diagnosticMode": False,
-    #     "errorMode": False,
-    #     "factoryMode": False,
-    #     "oobMode": True,
-    #     "sleepMode": True,
-    #     "standbyMode": False,
-    #     "onDemandSelfTest": False,
-    #     "startupSelfTest": False,
-    #     "basicDisk": True,
-    #     "removableMedia": False,
-        
-    #     "bruteForceCounter": 10,
-    #     "bruteForceCounterHalfwayPoint": 5,
-    #     "bruteForceCounterFirstHalf": 0,
-    #     "bruteForceCounterSecondHalf": 0,
-    #     "enrollingBruteForce": False,
-    #     "enrollmentBruteForce": False,
-    #     "bruteForcedFirstHalf": False,
-    #     "bruteForcedSecondHalf": False,
-    #     "lastTryLogin": False,
-    #     "deletePINs": False,
-        
-    #     "ledFlicker": False,
-        
-    #     "lockOverride": False,
-    #     "manufacturerResetEnum": False,
-    #     "manufacturerResetInitiate": False,
-    #     "manufacturerResetKeypadTest": False,
-    #     "manufacturerResetReadyMode": False,
-    #     "userResetInitiate": False,
-    #     "userResetWarning": False,
-    #     "resetVBUSInterruptTesting": False,
-    #     "generatingEncryptionKey": False,
-    #     "selfDestructVBUSInterrupt": False,
-    #     "selfDestructVBUSInterruptPIN": {},
-    #     "maxPINCounter": 16,
-    #     "minPINCounter": int(Devices[cfg.PROD.name]["minpin"]),
-    #     "defaultMinPINCounter": int(Devices[cfg.PROD.name]["minpin"]),
-    #     "enrollingMinPIN": False,
-    #     "enrollmentMinPIN": False,
-    #     "provisionLock": False,
-    #     "provisionLockBricked": False,
-    #     "provisionLockSoftBricked": False,
-    #     "provisionLockRecover": False,
-    #     "provisionLockRecoverCounter": 5,
-    #     "readOnlyEnabled": False,
-    #     "readWriteEnabled": True,
-    #     "unattendedAutoLockCounter": 0,
-    #     "enrollingUnattendedAutoLock": False,
-    #     "enrollmentUnattendedAutoLock": False,
-    #     "unattendedAutoLockEnum": False,
-    #     "unattendedAutoLockTimeout": 0,
-    #     "userForcedEnrollment": False,
-    #     "userForcedEnrollmentUsed": False,
-    #     "adminPIN": {},
-    #     "oldAdminPIN": {},
-    #     "enrolledAdmin": False,
-    #     "enrollingAdmin": False,
-    #     "enrollmentAdmin": False,
-    #     "adminEnum": False,
-    #     "adminLogin": False,
-    #     "recoveryPIN": {1: {}, 2: {}, 3: {}, 4: {}},
-    #     "oldRecoveryPIN": {1: {}, 2: {}, 3: {}, 4: {}},
-    #     "enrolledRecovery": {1: False, 2: False, 3: False, 4: False},
-    #     "enrollingRecovery": False,
-    #     "enrollmentRecovery": {1: False, 2: False, 3: False, 4: False},
-    #     "loginRecovery": {1: False, 2: False, 3: False, 4: False},
-    #     "usedRecovery": {1: False, 2: False, 3: False, 4: False},
-        
-    #     "selfDestructEnabled": False,
-    #     "selfDestructPIN": {},
-    #     "oldSelfDestructPIN": {},
-    #     "enrolledSelfDestruct": False,
-    #     "enrollingSelfDestruct": False,
-    #     "enrollmentSelfDestruct": False,
-    #     "selfDestructEnum": False,
-    #     "selfDestructUsed": False,
-    #     "userCount": Devices[cfg.PROD.name]['userCount'],
-    #     "userPIN": {1: None, 2: None, 3: None, 4: None},
-    #     "oldUserPIN": {1: None, 2: None, 3: None, 4: None},
-    #     "enrolledUser": {1: False, 2: False, 3: False, 4: False},
-    #     "enrollingUser": False,
-    #     "enrollmentUser": {1: False, 2: False, 3: False, 4: False},
-    #     "enumUser": {1: False, 2: False, 3: False, 4: False},
-    #     "changeLoginUser": {1: False, 2: False, 3: False, 4: False},
-    #     "psuedoUserPIN": None,
-    #     "devFWUnlockDrive": False,
-    #     "devResultSPI": 0,
-    #     "modeOrientationDisable": False,
-    #     "modeOrientationCounter": 0,
-    #     "orientationData": {'expectedState': "OFF", 'currentState': None, 'pinNumber': None},
-    #     "fileHash": {},
-    #     "executeSpeedTest": False,
-    #     "windowsEnumTesting": False,
-    #     "httpAddress": ""
-    # }
 
     STATES: List[str] = ['OFF', 'STARTUP_SELF_TEST', 'STANDBY_MODE', 'UNLOCKED_ADMIN']
 

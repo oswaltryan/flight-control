@@ -35,7 +35,7 @@ global_at_logger = logging.getLogger("GlobalATController")
 # --- IMPORT CONTROLLERS AND FSM ---
 try:
     from controllers.unified_controller import UnifiedController # controllers is found
-    from controllers.flight_control_fsm import SimplifiedDeviceFSM # Import your FSM
+    from controllers.flight_control_fsm import DeviceUnderTest, SimplifiedDeviceFSM # Import your FSM
 except ImportError as e_uc_import:
     global_at_logger.critical(f"Import Error for UnifiedController or FSM: {e_uc_import}. Ensure paths are correct.", exc_info=True)
     raise
@@ -63,6 +63,20 @@ def get_at_controller():
         raise RuntimeError("Global 'at' controller was not successfully initialized.")
     return at
 
+# --- Instantiate the Global DUT ---
+dut = None
+try:
+    dut = DeviceUnderTest()
+    global_at_logger.info(f"Global DUT initialized.")
+except Exception as e_dut_create:
+    global_at_logger.critical(f"Failed to create global 'dut' instance: {e_dut_create}", exc_info=True)
+
+
+def get_dut():
+    if dut is None:
+        raise RuntimeError("Global 'dut' was not successfully initialized.")
+    return dut
+
 # --- Instantiate the Global FSM ---
 # The FSM needs the 'at' controller.
 # It's crucial 'at' is initialized before the FSM if the FSM's __init__ uses 'at'.
@@ -82,6 +96,7 @@ def get_fsm():
     if fsm is None:
         raise RuntimeError("Global 'fsm' was not successfully initialized or 'at' controller failed.")
     return fsm
+
 
 # --- Optional: Resource cleanup ---
 def _cleanup_global_at():

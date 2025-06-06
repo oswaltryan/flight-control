@@ -3,6 +3,7 @@
 import sys
 import os
 import logging # Already configured by automation_toolkit import
+from pprint import pprint
 
 # --- Path Setup if running this script directly and not from project root ---
 SCRIPT_DIR_MYSCRIPT = os.path.dirname(os.path.abspath(__file__)) # scripts/
@@ -12,8 +13,9 @@ if PROJECT_ROOT_MYSCRIPT not in sys.path:
 # --- End Path Setup ---
 
 try:
-    from automation_toolkit import get_at_controller, get_fsm, global_at_logger # Use the specific logger if needed
+    from automation_toolkit import get_at_controller, get_dut, get_fsm, global_at_logger # Use the specific logger if needed
     at = get_at_controller()
+    dut = get_dut()
     fsm = get_fsm()
 except Exception as e: # Catch potential RuntimeError if 'at' or 'fsm' failed init
     logging.basicConfig(level=logging.CRITICAL)
