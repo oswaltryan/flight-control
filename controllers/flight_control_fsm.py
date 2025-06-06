@@ -3,7 +3,7 @@
 
 import logging
 import time # For simulating delays if needed
-from typing import List, Dict, Tuple, Any, Optional # For type hinting
+from typing import List, Dict, Tuple, Any, Optional, Callable # For type hinting
 import os
 from pprint import pprint
 
@@ -155,6 +155,7 @@ class SimplifiedDeviceFSM:
     at: 'UnifiedController' # Use the actual class name if imported
     machine: Machine
     state: str
+    source_state: str
 
     def __init__(self, at_controller: 'UnifiedController'):
         self.logger = logging.getLogger("DeviceFSM.Simplified")
@@ -167,18 +168,18 @@ class SimplifiedDeviceFSM:
             send_event=True, # Allows passing EventData to callbacks
             after_state_change='_log_state_change_details'
         )
-        self.state = self.machine.initial
-        self.source_state = self.machine.initial
+
+        self.source_state = 'OFF'
 
         # Define transition triggers (methods will be dynamically created by transitions)
-        self.standby_mode: callable
-        self.power_on: callable
-        self.power_off: callable
-        self.post_successful_standby_detected: callable
-        self.post_failed: callable
-        self.critical_error_detected: callable
-        self.unlock_admin: callable
-        self.lock_admin: callable
+        self.standby_mode: Callable
+        self.power_on: Callable
+        self.power_off: Callable
+        self.post_successful_standby_detected: Callable
+        self.post_failed: Callable
+        self.critical_error_detected: Callable
+        self.unlock_admin: Callable
+        self.lock_admin: Callable
 
         # --- Transitions ---
         self.machine.add_transition(trigger='power_on', source='OFF', dest='STARTUP_SELF_TEST')                         # Power on, confirm Startup Self-Test
@@ -189,7 +190,8 @@ class SimplifiedDeviceFSM:
 
 
     def _log_state_change_details(self, event_data: EventData) -> None:
-        self.source_state: str = event_data.transition.source
+        assert event_data.transition is not None, "after_state_change callback must have a transition"
+        self.source_state = event_data.transition.source
         event_name: str = event_data.event.name
         current_state: str = self.state # self.state is updated by the Machine
         self.logger.info(f"State changed: {self.source_state} -> {current_state} (Event: {event_name})")

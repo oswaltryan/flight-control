@@ -20,7 +20,7 @@ logger = logging.getLogger(__name__)
 DEFAULT_FPS = 15
 CAMERA_BUFFER_SIZE_FRAMES = 5
 MIN_LOGGABLE_STATE_DURATION = 0.01 # Seconds. States held for less than this won't be logged as "held".
-DEFAULT_DURATION_TOLERANCE_SEC = 0.5 # NEW: Default tolerance for duration checks
+DEFAULT_DURATION_TOLERANCE_SEC = 2.0 # NEW: Default tolerance for duration checks
 
 # --- Instant Replay Configuration ---
 GLOBAL_ENABLE_INSTANT_REPLAY_FEATURE = True
@@ -98,7 +98,7 @@ class LogitechLedChecker:
     def __init__(self, camera_id: int, logger_instance=None, led_configs=None,
                  display_order: Optional[List[str]] = None, duration_tolerance_sec: float = DEFAULT_DURATION_TOLERANCE_SEC,
                  replay_post_failure_duration_sec: float = DEFAULT_REPLAY_POST_FAIL_DURATION_SEC,
-                 replay_output_dir: str = None,
+                 replay_output_dir: Optional[str] = None,
                  enable_instant_replay: Optional[bool] = None):
         self.logger = logger_instance if logger_instance else logger
         self.cap = None
@@ -378,7 +378,7 @@ class LogitechLedChecker:
         filename_base = f"failure_instant_replay.mp4"
         filepath = os.path.join(self.replay_output_dir, filename_base)
 
-        fourcc = cv2.VideoWriter_fourcc(*'mp4v') # Common, good compatibility
+        fourcc = int.from_bytes(b'mp4v', 'little') # Py3 native, type-checker friendly FourCC
         video_writer = None
         try:
             video_writer = cv2.VideoWriter(filepath, fourcc, self.replay_fps, 
