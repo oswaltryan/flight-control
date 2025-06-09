@@ -357,7 +357,7 @@
         "shiftKey": false,
         "devBoard": false,
         "bridgeFW": "0511",
-        "mcufw": "5.9.8",
+        "mcufw": "6.0",
         "usbmonport": 9,
         "factoryKeypadTest": false,
         "resetKeypadTest": true

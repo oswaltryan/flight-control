@@ -31,13 +31,17 @@ _PROJECT_ROOT_FROM_CAMERA = os.path.dirname(_CAMERA_CONTROLLER_FILE_DIR)
 
 # --- Overlay Drawing Constants ---
 OVERLAY_FONT = cv2.FONT_HERSHEY_SIMPLEX
-OVERLAY_FONT_SCALE = 0.5 # Adjusted for potentially more text
+OVERLAY_FONT_SCALE = 0.5
 OVERLAY_FONT_THICKNESS = 1
 OVERLAY_TEXT_COLOR_MAIN = (255, 255, 255)  # White
-OVERLAY_TEXT_COLOR_ROI_NAME = (255, 255, 255) # Yellowish for ROI names, distinct from ROI box
-OVERLAY_BACKGROUND_COLOR = (50, 50, 50)    # Dark grey for text background/shadow effect (optional)
-OVERLAY_LINE_HEIGHT = 18 # Adjusted for font scale
+OVERLAY_LINE_HEIGHT = 18 # Used as a spacer for positioning indicators
 OVERLAY_PADDING = 5
+
+# --- Constants for drawing LED status indicators on the replay video ---
+OVERLAY_LED_INDICATOR_RADIUS = 7
+# Fallback 'ON' color for configs missing a 'display_color_bgr' key.
+OVERLAY_LED_INDICATOR_ON_COLOR_FALLBACK = (0, 255, 0) # Bright Green
+OVERLAY_LED_INDICATOR_OFF_COLOR = (80, 80, 80) # Dark Grey for OFF
 
 
 # --- PRIMARY (USER-TUNED) LED CONFIGURATIONS ---
@@ -45,10 +49,10 @@ PRIMARY_LED_CONFIGURATIONS = {
     "red":   {
         "name": "Red LED",
         "roi": (187, 165, 40, 40),
-        "hsv_lower": (165,150,150), # Hue lower bound for red (wraps around)
-        "hsv_upper": (15,255,255),   # Hue upper bound for red
+        "hsv_lower": (165,150,150),
+        "hsv_upper": (15,255,255),
         "min_match_percentage": 0.15,
-        "display_color_bgr": (0,0,255) # Red for ROI box
+        "display_color_bgr": (0,0,255)
     },
     "green": {
         "name": "Green LED",
@@ -56,7 +60,7 @@ PRIMARY_LED_CONFIGURATIONS = {
         "hsv_lower": (40, 100, 100),
         "hsv_upper": (85, 255, 255),
         "min_match_percentage": 0.15,
-        "display_color_bgr": (0,255,0) # Green for ROI box
+        "display_color_bgr": (0,255,0)
     },
     "blue":  {
         "name": "Blue LED",
@@ -64,7 +68,7 @@ PRIMARY_LED_CONFIGURATIONS = {
         "hsv_lower": (95, 100, 100),
         "hsv_upper": (130, 255, 255),
         "min_match_percentage": 0.15,
-        "display_color_bgr": (255,0,0) # Blue for ROI box
+        "display_color_bgr": (255,0,0)
     }
 }
 # --- End of PRIMARY LED Configurations ---
@@ -75,9 +79,9 @@ _FALLBACK_LED_DEFINITIONS = {
     "fallback_led1": {
         "name": "Fallback Generic LED 1",
         "roi": (50, 50, 20, 20),
-        "hsv_lower": (0, 100, 100), "hsv_upper": (10, 255, 255), # Example: generic red
+        "hsv_lower": (0, 100, 100), "hsv_upper": (10, 255, 255),
         "min_match_percentage": 0.1,
-        "display_color_bgr": (128, 128, 128) # Grey for ROI box
+        "display_color_bgr": (128, 128, 128)
     },
 }
 # --- End of Fallback LED Configurations ---
@@ -110,17 +114,17 @@ class LogitechLedChecker:
         self.duration_tolerance_sec = duration_tolerance_sec
 
         # --- Instant Replay Initialization ---
-        if enable_instant_replay is not None: # If a value was passed, it takes precedence
+        if enable_instant_replay is not None:
             self.enable_instant_replay = enable_instant_replay
-        else: # Otherwise, use the global default from this file
+        else:
             self.enable_instant_replay = GLOBAL_ENABLE_INSTANT_REPLAY_FEATURE
         self.replay_post_failure_duration_sec = replay_post_failure_duration_sec
         self.replay_output_dir = replay_output_dir
         self.is_recording_replay = False
         self.replay_buffer = collections.deque()
         self.replay_start_time = 0.0
-        self.replay_method_name = "" # Renamed from replay_context_name for specific use
-        self.replay_extra_context: Optional[Dict[str, str]] = None # For additional overlay text
+        self.replay_method_name = ""
+        self.replay_extra_context: Optional[Dict[str, str]] = None
         self.replay_failure_reason = ""
         self.replay_frame_width = None
         self.replay_frame_height = None
@@ -134,43 +138,40 @@ class LogitechLedChecker:
                 self.replay_output_dir = None 
         elif not self.enable_instant_replay:
             self.logger.info("Instant replay is disabled via configuration.")
-            self.replay_output_dir = None # Ensure no attempts to save if disabled
+            self.replay_output_dir = None
         else:
             self.logger.warning("Replay output directory is not set. Replays will not be saved.")
-        # --- End Instant Replay Initialization ---
-
+        
+        # --- LED Config Loading ---
         if led_configs is not None:
             self.led_configs = led_configs
-            self.logger.debug("Using LED configurations explicitly provided by the caller.")
-        elif PRIMARY_LED_CONFIGURATIONS and isinstance(PRIMARY_LED_CONFIGURATIONS, dict) and len(PRIMARY_LED_CONFIGURATIONS) > 0:
+        elif PRIMARY_LED_CONFIGURATIONS:
             self.led_configs = PRIMARY_LED_CONFIGURATIONS
         else:
             self.led_configs = _FALLBACK_LED_DEFINITIONS
             self.logger.error("PRIMARY_LED_CONFIGURATIONS empty/invalid. Using _FALLBACK_LED_DEFINITIONS.")
 
         if not isinstance(self.led_configs, dict) or not self.led_configs:
-             self.logger.critical("LED configurations missing or invalid.")
              raise ValueError("LED configurations are missing or invalid.")
 
         if self.explicit_display_order:
             for key in self.explicit_display_order:
                 if key not in self.led_configs:
                     raise ValueError(f"Key '{key}' in display_order not found in LED configs.")
-            if len(self.explicit_display_order) != len(self.led_configs):
-                 self.logger.debug(f"display_order len ({len(self.explicit_display_order)}) != LED configs len ({len(self.led_configs)}).")
 
         core_keys = ["name", "roi", "hsv_lower", "hsv_upper", "min_match_percentage"]
         for key, config_item in self.led_configs.items():
             if not isinstance(config_item, dict): raise ValueError(f"LED config item '{key}' not a dict.")
             if any(k not in config_item for k in core_keys):
-                raise ValueError(f"LED config '{key}' missing core keys: { [k for k in core_keys if k not in config_item] }.")
+                raise ValueError(f"LED config '{key}' missing core keys.")
             if not (isinstance(config_item["roi"], tuple) and len(config_item["roi"]) == 4 and
                     all(isinstance(n, int) for n in config_item["roi"])):
-                raise ValueError(f"ROI for LED '{key}' ('{config_item['name']}') must be tuple of 4 ints.")
+                raise ValueError(f"ROI for LED '{key}' must be tuple of 4 ints.")
 
         if self.camera_id is None: self.logger.error("Camera ID cannot be None."); return 
         self._initialize_camera()
 
+    # ... (No changes to _initialize_camera, _clear_camera_buffer, _check_roi_for_color) ...
     def _initialize_camera(self):
         try:
             if self.preferred_backend is not None:
@@ -226,9 +227,9 @@ class LogitechLedChecker:
         led_roi_color = frame[y_start:y_end, x_start:x_end]
         if led_roi_color.size == 0: return False
         hsv_roi = cv2.cvtColor(led_roi_color, cv2.COLOR_BGR2HSV)
-        if hsv_lower_orig[0] > hsv_upper_orig[0]: # Hue wraps around
+        if hsv_lower_orig[0] > hsv_upper_orig[0]:
             lower1 = np.array([hsv_lower_orig[0], hsv_lower_orig[1], hsv_lower_orig[2]])
-            upper1 = np.array([179, hsv_upper_orig[1], hsv_upper_orig[2]]) # Max Hue is 179 in OpenCV HSV
+            upper1 = np.array([179, hsv_upper_orig[1], hsv_upper_orig[2]])
             mask1 = cv2.inRange(hsv_roi, lower1, upper1)
             lower2 = np.array([0, hsv_lower_orig[1], hsv_lower_orig[2]])
             upper2 = np.array([hsv_upper_orig[0], hsv_upper_orig[1], hsv_upper_orig[2]])
@@ -242,110 +243,82 @@ class LogitechLedChecker:
         current_match_percentage = matching_pixels / float(total_pixels_in_roi)
         return current_match_percentage >= min_match_percentage
 
-    def _get_current_led_state_from_camera(self, input_frame: Optional[np.ndarray] = None) -> dict: # ADDED input_frame parameter
+    def _get_current_led_state_from_camera(self, input_frame: Optional[np.ndarray] = None) -> dict:
         if not self.is_camera_initialized or not self.cap: return {}
         
-        frame_for_processing = input_frame # Use the provided frame if available
+        frame_for_processing = input_frame
+        capture_failed = False
         
-        if frame_for_processing is None: # Only read from camera if no frame was provided
+        if frame_for_processing is None:
             try:
                 ret, frame = self.cap.read()
                 if not ret or frame is None:
-                    # Original replay warning can stay here if replay is still managed within this method
                     if self.is_recording_replay: self.logger.warning("Replay: Frame capture failed during active recording.")
+                    capture_failed = True
                     return {}
                 frame_for_processing = frame 
-                # If replay recording is enabled, it should still buffer the frame captured here
-                if self.is_recording_replay:
-                    current_capture_time = time.time()
-                    self.replay_buffer.append((current_capture_time, frame_for_processing.copy())) 
-                    if self.replay_frame_width is None or self.replay_frame_height is None:
-                        h, w = frame_for_processing.shape[:2]
-                        self.replay_frame_width, self.replay_frame_height = w, h
             except Exception as e:
                 self.logger.error(f"Exception while capturing frame: {e}", exc_info=True)
+                capture_failed = True
                 return {}
-        else: # If frame was provided, still handle replay buffering if active
-            if self.is_recording_replay:
-                current_capture_time = time.time()
-                self.replay_buffer.append((current_capture_time, frame_for_processing.copy()))
-                if self.replay_frame_width is None or self.replay_frame_height is None:
-                    h, w = frame_for_processing.shape[:2]
-                    self.replay_frame_width, self.replay_frame_height = w, h
 
         detected_led_states = {}
-        if frame_for_processing is not None:
+        if not capture_failed and frame_for_processing is not None:
             for led_key, config_item in self.led_configs.items():
                 detected_led_states[led_key] = 1 if self._check_roi_for_color(frame_for_processing, config_item) else 0
+
+        if self.is_recording_replay and not capture_failed:
+            current_capture_time = time.time()
+            self.replay_buffer.append((current_capture_time, frame_for_processing.copy(), detected_led_states.copy()))
+            if self.replay_frame_width is None or self.replay_frame_height is None:
+                h, w = frame_for_processing.shape[:2]
+                self.replay_frame_width, self.replay_frame_height = w, h
+
         return detected_led_states
 
-    def _draw_overlays(self, frame: np.ndarray, timestamp_in_replay: float) -> np.ndarray:
-        overlay_frame = frame.copy() 
-        current_y_offset = OVERLAY_PADDING + OVERLAY_LINE_HEIGHT 
+    # <<< MODIFICATION: This entire function is refactored for the new overlay style. >>>
+    def _draw_overlays(self, frame: np.ndarray, timestamp_in_replay: float, led_state_for_frame: Dict[str, int]) -> np.ndarray:
+        overlay_frame = frame.copy()
 
-        def draw_text_with_optional_bg(img, text, origin_xy, font, scale, color, thickness, bg_color=None, bg_padding=2):
-            cv2.putText(img, text, origin_xy, font, scale, color, thickness, lineType=cv2.LINE_AA)
+        # Iterate through all configured LEDs to draw their ROI and status indicator
+        ordered_leds = self._get_ordered_led_keys_for_display()
+        for led_key in ordered_leds:
+            if led_key not in self.led_configs:
+                continue
 
-        # 1. Draw ROIs (rectangles and names)
-        for led_key, config_item in self.led_configs.items():
+            config_item = self.led_configs[led_key]
             x, y, w, h = config_item["roi"]
-            roi_box_color = config_item.get("display_color_bgr", (128, 128, 128)) 
+
+            # 1. Draw the ROI box for context
+            roi_box_color = config_item.get("display_color_bgr", (128, 128, 128))
             cv2.rectangle(overlay_frame, (x, y), (x + w, y + h), roi_box_color, 1)
-            text_pos_y = y - OVERLAY_PADDING if y - OVERLAY_PADDING > OVERLAY_LINE_HEIGHT else y + OVERLAY_PADDING + int(OVERLAY_LINE_HEIGHT * 0.8)
-            text_pos_x = x + OVERLAY_PADDING
-            # draw_text_with_optional_bg(overlay_frame, config_item["name"], (text_pos_x, text_pos_y),
-            #                            OVERLAY_FONT, OVERLAY_FONT_SCALE * 0.8, OVERLAY_TEXT_COLOR_ROI_NAME, 
-            #                            OVERLAY_FONT_THICKNESS)
 
-        # # 2. Draw Timestamp (Top-left)
-        # ts_text = f"Replay Time: {timestamp_in_replay:.2f}s"
-        # draw_text_with_optional_bg(overlay_frame, ts_text, (OVERLAY_PADDING, current_y_offset), 
-        #                            OVERLAY_FONT, OVERLAY_FONT_SCALE, OVERLAY_TEXT_COLOR_MAIN, OVERLAY_FONT_THICKNESS)
-        # current_y_offset += OVERLAY_LINE_HEIGHT
+            # 2. Calculate the position for the indicator: centered above the ROI
+            indicator_x_pos = x + (w // 2)
+            # Position it a fixed distance above the ROI's top edge
+            indicator_y_pos = y - OVERLAY_LINE_HEIGHT
+            
+            # Ensure the indicator doesn't draw off-screen at the top
+            if indicator_y_pos < OVERLAY_LED_INDICATOR_RADIUS + OVERLAY_PADDING:
+                indicator_y_pos = OVERLAY_LED_INDICATOR_RADIUS + OVERLAY_PADDING
 
-        # 3. Draw Additional Context (from FSM: script, source_state, destination_state etc.)
-        if self.replay_extra_context:
-            # Define keys to filter out completely
-            excluded_keys = ["replay_script_name", "replay_fsm_function"]
+            # 3. Determine the color of the indicator
+            is_on = led_state_for_frame.get(led_key, 0) == 1
+            if is_on:
+                # Use the LED's specific color when ON
+                indicator_color = config_item.get('display_color_bgr', OVERLAY_LED_INDICATOR_ON_COLOR_FALLBACK)
+            else:
+                # Use the standard dark grey color when OFF
+                indicator_color = OVERLAY_LED_INDICATOR_OFF_COLOR
 
-            # Define renaming map for specific keys
-            rename_map = {
-                "replay_fsm_source_state": "Source",
-                "replay_fsm_current_state": "Destination",
-                # Add other renames here if needed, e.g.,
-                "replay_fsm_trigger_event": "Trigger Event" 
-            }
+            # 4. Draw the indicator circle
+            # Draw the filled circle for the status
+            cv2.circle(overlay_frame, (indicator_x_pos, indicator_y_pos), OVERLAY_LED_INDICATOR_RADIUS, indicator_color, -1)
+            # Draw a white border for better visibility against any background
+            cv2.circle(overlay_frame, (indicator_x_pos, indicator_y_pos), OVERLAY_LED_INDICATOR_RADIUS, OVERLAY_TEXT_COLOR_MAIN, 1)
 
-            # Filter and prepare keys for display
-            display_items = {}
-            for key, value in self.replay_extra_context.items():
-                if key in excluded_keys:
-                    continue
-                
-                display_key_name = rename_map.get(key, key.replace("replay_", "").replace("_", " ").title())
-                display_items[key] = (display_key_name, value)
-
-            # Custom sort order for the display_key_name (after renaming)
-            def custom_sort_key(original_key_name_tuple):
-                original_key = original_key_name_tuple[0] # The original key from replay_extra_context
-                # Prioritize based on original key names for reliable sorting
-                if original_key == "replay_fsm_source_state": return 0
-                if original_key == "replay_fsm_current_state": return 1
-                if original_key == "replay_fsm_trigger_event": return 2 # Example, if you keep this
-                # Add more specific ordering here if needed
-                return 3 # For all other keys
-
-            # Sort the original keys based on the custom logic
-            sorted_original_keys = sorted(display_items.keys(), key=custom_sort_key)
-
-            for original_key in sorted_original_keys:
-                display_key_name, value = display_items[original_key]
-                context_text = f"{display_key_name}: {value}"
-                draw_text_with_optional_bg(overlay_frame, context_text, (OVERLAY_PADDING, current_y_offset),
-                                           OVERLAY_FONT, OVERLAY_FONT_SCALE, OVERLAY_TEXT_COLOR_MAIN, OVERLAY_FONT_THICKNESS)
-                current_y_offset += OVERLAY_LINE_HEIGHT
-        
         return overlay_frame
+    # <<< END MODIFICATION >>>
 
     def _start_replay_recording(self, method_name: str, extra_context: Optional[Dict[str, str]] = None):
         if not self.enable_instant_replay:
@@ -362,9 +335,9 @@ class LogitechLedChecker:
         self.replay_buffer.clear()
         self.replay_start_time = time.time()
         self.replay_method_name = method_name
-        self.replay_extra_context = extra_context.copy() if extra_context else {} # Store a copy
+        self.replay_extra_context = extra_context.copy() if extra_context else {}
         self.replay_failure_reason = ""
-        self.replay_frame_width = None; self.replay_frame_height = None # Reset for each new recording
+        self.replay_frame_width = None; self.replay_frame_height = None
 
     def _save_replay_video(self):
         if not self.is_recording_replay or not self.replay_buffer or not self.replay_output_dir:
@@ -378,23 +351,23 @@ class LogitechLedChecker:
         filename_base = f"failure_instant_replay.mp4"
         filepath = os.path.join(self.replay_output_dir, filename_base)
 
-        fourcc = int.from_bytes(b'mp4v', 'little') # Py3 native, type-checker friendly FourCC
+        fourcc = int.from_bytes(b'mp4v', 'little')
         video_writer = None
         try:
             video_writer = cv2.VideoWriter(filepath, fourcc, self.replay_fps, 
                                            (self.replay_frame_width, self.replay_frame_height))
             if not video_writer.isOpened(): 
-                self.logger.error(f"Replay: Failed to open VideoWriter for {filepath}. Check codec (mp4v) and permissions."); return
+                self.logger.error(f"Replay: Failed to open VideoWriter for {filepath}."); return
 
-            for frame_capture_time, frame_data in self.replay_buffer:
+            for frame_capture_time, frame_data, led_state in self.replay_buffer:
                 time_in_replay_seconds = frame_capture_time - self.replay_start_time
-                frame_with_overlays = self._draw_overlays(frame_data, time_in_replay_seconds)
+                frame_with_overlays = self._draw_overlays(frame_data, time_in_replay_seconds, led_state)
                 
                 fh_overlay, fw_overlay = frame_with_overlays.shape[:2]
                 if fw_overlay == self.replay_frame_width and fh_overlay == self.replay_frame_height:
                     video_writer.write(frame_with_overlays)
-                else: # Should not happen if _draw_overlays returns same size consistently
-                    self.logger.warning(f"Replay: Overlay frame dimension mismatch ({fw_overlay}x{fh_overlay} vs expected {self.replay_frame_width}x{self.replay_frame_height}). Attempting resize for {filepath}.")
+                else: 
+                    self.logger.warning(f"Replay: Overlay frame dimension mismatch. Resizing.")
                     resized_overlay_frame = cv2.resize(frame_with_overlays, (self.replay_frame_width, self.replay_frame_height))
                     video_writer.write(resized_overlay_frame)
             
@@ -407,14 +380,14 @@ class LogitechLedChecker:
     def _stop_replay_recording(self, success: bool, failure_reason: str = "unspecified_failure"):
         if not self.is_recording_replay: return
 
-        self.replay_failure_reason = failure_reason.replace("_", " ") # Sanitize
+        self.replay_failure_reason = failure_reason.replace("_", " ")
 
         if not success and self.replay_buffer and self.replay_output_dir:
             self.logger.debug(self.replay_failure_reason)
             post_failure_start_time = time.time(); frames_after_failure = 0
             
             if self.replay_frame_width is None or self.replay_frame_height is None: 
-                self.logger.error("Replay: Frame dimensions not set prior to post-failure recording. Cannot continue save.");
+                self.logger.error("Replay: Frame dimensions not set. Cannot save.");
                 self.is_recording_replay = False; self.replay_buffer.clear(); return
 
             while time.time() - post_failure_start_time < self.replay_post_failure_duration_sec:
@@ -424,9 +397,13 @@ class LogitechLedChecker:
                 if ret and frame is not None:
                     current_h, current_w = frame.shape[:2]
                     if current_w == self.replay_frame_width and current_h == self.replay_frame_height:
-                        self.replay_buffer.append((time.time(), frame.copy())); frames_after_failure += 1
+                        led_state_for_frame = {}
+                        for led_key, config_item in self.led_configs.items():
+                            led_state_for_frame[led_key] = 1 if self._check_roi_for_color(frame, config_item) else 0
+                        self.replay_buffer.append((time.time(), frame.copy(), led_state_for_frame))
+                        frames_after_failure += 1
                     else: 
-                        self.logger.warning(f"Replay: Frame size changed during post-failure recording. Expected {self.replay_frame_width}x{self.replay_frame_height}, got {current_w}x{current_h}. Frame skipped.")
+                        self.logger.warning(f"Replay: Frame size changed during post-failure recording.")
                 else: self.logger.warning("Replay: Failed to capture frame during post-failure recording.")
                 time.sleep(1.0 / self.replay_fps if self.replay_fps > 0 else 0.01) 
 
@@ -488,8 +465,7 @@ class LogitechLedChecker:
             if duration >= MIN_LOGGABLE_STATE_DURATION:
                 self.logger.info(f"{self._format_led_display_string(state_dict)} ({duration:.2f}s{reason_suffix})")
 
-    # --- Public LED Checking Methods ---
-    # All public methods now accept manage_replay and replay_extra_context
+    # --- Public methods remain unchanged ---
     def confirm_led_solid(self, state: dict, minimum: float = 2, timeout: float = 10,
                           fail_leds: Optional[List[str]] = None, clear_buffer: bool = True, 
                           manage_replay: bool = True, replay_extra_context: Optional[Dict[str, str]] = None) -> bool:
@@ -497,7 +473,7 @@ class LogitechLedChecker:
         if manage_replay: self._start_replay_recording(method_name, extra_context=replay_extra_context)
         
         success_flag = False
-        failure_detail = "unknown_solid_failure" # Default failure reason
+        failure_detail = "unknown_solid_failure"
         
         formatted_target_state = self._format_led_display_string(state)
         self.logger.debug(f"Waiting for LED solid {formatted_target_state}, minimum {minimum:.2f}s (tol: {self.duration_tolerance_sec:.2f}s), timeout {timeout:.2f}s")
@@ -516,7 +492,6 @@ class LogitechLedChecker:
 
             overall_start_time = time.time()
             continuous_target_match_start_time = None
-            # MODIFIED: effective_minimum calculation is removed. We will check against the strict 'minimum' first.
             try:
                 while time.time() - overall_start_time < timeout:
                     current_time = time.time()
@@ -532,23 +507,20 @@ class LogitechLedChecker:
                         if continuous_target_match_start_time is None:
                             continuous_target_match_start_time = last_state_info[1] 
                         target_held_duration = current_time - continuous_target_match_start_time
-                        # MODIFIED: Check against the strict 'minimum' directly.
                         if target_held_duration >= minimum:
                             self.logger.info(f"{self._format_led_display_string(last_state_info[0])} ({target_held_duration:.2f}s) - Solid Confirmed")
-                            success_flag = True; break # Exit while loop
+                            success_flag = True; break
                     else: 
                         continuous_target_match_start_time = None 
                     time.sleep(1 / self.replay_fps if self.replay_fps > 0 else 0.1)
                 
-                # MODIFIED: Add a "forgiveness" block here for the timeout case.
-                if not success_flag: # Timeout occurred if loop finished without success
+                if not success_flag:
                     self._log_final_state(last_state_info, time.time(), reason_suffix=" at timeout")
                     if continuous_target_match_start_time is not None:
                         held_duration = time.time() - continuous_target_match_start_time
-                        # FORGIVENESS CHECK: Is the duration we held it for within tolerance?
                         if held_duration >= (minimum - self.duration_tolerance_sec):
                             self.logger.warning(f"Timeout for {method_name}, but final duration {held_duration:.2f}s was within tolerance of required {minimum:.2f}s. Passing.")
-                            success_flag = True # Forgive the failure and mark as success.
+                            success_flag = True
                         else:
                             failure_detail = f"timeout_target_active_for_{held_duration:.2f}s_needed_{minimum:.2f}s"
                             self.logger.warning(f"Timeout for {method_name}: Target {formatted_target_state} not solid. Reason: {failure_detail}")
@@ -559,7 +531,7 @@ class LogitechLedChecker:
             except Exception as e_loop:
                 failure_detail = f"exception_in_solid_loop_{type(e_loop).__name__}"
                 self.logger.error(f"Exception in {method_name} loop: {e_loop}", exc_info=True)
-                success_flag = False # Ensure it's false on exception
+                success_flag = False
 
         if manage_replay: self._stop_replay_recording(success=success_flag, failure_reason=failure_detail)
         return success_flag
@@ -571,7 +543,6 @@ class LogitechLedChecker:
         success_flag, failure_detail = False, "unknown_strict_failure"
 
         formatted_target_state = self._format_led_display_string(state)
-        # MODIFIED: effective_minimum is removed. Log now shows the strict minimum.
         self.logger.info(f"Waiting strictly solid {formatted_target_state}, min {minimum:.2f}s")
 
         if not self.is_camera_initialized:
@@ -588,32 +559,28 @@ class LogitechLedChecker:
             else:
                 target_state_began_at = last_state_info[1]; strict_op_start_time = time.time()
                 try:
-                    # MODIFIED: Check against the strict 'minimum'.
                     while time.time() - target_state_began_at < minimum:
                         current_time = time.time()
-                        # MODIFIED: Operation timeout is based on the strict minimum.
-                        if current_time - strict_op_start_time > (minimum + 5.0): # Operation timeout
+                        if current_time - strict_op_start_time > (minimum + 5.0):
                             failure_detail=f"op_timeout_strict_aiming_{minimum:.2f}s"; self.logger.warning(f"{method_name} FAILED: {failure_detail}"); success_flag=False; break
                         current_leds = self._get_current_led_state_from_camera()
                         if not current_leds:
                             failure_detail="frame_capture_err_strict"; self.logger.warning(f"{method_name} FAILED: {failure_detail}"); success_flag=False; break
                         logged_a_change = self._handle_state_change_logging(current_leds, current_time, last_state_info)
                         
-                        # MODIFIED: Implement two-step check when state breaks.
                         if not self._matches_state(current_leds, state, None):
                             held_for = current_time - target_state_began_at 
                             if not logged_a_change and last_state_info[0] is not None: self.logger.info(f"{self._format_led_display_string(last_state_info[0])} ({current_time - last_state_info[1]:.2f}s, broke strict sequence)")
                             
-                            # FORGIVENESS CHECK: If strict check fails, is it within tolerance?
                             if held_for >= (minimum - self.duration_tolerance_sec):
                                 self.logger.warning(f"Strict sequence broke at {held_for:.2f}s, but this is within tolerance of required {minimum:.2f}s. Passing.")
-                                success_flag = True # Forgive and treat as success.
+                                success_flag = True
                             else:
                                 failure_detail=f"state_broke_strict_held_{held_for:.2f}s_needed_{minimum:.2f}s"; self.logger.warning(f"{method_name} FAILED: {failure_detail}"); success_flag=False
-                            break # Exit the loop whether it was forgiven or a true failure.
+                            break
 
                         time.sleep(1 / self.replay_fps if self.replay_fps > 0 else 0.1)
-                    else: # while loop completed without break (meaning duration met)
+                    else:
                         self._log_final_state(last_state_info, time.time(), reason_suffix=" on success") 
                         success_flag = True; self.logger.info(f"{method_name}: LED strictly solid confirmed: {formatted_target_state}")
                 except Exception as e_strict_loop:
@@ -649,7 +616,7 @@ class LogitechLedChecker:
                         elif last_state_info[0] != current_leds: self.logger.info(f"{self._format_led_display_string(current_leds)} (0.00s+ when target observed)")
                         self.logger.info(f"Target state {formatted_target_state} observed."); success_flag=True; break
                     time.sleep(1 / self.replay_fps if self.replay_fps > 0 else 0.1)
-                if not success_flag: # Timeout
+                if not success_flag:
                     self._log_final_state(last_state_info, time.time(), reason_suffix=" at timeout")
                     failure_detail=f"timeout_await_{formatted_target_state.replace(' ','_')}"; self.logger.warning(f"Timeout: {formatted_target_state} not observed.")
             except Exception as e_await_loop:
@@ -680,14 +647,11 @@ class LogitechLedChecker:
                     
                     step_cfg = pattern[current_step_idx]; target_state_for_step = {k:v for k,v in step_cfg.items() if k!='duration'}
                     min_d_orig, max_d_orig = step_cfg.get('duration', (0, float('inf')))
-                    # MODIFIED: min_d_check is now the original minimum. Tolerance is NOT subtracted here.
                     min_d_check = min_d_orig
-                    # MODIFIED: max_d_check still adds tolerance, which is desirable to avoid premature failure.
                     max_d_check = max_d_orig + self.duration_tolerance_sec if max_d_orig != float('inf') else float('inf')
                     target_state_str = self._format_led_display_string(target_state_for_step, ordered_keys)
                     
                     step_seen_at = None; step_loop_start_time = time.time()
-                    # Loop to find the current step's target state
                     while True: 
                         if time.time()-pattern_start_time > overall_timeout: 
                             failure_detail=f"timeout_find_step_{current_step_idx+1}"; success_flag=False; break
@@ -699,14 +663,13 @@ class LogitechLedChecker:
                         if time.time()-step_loop_start_time > step_app_timeout: 
                             failure_detail=f"step_{current_step_idx+1}_not_seen_{target_state_str.replace(' ','_')}"; success_flag=False; break
                         time.sleep(1/self.replay_fps if self.replay_fps > 0 else 0.03)
-                    if success_flag is False and failure_detail != "unknown_pattern_failure": break # Break outer while if inner failed to find step
+                    if success_flag is False and failure_detail != "unknown_pattern_failure": break 
 
-                    if step_seen_at is None: # Only reachable if first step, min_d 0, and not seen quickly
+                    if step_seen_at is None: 
                         if current_step_idx==0 and min_d_orig==0.0: 
                             self.logger.info(f"{target_state_str} 0.00s ({current_step_idx + 1:02d}/{len(pattern):02d}) - Skipped (0 dur)"); current_step_idx+=1; continue
                         failure_detail=f"step_{current_step_idx+1}_never_detected_logic_{target_state_str.replace(' ','_')}"; success_flag=False; break
                     
-                    # Loop to hold the current step's target state for its duration
                     while True: 
                         if time.time()-pattern_start_time > overall_timeout: 
                             failure_detail=f"timeout_hold_step_{current_step_idx+1}"; success_flag=False; break
@@ -719,31 +682,27 @@ class LogitechLedChecker:
                             if current_step_idx==len(pattern)-1 and held_time >= min_d_check: 
                                 self.logger.info(f"{target_state_str}  {held_time:.2f}s+ ({current_step_idx + 1:02d}/{len(pattern):02d})")
                                 current_step_idx+=1; break 
-                        else: # State changed from target
-                            # MODIFIED: --- TWO-STEP FORGIVENESS LOGIC ---
-                            # 1. Strict Check: Did it meet the original minimum duration?
+                        else:
                             if held_time >= min_d_check:
                                 self.logger.info(f"{target_state_str}  {held_time:.2f}s ({current_step_idx + 1:02d}/{len(pattern):02d})")
-                                current_step_idx += 1 # Success
+                                current_step_idx += 1
                                 break
-                            # 2. Forgiveness Check: If not, was it within tolerance?
                             elif held_time >= (min_d_orig - self.duration_tolerance_sec):
                                 self.logger.warning(f"{target_state_str} held for {held_time:.2f}s. Shorter than required {min_d_orig:.2f}s but within tolerance. Passing.")
-                                current_step_idx += 1 # Forgiven Success
+                                current_step_idx += 1
                                 break
-                            # 3. True Failure: It was too short, even with tolerance.
                             else:
                                 current_led_str = self._format_led_display_string(current_leds, ordered_keys)
                                 failure_detail=f"step_{current_step_idx+1}_state_{target_state_str.replace(' ','_')}_changed_to_{current_led_str.replace(' ','_')}_early_held_{held_time:.2f}s_min_{min_d_check:.2f}s"; success_flag=False; break
                         time.sleep(1/self.replay_fps if self.replay_fps > 0 else 0.03)
-                    if success_flag is False and failure_detail != "unknown_pattern_failure": break # Break outer while if inner failed to hold step
+                    if success_flag is False and failure_detail != "unknown_pattern_failure": break 
                 
-                if current_step_idx == len(pattern) and (failure_detail == "unknown_pattern_failure" or success_flag is True): # Reached end of pattern successfully
+                if current_step_idx == len(pattern) and (failure_detail == "unknown_pattern_failure" or success_flag is True):
                     success_flag = True; self.logger.info(f"{method_name}: LED pattern confirmed")
-                elif failure_detail == "unknown_pattern_failure": # Loop finished but not all steps processed and no specific error
+                elif failure_detail == "unknown_pattern_failure":
                     failure_detail = f"pattern_ended_inconclusively_step_{current_step_idx}"
                     self.logger.warning(f"{method_name}: Pattern ended inconclusively. Processed {current_step_idx}/{len(pattern)} steps. Reason: {failure_detail}")
-                    success_flag = False # Ensure it's false
+                    success_flag = False
             except Exception as e_pattern_loop:
                 failure_detail=f"exception_pattern_loop_{type(e_pattern_loop).__name__}"; self.logger.error(f"Exception in {method_name} loop: {e_pattern_loop}", exc_info=True); success_flag=False
         
@@ -762,8 +721,6 @@ class LogitechLedChecker:
             self.logger.debug(f"Awaiting first state of pattern (timeout: {timeout:.2f}s), steps: {len(pattern)}.")
             first_state_target = {k:v for k,v in pattern[0].items() if k!='duration'}
             
-            # Pass replay_extra_context down, but inner calls will have manage_replay=False.
-            # The current recording session (if active) will continue to use the extra_context.
             if self.await_led_state(first_state_target, timeout=timeout, clear_buffer=clear_buffer, 
                                     manage_replay=False, replay_extra_context=replay_extra_context):
                 pattern_confirmed = self.confirm_led_pattern(pattern, clear_buffer=False, 

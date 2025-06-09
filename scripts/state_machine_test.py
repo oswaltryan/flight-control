@@ -26,10 +26,15 @@ except Exception as e: # Catch potential RuntimeError if 'at' or 'fsm' failed in
 script_logger = logging.getLogger("MyAutomationScript") # Or use global_at_logger
 
 def run_sequence():
+    # Admin PIN enrolled
+    # fsm.power_on()
+    # fsm.unlock_admin()
+    # fsm.lock_admin()
+    # fsm.power_off()
+
+    # OOB Mode
     fsm.power_on()
-    fsm.unlock_admin()
-    fsm.lock_admin()
-    fsm.power_off()
+    fsm.enroll_admin()
 
 if __name__ == "__main__":
     run_sequence()
