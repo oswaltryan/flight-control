@@ -8,7 +8,16 @@ import os
 from pprint import pprint
 import json
 from camera.led_dictionaries import LEDs
-from transitions import Machine, EventData # Import EventData for type hinting
+
+### For running scripts
+# from transitions import Machine, EventData
+###
+
+### For generating a diagram
+from transitions.extensions import GraphMachine as Machine
+from transitions import EventData
+###
+
 from usb_tool import find_apricorn_device
 
 
@@ -96,7 +105,7 @@ class DeviceUnderTest:
 
     userForcedEnrollmentUsed = False
 
-    adminPIN = {}
+    adminPIN = ["key1", "key1", "key2", "key2", "key3", "key3", "key4", "key4", "unlock"]
     oldAdminPIN = {}
     adminEnum = False
 
@@ -115,13 +124,15 @@ class DeviceUnderTest:
     oldUserPIN = {1: None, 2: None, 3: None, 4: None}
     enumUser = {1: False, 2: False, 3: False, 4: False}
 
-# --- FSM Class Definition ---
+DUT = DeviceUnderTest()
+
+## --- FSM Class Definition ---
 class SimplifiedDeviceFSM:
 
-    STATES: List[str] = ['OFF', 'STARTUP_SELF_TEST', 'STANDBY_MODE', 'UNLOCKED_ADMIN']
+    STATES: List[str] = ['OFF', 'STARTUP_SELF_TEST', 'OOB_MODE', 'STANDBY_MODE', 'UNLOCKED_ADMIN', 'POST_FAILED']
 
     logger: logging.Logger
-    at: 'UnifiedController' # Use the actual class name if imported
+    at: 'UnifiedController'
     machine: Machine
     state: str
     source_state: str
@@ -134,111 +145,112 @@ class SimplifiedDeviceFSM:
             model=self,
             states=SimplifiedDeviceFSM.STATES,
             initial='OFF',
-            send_event=True, # Allows passing EventData to callbacks
-            after_state_change='_log_state_change_details'
+            send_event=True,
+            after_state_change='_log_state_change_details',
+            use_pygraphviz=False
         )
 
         self.source_state = 'OFF'
 
-        # Define transition triggers (methods will be dynamically created by transitions)
-        self.standby_mode: Callable
         self.power_on: Callable
+        self.post_test_complete: Callable
         self.power_off: Callable
-        self.post_successful_standby_detected: Callable
-        self.post_failed: Callable
-        self.critical_error_detected: Callable
         self.unlock_admin: Callable
         self.lock_admin: Callable
+        self.post_failed: Callable
+        self.critical_error_detected: Callable
 
-        # --- Transitions ---
-        self.machine.add_transition(trigger='power_on', source='OFF', dest='STARTUP_SELF_TEST')                         # Power on, confirm Startup Self-Test
-        self.machine.add_transition(trigger='standby_mode', source='STARTUP_SELF_TEST', dest='STANDBY_MODE')            # Confirm Standby Mode
-        self.machine.add_transition(trigger='power_off', source='STANDBY_MODE', dest='OFF')                             # Power off, confirm DUT LEDs off
-        self.machine.add_transition(trigger='unlock_admin', source='STANDBY_MODE', dest='UNLOCKED_ADMIN')               # Unlock DUT using Admin PIN
-        self.machine.add_transition(trigger='lock_admin', source='UNLOCKED_ADMIN', dest='STANDBY_MODE')                 # Lock DUT from Admin enum
+        # --- REFACTORED TRANSITIONS ---
+        # The 'before' callback performs the action. If it returns True, the transition to STARTUP_SELF_TEST occurs.
+        self.machine.add_transition(trigger='power_on', source='OFF', dest='STARTUP_SELF_TEST', before='do_power_on_and_test')
+        self.machine.add_transition(trigger='post_failed', source='STARTUP_SELF_TEST', dest='POST_FAILED')
+        self.machine.add_transition(trigger='power_off', source=['STANDBY_MODE', 'OOB_MODE', 'POST_FAILED'], dest='OFF')
+
+        # The 'on_enter' for the new state now triggers the *next* logical step.
+        self.machine.add_transition(trigger='post_test_complete', source='STARTUP_SELF_TEST', dest='OOB_MODE', conditions=[lambda _: not DUT.adminPIN])
+        self.machine.add_transition(trigger='post_test_complete', source='STARTUP_SELF_TEST', dest='STANDBY_MODE', conditions=[lambda _: bool(DUT.adminPIN)])
+
+        self.machine.add_transition(trigger='unlock_admin', source='STANDBY_MODE', dest='UNLOCKED_ADMIN', before='enter_admin_pin')
+        self.machine.add_transition(trigger='lock_admin', source='UNLOCKED_ADMIN', dest='STANDBY_MODE', before='press_lock_button')
 
 
     def _log_state_change_details(self, event_data: EventData) -> None:
-        assert event_data.transition is not None, "after_state_change callback must have a transition"
-        self.source_state = event_data.transition.source
-        event_name: str = event_data.event.name
-        current_state: str = self.state # self.state is updated by the Machine
-        self.logger.info(f"State changed: {self.source_state} -> {current_state} (Event: {event_name})")
-        if event_data.kwargs: # Log any extra data passed with the event trigger
-            self.logger.debug(f"  Event details: {event_data.kwargs}")
-
-    # --- on_enter_STATENAME Callbacks (State-specific logic) ---
-    def on_enter_OFF(self, event_data: EventData) -> None:
-        self.at.off("usb3")
-        self.at.off("connect")
-
-        power_off_ok: bool = self.at.confirm_led_solid(
-            LEDs['ALL_OFF'], 
-            minimum=3.0, 
-            timeout=5.0,
-            clear_buffer=True # Expecting a stable state now
-        )
-
-        if not power_off_ok:
-            self.logger.error("Failed DUT off LED confirmation...")
-            self.post_failed(details="POST_ANIMATION_MISMATCH") # Pass details
+        if event_data.transition is None:
+            self.logger.info(f"FSM initialized to state: {self.state}")
             return
+        self.source_state = event_data.transition.source
+        self.logger.info(f"State changed: {self.source_state} -> {self.state} (Event: {event_data.event.name})")
 
-        self.logger.info("Device is now OFF.")
-        # Additional OFF state actions if any (e.g., ensure all power is cut if not handled by at.power_off)
-
-    def on_enter_STARTUP_SELF_TEST(self, event_data: EventData) -> None:
-        self.logger.info("Powering DUT on...")
+    def do_power_on_and_test(self, event_data: EventData) -> bool:
+        """
+        This is a 'before' callback. It performs the power-on and POST.
+        It must return True for the transition to proceed, or False to cancel it.
+        """
+        self.logger.info("Powering DUT on and performing self-test...")
         self.at.on("usb3")
         self.at.on("connect")
+        time.sleep(0.5)
 
-        # 1. Confirm the POST animation (using low-level AT method)
         post_animation_observed_ok: bool = self.at.confirm_led_pattern(LEDs['STARTUP'], clear_buffer=True)
 
         if not post_animation_observed_ok:
-            self.logger.error("Failed Startup Self-Test LED confirmation...")
-            self.post_failed(details="POST_ANIMATION_MISMATCH") # Pass details
-            return
-
-    def on_exit_STARTUP_SELF_TEST(self, event_data: EventData) -> None:
-        self.confirm_standby_mode()
+            self.logger.error("Failed Startup Self-Test LED confirmation. Aborting transition.")
+            self.post_failed(details="POST_ANIMATION_MISMATCH")
+            return False # This stops the FSM from entering the STARTUP_SELF_TEST state
         
-    def on_exit_STANDBY_MODE(self, event_data: EventData) -> None:
-        if self.source_state == "STARTUP_SELF_TEST":
-            self.enter_admin_pin()
+        self.logger.info("Startup Self-Test successful. Proceeding to STARTUP_SELF_TEST state.")
+        return True # Allows the transition to complete
 
-    def on_exit_UNLOCKED_ADMIN(self, event_data: EventData) -> None:
+    def on_enter_STARTUP_SELF_TEST(self, event_data: EventData) -> None:
+        """
+        Now this callback is very simple. Its only job is to trigger the next logical step.
+        The FSM is now officially in this state.
+        """
+        self.logger.info("Entered STARTUP_SELF_TEST state. Evaluating next transition...")
+        self.post_test_complete()
+
+    def on_enter_OFF(self, event_data: EventData) -> None:
+        self.at.off("usb3")
+        self.at.off("connect")
+        if self.at.confirm_led_solid(LEDs['ALL_OFF'], minimum=1.0, timeout=3.0):
+            self.logger.info("Device is confirmed OFF.")
+        else:
+            self.logger.error("Failed to confirm device LEDs are OFF.")
+    
+    def on_enter_OOB_MODE(self, event_data: EventData) -> None:
+        self.logger.info(f"Confirming OOB Mode (solid Green/Blue)...")
+        if self.at.confirm_led_solid(LEDs['GREEN_BLUE_STATE'], minimum=3.0, timeout=5.0):
+            self.logger.info("Stable OOB_MODE confirmed.")
+        else:
+            self.logger.error("Failed to confirm OOB_MODE LEDs.")
+            self.critical_error_detected(details="OOB_LED_CONFIRMATION_FAILED")
+
+    def on_enter_STANDBY_MODE(self, event_data: EventData) -> None:
+        self.logger.info(f"Confirming Standby Mode (solid Red)...")
+        if self.at.confirm_led_solid(LEDs['STANDBY_MODE'], minimum=3.0, timeout=5.0):
+            self.logger.info("Stable STANDBY_MODE confirmed.")
+        else:
+            self.logger.error("Failed to confirm STANDBY_MODE LEDs.")
+            self.critical_error_detected(details="STANDBY_LED_CONFIRMATION_FAILED")
+
+    def on_enter_UNLOCKED_ADMIN(self, event_data: EventData) -> None:
+        self.logger.info("Confirming device enumeration post-unlock...")
+        if not self.at.confirm_enum():
+             self.logger.error("Device did not enumerate after admin unlock.")
+             self.post_failed(details="ADMIN_UNLOCK_ENUM_FAILED")
+        else:
+             self.logger.info("Admin unlock successful, device enumerated.")
+
+    def enter_admin_pin(self, event_data: EventData) -> bool:
+        self.logger.info("Unlocking DUT with Admin PIN...")
+        self.at.sequence(DUT.adminPIN)
+        unlock_admin_ok: bool = self.at.await_and_confirm_led_pattern(LEDs['ENUM'], timeout=15)
+        if not unlock_admin_ok:
+            self.logger.error("Failed admin unlock LED pattern. Aborting transition.")
+            self.post_failed(details="ADMIN_UNLOCK_PATTERN_MISMATCH")
+            return False # Cancel the transition
+        return True
+
+    def press_lock_button(self, event_data: EventData) -> None:
         self.logger.info(f"Locking DUT from Unlocked Admin...")
         self.at.press("lock")
-        self.confirm_standby_mode()
-
-    ####################################################################################
-
-    def confirm_standby_mode(self):
-        self.logger.info(f"Confirming Standby Mode...")
-        
-        standby_confirmed: bool = self.at.confirm_led_solid(
-            LEDs['STANDBY_MODE'],
-            minimum=3.0,
-            timeout=5.0,
-            clear_buffer=True
-        )
-        if not standby_confirmed:
-            self.logger.error(f"Failed to confirm stable STANDBY_MODE LEDs. Device state uncertain. Triggering critical error.")
-            self.critical_error_detected(details="STANDBY_LED_CONFIRMATION_FAILED") # Pass details
-            return
-        self.logger.info("Stable STANDBY_MODE LEDs confirmed.")
-        return standby_confirmed
-    
-    def enter_admin_pin(self):
-        self.logger.info("Unlocking DUT with Admin PIN...")
-
-        self.at.sequence(["key1", "key1", "key2", "key2", "key3", "key3", "key4", "key4", "unlock"])
-        unlock_admin_ok: bool = self.at.await_and_confirm_led_pattern(LEDs['ENUM'], timeout = 15, clear_buffer=True)
-
-        if not unlock_admin_ok:
-            self.logger.error("Failed DUT unlock LED confirmation...")
-            self.post_failed(details="POST_ANIMATION_MISMATCH") # Pass details
-            return
-        
-        self.at.confirm_enum()

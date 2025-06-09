@@ -20,7 +20,7 @@ logger = logging.getLogger(__name__)
 DEFAULT_FPS = 15
 CAMERA_BUFFER_SIZE_FRAMES = 5
 MIN_LOGGABLE_STATE_DURATION = 0.01 # Seconds. States held for less than this won't be logged as "held".
-DEFAULT_DURATION_TOLERANCE_SEC = 2.0 # NEW: Default tolerance for duration checks
+DEFAULT_DURATION_TOLERANCE_SEC = 0.1 # NEW: Default tolerance for duration checks
 
 # --- Instant Replay Configuration ---
 GLOBAL_ENABLE_INSTANT_REPLAY_FEATURE = True
