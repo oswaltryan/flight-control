@@ -112,6 +112,16 @@ def draw_live_overlays(frame: np.ndarray, checker_instance: LogitechLedChecker, 
 
     return overlay_frame
 
+def on_mouse_event(event, x, y, flags, param):
+    """Callback function for mouse events to display pixel color info."""
+    if event == cv2.EVENT_MOUSEMOVE:
+        hsv_frame = param[0]
+        bgr_frame = param[1]
+        bgr_val = bgr_frame[y, x]
+        hsv_val = hsv_frame[y, x]
+        output_str = f"Pixel @ ({x}, {y}) -> BGR: {str(bgr_val):<16} | HSV: {str(hsv_val)}"
+        print(output_str, end='\r')
+
 # --- Main function to run the camera feed ---
 def main():
     camera_id = 0
@@ -119,68 +129,97 @@ def main():
     
     display_logger.info(f"Initializing UnifiedController (including camera ID {camera_id} and Phidgets)...")
     try:
-        # Initialize UnifiedController, which in turn sets up LogitechLedChecker and PhidgetController
         unified_at_controller = UnifiedController(
             camera_id=camera_id,
             led_configs=PRIMARY_LED_CONFIGURATIONS,
             display_order=["red", "green", "blue"],
             logger_instance=display_logger.getChild("UnifiedCtrl"),
-            replay_output_dir=None # Ensure replay recording is off for this utility
+            replay_output_dir=None
         )
 
-        # Check if the camera component within UnifiedController is ready
         if not unified_at_controller.is_camera_ready:
-            display_logger.error("UnifiedController's camera component not initialized. Please check camera ID, connection, and drivers. Exiting.")
+            display_logger.error("UnifiedController's camera component not initialized. Exiting.")
             return
 
-        # Ensure we have access to the underlying LogitechLedChecker instance
-        # This is for direct access to its internal methods like _clear_camera_buffer and cap.read()
         checker_instance_from_at = unified_at_controller._camera_checker
         if checker_instance_from_at is None:
             display_logger.error("Internal camera checker instance is None. Exiting.")
             return
 
         display_logger.info("Camera initialized successfully. Displaying live feed.")
-
-        # --- Turn on the device after camera feed is ready ---
+        
         display_logger.info("Turning on device (USB3 and Connect lines)...")
         unified_at_controller.on("usb3")
         unified_at_controller.on("connect")
         display_logger.info("Device power sequence initiated.")
-        # Optional: Add a short delay to allow device to boot up and stabilize its LEDs
         time.sleep(2) 
-        # --- End device turn on ---
 
-        display_logger.info("Press 'q' or 'ESC' to exit the camera feed.")
+        display_logger.info("\n--- CONTROLS ---")
+        display_logger.info(" 'p'       : Pause / Resume the live feed")
+        display_logger.info(" 'q' / ESC : Quit the application")
+        display_logger.info(" Mouse     : When paused, move mouse to see pixel BGR/HSV values in console.")
+        display_logger.info("----------------\n")
 
-        checker_instance_from_at._clear_camera_buffer() # Clear any buffered frames from the camera
+        checker_instance_from_at._clear_camera_buffer()
 
         prev_frame_time = time.time()
         fps_display_value = 0.0
+        is_paused = False
+        window_name = "Live Camera Feed with LED ROIs"
+        cv2.namedWindow(window_name)
+
+        # <<< MODIFICATION START: Corrected Control Flow >>>
+        # Initialize frame variables to None before the loop.
+        frame: Optional[np.ndarray] = None
+        annotated_frame: Optional[np.ndarray] = None
 
         while True:
-            # <<< MODIFICATION START: Use the new atomic method >>>
-            # This single call now gets both the frame and the states detected from that frame.
-            frame, detected_led_states = checker_instance_from_at._get_current_led_state_from_camera()
-            
-            if frame is None:
-                display_logger.warning("Failed to grab frame. Retrying...")
-                time.sleep(0.1)
-                continue
-            # <<< MODIFICATION END >>>
+            # Step 1: Process a new frame IF we are not paused.
+            if not is_paused:
+                # Capture the new frame and its detected states
+                new_frame, detected_led_states = checker_instance_from_at._get_current_led_state_from_camera()
+                
+                if new_frame is not None:
+                    # If capture was successful, update our 'last good frame'
+                    frame = new_frame
+                    
+                    # Update FPS calculation
+                    current_frame_time = time.time()
+                    fps_display_value = 1.0 / (current_frame_time - prev_frame_time) if (current_frame_time - prev_frame_time) > 0 else 0.0
+                    prev_frame_time = current_frame_time
+                    
+                    # Create the new annotated frame
+                    annotated_frame = draw_live_overlays(frame, checker_instance_from_at, detected_led_states, fps_display_value)
+                else:
+                    display_logger.warning("Failed to grab frame. Retrying...")
+                    time.sleep(0.1)
 
-            current_frame_time = time.time()
-            fps_display_value = 1.0 / (current_frame_time - prev_frame_time) if (current_frame_time - prev_frame_time) > 0 else 0.0
-            prev_frame_time = current_frame_time
+            # Step 2: Display the last valid annotated frame.
+            # If paused, this shows the same frame repeatedly. If running, it shows the newest one.
+            if annotated_frame is not None:
+                cv2.imshow(window_name, annotated_frame)
             
-            annotated_frame = draw_live_overlays(frame, checker_instance_from_at, detected_led_states, fps_display_value)
-            
-            cv2.imshow("Live Camera Feed with LED ROIs", annotated_frame)
-
+            # Step 3: Check for user input.
             key = cv2.waitKey(1) & 0xFF
             if key == ord('q') or key == 27:
                 display_logger.info("Exit key pressed. Terminating camera feed.")
                 break
+            elif key == ord('p'):
+                # By the time this code is reached, 'frame' is guaranteed to exist from Step 1.
+                if frame is None:
+                    display_logger.warning("Cannot pause, no valid frame has been captured yet.")
+                    continue
+
+                is_paused = not is_paused
+                if is_paused:
+                    display_logger.info("Feed PAUSED. Move mouse over image to inspect pixel values.")
+                    hsv_snapshot = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
+                    cv2.setMouseCallback(window_name, on_mouse_event, [hsv_snapshot, frame])
+                else:
+                    display_logger.info("Feed RESUMED.")
+                    cv2.setMouseCallback(window_name, lambda *args: None)
+                    print()
+        # <<< MODIFICATION END >>>
 
     except Exception as e:
         display_logger.critical(f"An unexpected error occurred in the main camera feed loop: {e}", exc_info=True)
@@ -188,11 +227,10 @@ def main():
         if unified_at_controller:
             display_logger.info("Attempting to turn off device before closing UnifiedController...")
             try:
-                # Optionally turn off the device before cleanup
                 unified_at_controller.off("usb3")
                 unified_at_controller.off("connect")
                 display_logger.info("Device power lines set to OFF.")
-                time.sleep(0.5) # Give it a moment
+                time.sleep(0.5)
             except Exception as e_off:
                 display_logger.warning(f"Error turning off device: {e_off}", exc_info=True)
 

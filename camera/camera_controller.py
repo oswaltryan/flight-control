@@ -57,7 +57,7 @@ PRIMARY_LED_CONFIGURATIONS = {
     "green": {
         "name": "Green LED",
         "roi": (302, 165, 40, 40),
-        "hsv_lower": (40, 100, 100),
+        "hsv_lower": (40, 10, 100),
         "hsv_upper": (85, 255, 255),
         "min_match_percentage": 0.15,
         "display_color_bgr": (0,255,0)
@@ -65,7 +65,7 @@ PRIMARY_LED_CONFIGURATIONS = {
     "blue":  {
         "name": "Blue LED",
         "roi": (417, 165, 40, 40),
-        "hsv_lower": (95, 100, 100),
+        "hsv_lower": (75,    0, 100),
         "hsv_upper": (130, 255, 255),
         "min_match_percentage": 0.15,
         "display_color_bgr": (255,0,0)
@@ -243,38 +243,47 @@ class LogitechLedChecker:
         current_match_percentage = matching_pixels / float(total_pixels_in_roi)
         return current_match_percentage >= min_match_percentage
 
-    def _get_current_led_state_from_camera(self, input_frame: Optional[np.ndarray] = None) -> dict:
-        if not self.is_camera_initialized or not self.cap: return {}
-        
-        frame_for_processing = input_frame
-        capture_failed = False
-        
-        if frame_for_processing is None:
-            try:
-                ret, frame = self.cap.read()
-                if not ret or frame is None:
-                    if self.is_recording_replay: self.logger.warning("Replay: Frame capture failed during active recording.")
-                    capture_failed = True
-                    return {}
-                frame_for_processing = frame 
-            except Exception as e:
-                self.logger.error(f"Exception while capturing frame: {e}", exc_info=True)
-                capture_failed = True
-                return {}
+    def _get_current_led_state_from_camera(self) -> Tuple[Optional[np.ndarray], Dict[str, int]]:
+        """
+        Captures ONE frame and checks all configured LEDs against it. This guarantees
+        an atomic snapshot of the LED states at a single point in time.
 
+        It no longer accepts an 'input_frame' argument.
+
+        Returns:
+            A tuple containing:
+            - The frame (np.ndarray) that was analyzed, or None on failure.
+            - A dictionary (dict) of the detected LED states.
+        """
+        if not self.is_camera_initialized or not self.cap:
+            return None, {}
+
+        frame_for_processing = None
         detected_led_states = {}
-        if not capture_failed and frame_for_processing is not None:
-            for led_key, config_item in self.led_configs.items():
-                detected_led_states[led_key] = 1 if self._check_roi_for_color(frame_for_processing, config_item) else 0
+        
+        try:
+            ret, frame = self.cap.read()
+            if not ret or frame is None:
+                self.logger.warning("Frame capture failed.")
+                return None, {}
+            frame_for_processing = frame
+        except Exception as e:
+            self.logger.error(f"Exception while capturing frame: {e}", exc_info=True)
+            return None, {}
 
-        if self.is_recording_replay and not capture_failed:
+        # Now, check all LEDs against the single frame we just captured.
+        for led_key, config_item in self.led_configs.items():
+            detected_led_states[led_key] = 1 if self._check_roi_for_color(frame_for_processing, config_item) else 0
+
+        # If replay is active, store this atomic result.
+        if self.is_recording_replay:
             current_capture_time = time.time()
             self.replay_buffer.append((current_capture_time, frame_for_processing.copy(), detected_led_states.copy()))
             if self.replay_frame_width is None or self.replay_frame_height is None:
                 h, w = frame_for_processing.shape[:2]
                 self.replay_frame_width, self.replay_frame_height = w, h
 
-        return detected_led_states
+        return frame_for_processing, detected_led_states
 
     def _draw_overlays(self, frame: np.ndarray, timestamp_in_replay: float, led_state_for_frame: Dict[str, int]) -> np.ndarray:
         overlay_frame = frame.copy()
@@ -389,20 +398,14 @@ class LogitechLedChecker:
                 self.is_recording_replay = False; self.replay_buffer.clear(); return
 
             while time.time() - post_failure_start_time < self.replay_post_failure_duration_sec:
-                if not self.cap or not self.cap.isOpened():
-                    self.logger.warning("Replay: Camera not available for post-failure recording."); break
-                ret, frame = self.cap.read()
-                if ret and frame is not None:
-                    current_h, current_w = frame.shape[:2]
-                    if current_w == self.replay_frame_width and current_h == self.replay_frame_height:
-                        led_state_for_frame = {}
-                        for led_key, config_item in self.led_configs.items():
-                            led_state_for_frame[led_key] = 1 if self._check_roi_for_color(frame, config_item) else 0
-                        self.replay_buffer.append((time.time(), frame.copy(), led_state_for_frame))
-                        frames_after_failure += 1
-                    else: 
-                        self.logger.warning(f"Replay: Frame size changed during post-failure recording.")
-                else: self.logger.warning("Replay: Failed to capture frame during post-failure recording.")
+                frame, led_state_for_frame = self._get_current_led_state_from_camera()
+                if frame is not None:
+                    # The replay buffer expects the frame and states, which our new method provides.
+                    # We just need to add the timestamp.
+                    self.replay_buffer.append((time.time(), frame, led_state_for_frame))
+                    frames_after_failure += 1
+                else:
+                    self.logger.warning("Replay: Failed to capture frame during post-failure recording.")
                 time.sleep(1.0 / self.replay_fps if self.replay_fps > 0 else 0.01) 
 
             self._save_replay_video() 
@@ -484,7 +487,7 @@ class LogitechLedChecker:
             initial_capture_time = time.time()
             if clear_buffer: self._clear_camera_buffer()
             
-            initial_leds_for_log = self._get_current_led_state_from_camera()
+            _, initial_leds_for_log = self._get_current_led_state_from_camera()
             if not initial_leds_for_log: initial_leds_for_log = {} 
             last_state_info = [initial_leds_for_log, initial_capture_time]
 
@@ -493,7 +496,7 @@ class LogitechLedChecker:
             try:
                 while time.time() - overall_start_time < timeout:
                     current_time = time.time()
-                    current_leds = self._get_current_led_state_from_camera()
+                    _, current_leds = self._get_current_led_state_from_camera() # Refactored call
                     if not current_leds: 
                         self._handle_state_change_logging({}, current_time, last_state_info)
                         continuous_target_match_start_time = None
@@ -548,7 +551,8 @@ class LogitechLedChecker:
         else:
             last_state_info = [None, 0.0] 
             if clear_buffer: self._clear_camera_buffer()
-            initial_leds = self._get_current_led_state_from_camera() or {}
+            _, initial_leds = self._get_current_led_state_from_camera() # Refactored call
+            initial_leds = initial_leds or {}
             last_state_info = [initial_leds, time.time()]
             self.logger.info(f"Initial for strict: {self._format_led_display_string(initial_leds)}")
 
@@ -561,7 +565,7 @@ class LogitechLedChecker:
                         current_time = time.time()
                         if current_time - strict_op_start_time > (minimum + 5.0):
                             failure_detail=f"op_timeout_strict_aiming_{minimum:.2f}s"; self.logger.warning(f"{method_name} FAILED: {failure_detail}"); success_flag=False; break
-                        current_leds = self._get_current_led_state_from_camera()
+                        _, current_leds = self._get_current_led_state_from_camera() # Refactored call
                         if not current_leds:
                             failure_detail="frame_capture_err_strict"; self.logger.warning(f"{method_name} FAILED: {failure_detail}"); success_flag=False; break
                         logged_a_change = self._handle_state_change_logging(current_leds, current_time, last_state_info)
@@ -601,12 +605,14 @@ class LogitechLedChecker:
         else:
             last_state_info = [None, 0.0]
             if clear_buffer: self._clear_camera_buffer()
-            initial_leds = self._get_current_led_state_from_camera() or {}
+            _, initial_leds = self._get_current_led_state_from_camera() # Refactored call
+            initial_leds = initial_leds or {}
             last_state_info = [initial_leds, time.time()]
             await_start_time = time.time()
             try:
                 while time.time() - await_start_time < timeout:
-                    current_time = time.time(); current_leds = self._get_current_led_state_from_camera()
+                    current_time = time.time()
+                    _, current_leds = self._get_current_led_state_from_camera() # Refactored call
                     if not current_leds: self._handle_state_change_logging({}, current_time, last_state_info); time.sleep(0.1); continue
                     self._handle_state_change_logging(current_leds, current_time, last_state_info)
                     if self._matches_state(current_leds, state, fail_leds):
@@ -653,7 +659,7 @@ class LogitechLedChecker:
                     while True: 
                         if time.time()-pattern_start_time > overall_timeout: 
                             failure_detail=f"timeout_find_step_{current_step_idx+1}"; success_flag=False; break
-                        current_leds = self._get_current_led_state_from_camera(); 
+                        _, current_leds = self._get_current_led_state_from_camera() # Refactored call
                         if not current_leds: time.sleep(0.03); continue
                         if self._matches_state(current_leds, target_state_for_step): step_seen_at=time.time(); break
                         if current_step_idx==0 and min_d_orig==0.0 and (time.time()-step_loop_start_time > 0.25): break 
@@ -671,7 +677,7 @@ class LogitechLedChecker:
                     while True: 
                         if time.time()-pattern_start_time > overall_timeout: 
                             failure_detail=f"timeout_hold_step_{current_step_idx+1}"; success_flag=False; break
-                        current_leds = self._get_current_led_state_from_camera();
+                        _, current_leds = self._get_current_led_state_from_camera() # Refactored call
                         if not current_leds: time.sleep(0.03); continue
                         held_time = time.time() - step_seen_at
                         if self._matches_state(current_leds, target_state_for_step): 
