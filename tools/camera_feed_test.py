@@ -49,10 +49,13 @@ try:
     from camera.camera_controller import (
         PRIMARY_LED_CONFIGURATIONS, # Contains the ROI definitions
         DEFAULT_FPS, # Default FPS for camera if not detected
-        # Overlay drawing constants from camera_controller.py
+        # <<< MODIFICATION START: Fix 1 >>>
+        # Removed OVERLAY_TEXT_COLOR_ROI_NAME as it does not exist in the source file.
+        # We will reuse OVERLAY_TEXT_COLOR_MAIN instead.
         OVERLAY_FONT, OVERLAY_FONT_SCALE, OVERLAY_FONT_THICKNESS,
-        OVERLAY_TEXT_COLOR_MAIN, OVERLAY_TEXT_COLOR_ROI_NAME,
+        OVERLAY_TEXT_COLOR_MAIN,
         OVERLAY_LINE_HEIGHT, OVERLAY_PADDING
+        # <<< MODIFICATION END: Fix 1 >>>
     )
     # We'll need access to the internal LogitechLedChecker instance
     from camera.camera_controller import LogitechLedChecker # Used for type hinting
@@ -97,9 +100,12 @@ def draw_live_overlays(frame: np.ndarray, checker_instance: LogitechLedChecker, 
 
         text_pos_y = y - OVERLAY_PADDING if y - OVERLAY_PADDING > OVERLAY_LINE_HEIGHT else y + h + OVERLAY_LINE_HEIGHT
         text_pos_x = x + OVERLAY_PADDING
+        # <<< MODIFICATION START: Fix 1 >>>
+        # Use the existing OVERLAY_TEXT_COLOR_MAIN constant for the ROI name text.
         draw_text_with_optional_bg(overlay_frame, config_item["name"], (text_pos_x, text_pos_y),
-                                   OVERLAY_FONT, OVERLAY_FONT_SCALE * 0.8, OVERLAY_TEXT_COLOR_ROI_NAME,
+                                   OVERLAY_FONT, OVERLAY_FONT_SCALE * 0.8, OVERLAY_TEXT_COLOR_MAIN,
                                    OVERLAY_FONT_THICKNESS)
+        # <<< MODIFICATION END: Fix 1 >>>
         
         state_val = detected_states.get(led_key, -1)
         display_char = config_item["name"][0] if config_item["name"] else led_key[0].upper()
@@ -159,8 +165,15 @@ def main():
         fps_display_value = 0.0
 
         while True:
-            # Read a frame from the camera via the internal checker instance
-            ret, frame = checker_instance_from_at.cap.read()
+            # <<< MODIFICATION START: Fix 2 >>>
+            # Assign cap to a local variable and add a None check to satisfy the static analyzer.
+            cap = checker_instance_from_at.cap
+            if cap is None:
+                display_logger.error("Camera capture object is None. Exiting feed loop.")
+                break
+
+            ret, frame = cap.read()
+            # <<< MODIFICATION END: Fix 2 >>>
             if not ret or frame is None:
                 display_logger.warning("Failed to grab frame. Retrying...")
                 time.sleep(0.1)

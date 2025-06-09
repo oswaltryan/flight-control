@@ -114,7 +114,10 @@ class PhidgetController:
         ch = self.channels.get(name)
         if ch is None: raise RuntimeError(f"Channel '{name}' is None (failed init).")
         if expected_type and not isinstance(ch, expected_type): raise TypeError(f"Channel '{name}' not {expected_type.__name__}, found {type(ch).__name__}.")
-        if not ch.getAttached(): self.logger.error(f"Channel '{name}' (S/N {ch.getDeviceSerialNumber()}, Ch {ch.getChannel()}) not attached."); raise PhidgetException(ErrorCode.EPHIDGET_NOTATTACHED, f"Phidget '{name}' not attached.")
+        if not ch.getAttached():
+            self.logger.error(f"Channel '{name}' (S/N {ch.getDeviceSerialNumber()}, Ch {ch.getChannel()}) not attached.")
+            # The PhidgetException constructor takes only one argument, the error code.
+            raise PhidgetException(ErrorCode.EPHIDGET_NOTATTACHED)
         return ch
 
     def set_output(self, name, state):
@@ -126,19 +129,27 @@ class PhidgetController:
     
     def off(self, name): self.set_output(name, False)
 
-    def hold(self, name, duration_ms=200):
-        self.logger.debug(f"Holding '{name}' ON for {duration_ms}ms.") # MODIFIED: INFO to DEBUG
-        try: self.on(name); time.sleep(duration_ms / 1000.0)
+    def hold(self, name: str, duration_ms: float = 200):
+        self.logger.debug(f"Holding '{name}' ON for {duration_ms}ms.")
+        try:
+            self.on(name)
+            time.sleep(duration_ms / 1000.0)
         finally:
-            try: self.off(name)
-            except Exception as e: self.logger.error(f"Error turning off '{name}' during hold: {e}", exc_info=True)
+            try:
+                self.off(name)
+            except Exception as e:
+                self.logger.error(f"Error turning off '{name}' during hold: {e}", exc_info=True)
 
-    def press(self, name, duration_ms=100): # MODIFIED: Added duration_ms, default 100ms
-        self.logger.debug(f"Pressing '{name}' (ON for {duration_ms}ms).") # MODIFIED: INFO to DEBUG, use duration_ms
-        try: self.on(name); time.sleep(duration_ms / 1000.0) # MODIFIED: Use duration_ms
+    def press(self, name: str, duration_ms: float = 100):
+        self.logger.debug(f"Pressing '{name}' (ON for {duration_ms}ms).")
+        try:
+            self.on(name)
+            time.sleep(duration_ms / 1000.0)
         finally:
-            try: self.off(name)
-            except Exception as e: self.logger.error(f"Error turning off '{name}' during press: {e}", exc_info=True) # MODIFIED: "hold" to "press" in error message
+            try:
+                self.off(name)
+            except Exception as e:
+                self.logger.error(f"Error turning off '{name}' during press: {e}", exc_info=True)
 
     def sequence(self, pins: list, press_ms: float = 100, pause_ms: float = 100):
         if not pins or not isinstance(pins, list) or not all(isinstance(p, (str,int)) for p in pins) \
@@ -157,7 +168,7 @@ class PhidgetController:
         try: state = di_ch.getState(); self.logger.info(f"Input '{name}' read as {'HIGH' if state else 'LOW'}."); return state
         except PhidgetException as e: self.logger.error(f"Error reading input '{name}': {e.description}", exc_info=False); raise
 
-    def wait_for_input(self, name, expected_state, timeout_s=5, poll_s=0.05):
+    def wait_for_input(self, name, expected_state:bool, timeout_s:float = 5, poll_s:float = 0.05) -> bool:
         expected = bool(expected_state); start = time.time()
         self.logger.info(f"Waiting for input '{name}' to be {'HIGH' if expected else 'LOW'} (timeout: {timeout_s}s)...")
         while time.time() - start < timeout_s:
@@ -165,7 +176,10 @@ class PhidgetController:
                 ch = self._get_channel_object(name, DigitalInput)
                 if ch.getState() == expected: self.logger.info(f"Input '{name}' reached state {'HIGH' if expected else 'LOW'}."); return True
             except PhidgetException as e:
-                if e.code == ErrorCode.EPHIDGET_NOTATTACHED: self.logger.warning(f"Input '{name}' detached. Retrying. (S/N {self.channels.get(name).getDeviceSerialNumber() if self.channels.get(name) else 'N/A'})")
+                if e.code == ErrorCode.EPHIDGET_NOTATTACHED:
+                    channel_for_log = self.channels.get(name)
+                    serial_info = channel_for_log.getDeviceSerialNumber() if channel_for_log else "N/A"
+                    self.logger.warning(f"Input '{name}' detached. Retrying. (S/N {serial_info})")
                 else: self.logger.error(f"PhidgetExc waiting for '{name}': {e.description}", exc_info=False)
             except (NameError, RuntimeError, TypeError) as e: self.logger.error(f"Cannot wait for '{name}': {e}", exc_info=True); raise
             time.sleep(poll_s)

@@ -276,7 +276,6 @@ class LogitechLedChecker:
 
         return detected_led_states
 
-    # <<< MODIFICATION: This entire function is refactored for the new overlay style. >>>
     def _draw_overlays(self, frame: np.ndarray, timestamp_in_replay: float, led_state_for_frame: Dict[str, int]) -> np.ndarray:
         overlay_frame = frame.copy()
 
@@ -318,7 +317,6 @@ class LogitechLedChecker:
             cv2.circle(overlay_frame, (indicator_x_pos, indicator_y_pos), OVERLAY_LED_INDICATOR_RADIUS, OVERLAY_TEXT_COLOR_MAIN, 1)
 
         return overlay_frame
-    # <<< END MODIFICATION >>>
 
     def _start_replay_recording(self, method_name: str, extra_context: Optional[Dict[str, str]] = None):
         if not self.enable_instant_replay:
