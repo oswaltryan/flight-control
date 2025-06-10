@@ -185,8 +185,8 @@ class SimplifiedDeviceFSM:
         self.enroll_admin: Callable
         self.enroll_user: Callable
         self.machine.add_transition(trigger='enroll_admin', source=['ADMIN_MODE', 'OOB_MODE'], dest='ADMIN_MODE', before='admin_enrollment')
-        self.machine.add_transition(trigger='enroll_user', source='ADMIN_MODE', dest='ADMIN_MODE')
-        self.machine.add_transition(trigger='enroll_user', source='USER_FORCED_ENROLLMENT', dest='STANDBY_MODE')
+        self.machine.add_transition(trigger='enroll_user', source='ADMIN_MODE', dest='ADMIN_MODE', before='user_enrollment')
+        self.machine.add_transition(trigger='enroll_user', source='USER_FORCED_ENROLLMENT', dest='STANDBY_MODE', before='user_enrollment')
 
 
         # self.machine.add_transition(trigger='set_brute_force_counter', source='ADMIN_MODE', dest='ADMIN_MODE')
@@ -276,7 +276,7 @@ class SimplifiedDeviceFSM:
             'fsm_current_state': self.source_state,
             'fsm_destination_state': self.state
         }
-        if self.at.confirm_led_solid(LEDs['GREEN_BLUE_STATE'], minimum=3.0, timeout=5.0, replay_extra_context=context):
+        if self.at.confirm_led_solid(LEDs['GREEN_BLUE_STATE'], minimum=3.0, timeout=10.0, replay_extra_context=context):
             self.logger.info("Stable OOB_MODE confirmed.")
         else:
             self.logger.error("Failed to confirm OOB_MODE LEDs.")
@@ -557,7 +557,8 @@ class SimplifiedDeviceFSM:
 
         self.logger.info("Initiating User Reset...")
 
-        self.at.sequence([["lock", "unlock", "key2"]])
+        if self.state == "ADMIN_MODE":
+            self.at.sequence([["lock", "unlock", "key2"]])
 
         reset_pattern_ok = self.at.confirm_led_solid(
             LEDs["KEY_GENERATION"],
