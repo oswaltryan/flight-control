@@ -34,8 +34,9 @@ OVERLAY_FONT = cv2.FONT_HERSHEY_SIMPLEX
 OVERLAY_FONT_SCALE = 0.5
 OVERLAY_FONT_THICKNESS = 1
 OVERLAY_TEXT_COLOR_MAIN = (255, 255, 255)  # White
-OVERLAY_LINE_HEIGHT = 30 # Used as a spacer for positioning indicators
+OVERLAY_LINE_HEIGHT = 20 # Used as a spacer for positioning indicators
 OVERLAY_PADDING = 5
+OVERLAY_BG_COLOR = (20, 20, 20) # Dark Grey
 
 # --- Constants for drawing LED status indicators on the replay video ---
 OVERLAY_LED_INDICATOR_RADIUS = 7
@@ -285,29 +286,54 @@ class LogitechLedChecker:
 
         return frame_for_processing, detected_led_states
 
+    def _draw_text_with_background(self, img: np.ndarray, text: str, pos: Tuple[int, int]):
+        """
+        Draws the given text on the image with an opaque background for better readability.
+
+        Args:
+            img: The image (frame) to draw on.
+            text: The string of text to draw.
+            pos: A tuple (x, y) representing the bottom-left starting position of the text.
+        """
+        text_size, _ = cv2.getTextSize(text, OVERLAY_FONT, OVERLAY_FONT_SCALE, OVERLAY_FONT_THICKNESS)
+        text_w, text_h = text_size
+        
+        # The 'y' in the position tuple is the baseline of the text.
+        x, y = pos
+
+        # Calculate the coordinates for the background rectangle.
+        rect_x1 = x - OVERLAY_PADDING
+        rect_y1 = y - text_h - OVERLAY_PADDING
+        rect_x2 = x + text_w + OVERLAY_PADDING
+        rect_y2 = y + OVERLAY_PADDING
+        
+        # Draw the opaque background rectangle.
+        cv2.rectangle(img, (rect_x1, rect_y1), (rect_x2, rect_y2), OVERLAY_BG_COLOR, -1)
+        
+        # Draw the text on top of the background.
+        cv2.putText(img, text, pos, OVERLAY_FONT, OVERLAY_FONT_SCALE, OVERLAY_TEXT_COLOR_MAIN, OVERLAY_FONT_THICKNESS, cv2.LINE_AA)
+
+
     def _draw_overlays(self, frame: np.ndarray, timestamp_in_replay: float, led_state_for_frame: Dict[str, int]) -> np.ndarray:
         overlay_frame = frame.copy()
         current_y_offset = OVERLAY_PADDING
 
-        # --- MODIFICATION: Draw FSM context if available ---
+        # --- MODIFICATION: Use the new helper function for drawing text ---
         if self.replay_extra_context:
             fsm_curr = self.replay_extra_context.get('fsm_current_state', 'N/A')
             fsm_dest = self.replay_extra_context.get('fsm_destination_state', 'N/A')
             
-            # Draw Current State text on the video frame
-            cv2.putText(overlay_frame, f"Current State: {fsm_curr}", 
-                        (OVERLAY_PADDING, current_y_offset + OVERLAY_LINE_HEIGHT),
-                        OVERLAY_FONT, OVERLAY_FONT_SCALE, OVERLAY_TEXT_COLOR_MAIN, OVERLAY_FONT_THICKNESS, cv2.LINE_AA)
+            # Draw Current State text with an opaque background.
+            self._draw_text_with_background(overlay_frame, f"Current State: {fsm_curr}", 
+                        (OVERLAY_PADDING + 5, current_y_offset + OVERLAY_LINE_HEIGHT))
             current_y_offset += OVERLAY_LINE_HEIGHT
 
-            # Draw Destination State text on the video frame
-            cv2.putText(overlay_frame, f"Destination State: {fsm_dest}",
-                        (OVERLAY_PADDING, current_y_offset + OVERLAY_LINE_HEIGHT),
-                        OVERLAY_FONT, OVERLAY_FONT_SCALE, OVERLAY_TEXT_COLOR_MAIN, OVERLAY_FONT_THICKNESS, cv2.LINE_AA)
-            # Add extra padding to separate this block from other potential overlays
+            # Draw Destination State text with an opaque background.
+            self._draw_text_with_background(overlay_frame, f"Destination State: {fsm_dest}",
+                        (OVERLAY_PADDING + 5, current_y_offset + OVERLAY_LINE_HEIGHT))
             current_y_offset += (OVERLAY_LINE_HEIGHT * 2)
 
-        # Iterate through all configured LEDs to draw their ROI and status indicator
+        # The rest of the function for drawing ROIs and LED indicators remains the same.
         ordered_leds = self._get_ordered_led_keys_for_display()
         for led_key in ordered_leds:
             if led_key not in self.led_configs:
@@ -316,32 +342,28 @@ class LogitechLedChecker:
             config_item = self.led_configs[led_key]
             x, y, w, h = config_item["roi"]
 
-            # 1. Draw the ROI box for context
+            # 1. Draw the ROI box (This remains colored as before)
             roi_box_color = config_item.get("display_color_bgr", (128, 128, 128))
             cv2.rectangle(overlay_frame, (x, y), (x + w, y + h), roi_box_color, 1)
 
             # 2. Calculate the position for the indicator: centered above the ROI
             indicator_x_pos = x + (w // 2)
-            # Position it a fixed distance above the ROI's top edge
             indicator_y_pos = y - OVERLAY_LINE_HEIGHT
             
-            # Ensure the indicator doesn't draw off-screen at the top
             if indicator_y_pos < OVERLAY_LED_INDICATOR_RADIUS + OVERLAY_PADDING:
                 indicator_y_pos = OVERLAY_LED_INDICATOR_RADIUS + OVERLAY_PADDING
 
             # 3. Determine the color of the indicator
             is_on = led_state_for_frame.get(led_key, 0) == 1
             if is_on:
-                # Use the LED's specific color when ON
-                indicator_color = config_item.get('display_color_bgr', OVERLAY_LED_INDICATOR_ON_COLOR_FALLBACK)
+                # The indicator is now WHITE when the LED is ON.
+                indicator_color = OVERLAY_TEXT_COLOR_MAIN 
             else:
-                # Use the standard dark grey color when OFF
+                # The indicator remains dark grey when the LED is OFF.
                 indicator_color = OVERLAY_LED_INDICATOR_OFF_COLOR
 
             # 4. Draw the indicator circle
-            # Draw the filled circle for the status
             cv2.circle(overlay_frame, (indicator_x_pos, indicator_y_pos), OVERLAY_LED_INDICATOR_RADIUS, indicator_color, -1)
-            # Draw a white border for better visibility against any background
             cv2.circle(overlay_frame, (indicator_x_pos, indicator_y_pos), OVERLAY_LED_INDICATOR_RADIUS, OVERLAY_TEXT_COLOR_MAIN, 1)
 
         return overlay_frame
