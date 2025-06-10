@@ -106,25 +106,23 @@ class DeviceUnderTest:
     userForcedEnrollment = False
     userForcedEnrollmentUsed = False
 
-    # MODIFICATION: Changed to an empty list to represent a new, un-enrolled device.
-    # The FSM will correctly start in OOB_MODE.
     adminPIN = []
     oldAdminPIN = []
 
-    recoveryPIN = {1: {}, 2: {}, 3: {}, 4: {}}
-    oldRecoveryPIN = {1: {}, 2: {}, 3: {}, 4: {}}
-    usedRecovery = {1: False, 2: False, 3: False, 4: False}
+    recoveryPIN: Dict[int, Dict] = {1: {}, 2: {}, 3: {}, 4: {}}
+    oldRecoveryPIN: Dict[int, Dict] = {1: {}, 2: {}, 3: {}, 4: {}}
+    usedRecovery: Dict[int, bool] = {1: False, 2: False, 3: False, 4: False}
     
     selfDestructEnabled = False
-    selfDestructPIN = {}
-    oldSelfDestructPIN = {}
+    selfDestructPIN: Dict = {}
+    oldSelfDestructPIN: Dict = {}
     selfDestructEnum = False
     selfDestructUsed = False
 
     userCount = DEVICE_PROPERTIES[device_name]['userCount']
-    userPIN = {1: None, 2: None, 3: None, 4: None}
-    oldUserPIN = {1: None, 2: None, 3: None, 4: None}
-    enumUser = {1: False, 2: False, 3: False, 4: False}
+    userPIN: Dict[int, Optional[List[str]]] = {1: None, 2: None, 3: None, 4: None}
+    oldUserPIN: Dict[int, Optional[List[str]]] = {1: None, 2: None, 3: None, 4: None}
+    enumUser: Dict[int, bool] = {1: False, 2: False, 3: False, 4: False}
 
 DUT = DeviceUnderTest()
 
@@ -173,18 +171,24 @@ class SimplifiedDeviceFSM:
         self.machine.add_transition(trigger='post_pass', source='POWER_ON_SELF_TEST', dest='BRUTE_FORCE', conditions=[lambda _: DUT.bruteForceCounter == 0])
 
         self.enter_diagnostic_mode: Callable
-        self.machine.add_transition(trigger='enter_diagnostic_mode', source=['BRUTE_FORCE', 'OOB_MODE', 'STANDBY_MODE', 'USER_FORCED_ENROLLMENT'], dest='DIAGNOSTIC_MODE')
+        self.machine.add_transition(trigger='enter_diagnostic_mode', source=['OOB_MODE', 'STANDBY_MODE'], dest='DIAGNOSTIC_MODE')
+        self.machine.add_transition(trigger='exit_diagnostic_mode', source='DIAGNOSTIC_MODE', dest='OOB_MODE', conditions=[lambda _: not DUT.adminPIN])
+        self.machine.add_transition(trigger='exit_diagnostic_mode', source='DIAGNOSTIC_MODE', dest='STANDBY_MODE', conditions=[lambda _: bool(DUT.adminPIN)])
+        
 
         # --- User Reset Transitions ---
+        self.user_reset: Callable
         self.machine.add_transition(trigger='user_reset', source=['BRUTE_FORCE', 'OOB_MODE', 'STANDBY_MODE', 'USER_FORCED_ENROLLMENT'], dest='OOB_MODE', conditions=[lambda _: not DUT.provisionLock])
-        self.machine.add_transition(trigger='user_reset', source='ADMIN_MODE', dest='OOB_MODE')
+        self.machine.add_transition(trigger='user_reset', source='ADMIN_MODE', dest='OOB_MODE', before='do_user_reset')
 
-        # --- Admin Mode Transition ---
+        # --- Enrollment Transitions ---
         self.enroll_admin: Callable
-        self.machine.add_transition(trigger='enroll_admin', source='OOB_MODE', dest='ADMIN_MODE', before='admin_enrollment')
+        self.enroll_user: Callable
+        self.machine.add_transition(trigger='enroll_admin', source=['ADMIN_MODE', 'OOB_MODE'], dest='ADMIN_MODE', before='admin_enrollment')
+        self.machine.add_transition(trigger='enroll_user', source='ADMIN_MODE', dest='ADMIN_MODE')
+        self.machine.add_transition(trigger='enroll_user', source='USER_FORCED_ENROLLMENT', dest='STANDBY_MODE')
 
-        # # --- Admin Mode Enrollment Transitions ---
-        # self.machine.add_transition(trigger='enroll_user_pin', source='ADMIN_MODE', dest='ADMIN_MODE')
+
         # self.machine.add_transition(trigger='set_brute_force_counter', source='ADMIN_MODE', dest='ADMIN_MODE')
         # self.machine.add_transition(trigger='change_admin_pin', source='ADMIN_MODE', dest='ADMIN_MODE')
         # self.machine.add_transition(trigger='enroll_self_destruct_pin', source='ADMIN_MODE', dest='ADMIN_MODE')
@@ -212,7 +216,9 @@ class SimplifiedDeviceFSM:
 
         # --- User Enum Transition ---
         self.unlock_user: Callable
-        self.machine.add_transition(trigger='unlock_user', source=['STANDBY_MODE', 'USER_FORCED_ENROLLMENT'], dest='UNLOCKED_USER', before='enter_user_pin')
+        self.lock_user: Callable
+        self.machine.add_transition(trigger='unlock_user', source=['STANDBY_MODE'], dest='UNLOCKED_USER', before='enter_user_pin')
+        self.machine.add_transition(trigger='lock_user', source='UNLOCKED_USER', dest='STANDBY_MODE', before='press_lock_button')
 
 
     def _log_state_change_details(self, event_data: EventData) -> None:
@@ -224,7 +230,7 @@ class SimplifiedDeviceFSM:
 
 
     ###########################################################################################################
-    # Transition Functions
+    # Transition Functions (Automatic)
     
     def on_enter_ADMIN_MODE(self, event_data: EventData) -> None:
         """
@@ -295,9 +301,21 @@ class SimplifiedDeviceFSM:
         else:
              self.logger.info("Admin unlock successful, device enumerated.")
 
+    def on_enter_UNLOCKED_USER(self, event_data: EventData) -> None:
+        """
+        Called automatically upon entering the UNLOCKED_USER state.
+        Confirms the device has enumerated correctly.
+        """
+        self.logger.info("Confirming device enumeration post-user-unlock...")
+        if not self.at.confirm_enum():
+             self.logger.error("Device did not enumerate after user unlock.")
+             self.post_fail(details="USER_UNLOCK_ENUM_FAILED")
+        else:
+             self.logger.info("User unlock successful, device enumerated.")
+
 
     ###########################################################################################################
-    # Atomic Functions
+    # Before/After Functions
     
     def do_power_on_and_test(self, event_data: EventData) -> bool:
         """
@@ -333,8 +351,6 @@ class SimplifiedDeviceFSM:
         """
         Performs the full admin enrollment procedure. This is a 'before'
         callback, which uses the 'new_pin' passed in the trigger call's kwargs.
-        
-        Call it via: fsm.enroll_admin(new_pin=['key1', 'key2', ...])
         """
         new_pin = event_data.kwargs.get('new_pin')
         if not new_pin or not isinstance(new_pin, list):
@@ -376,12 +392,19 @@ class SimplifiedDeviceFSM:
             return False
             
         self.logger.info("Admin enrollment sequence completed successfully. Updating DUT model.")
-        DUT.adminPIN = new_pin + ['unlock']
+        DUT.adminPIN = new_pin
         self.logger.info("Updated DUT with new admin PIN. Allowing FSM transition to ADMIN_MODE.")
         
         return True
 
     def enter_admin_pin(self, event_data: EventData) -> bool:
+        """
+        Enters the stored Admin PIN to unlock the device. This is a 'before'
+        callback for the 'unlock_admin' transition.
+
+        It sends the PIN sequence stored in the DUT model and waits for the
+        'ENUM' LED pattern to confirm a successful unlock.
+        """
         self.logger.info("Unlocking DUT with Admin PIN...")
         self.at.sequence(DUT.adminPIN)
 
@@ -400,6 +423,158 @@ class SimplifiedDeviceFSM:
             return False # Cancel the transition
         return True
 
+    def user_enrollment(self, event_data: EventData) -> Optional[int]:
+        """
+        Performs the user enrollment procedure. This is a 'before' callback
+        triggered from ADMIN_MODE. It finds the next available logical user
+        slot based on the device's FIPS level, performs the physical
+        enrollment sequence, and updates the DUT model.
+
+        Args:
+            event_data: The event data object, which contains the `new_pin`
+                        in its kwargs.
+
+        Returns:
+            An integer representing the logical user ID (1-based) that was
+            successfully enrolled, or None if enrollment failed.
+        """
+        new_pin = event_data.kwargs.get('new_pin')
+        if not new_pin or not isinstance(new_pin, list):
+            self.logger.error("User enrollment requires a 'new_pin' list passed as a keyword argument.")
+            return None
+
+        max_users = 1 if DUT.fips in [2, 3] else 4
+        next_available_slot = None
+        for i in range(1, max_users + 1):
+            if DUT.userPIN.get(i) is None:
+                next_available_slot = i
+                break
+
+        if next_available_slot is None:
+            self.logger.error(f"Cannot enroll new user. All {max_users} user slots are full.")
+            return None
+        
+        self.logger.info(f"Attempting to enroll new user into logical slot #{next_available_slot}...")
+        
+        context = {'fsm_current_state': self.state, 'fsm_destination_state': self.state}
+
+        self.at.press(['unlock', 'key1'])
+        if not self.at.await_and_confirm_led_pattern(LEDs['GREEN_BLUE'], timeout=5.0, replay_extra_context=context):
+            self.logger.error("Did not observe GREEN_BLUE pattern for user enrollment. Aborted.")
+            return None
+
+        self.logger.info(f"Entering new User PIN (first time)...")
+        self.at.sequence(new_pin)
+
+        if not self.at.await_and_confirm_led_pattern(LEDs['ACCEPT_PATTERN'], timeout=5.0, replay_extra_context=context):
+            self.logger.error("Did not observe ACCEPT_PATTERN after first user PIN entry.")
+            return None
+
+        if not self.at.await_and_confirm_led_pattern(LEDs['GREEN_BLUE'], timeout=5.0, replay_extra_context=context):
+            self.logger.error("Did not observe GREEN_BLUE pattern after first user PIN entry. Aborted.")
+            return None
+
+        self.logger.info("Re-entering User PIN for confirmation...")
+        self.at.sequence(new_pin)
+
+        if not self.at.await_and_confirm_led_pattern(LEDs['ACCEPT_PATTERN'], timeout=5.0, replay_extra_context=context):
+            self.logger.error("Did not observe final ACCEPT_PATTERN for user PIN confirmation. Enrollment failed.")
+            return None
+        
+        DUT.userPIN[next_available_slot] = new_pin + ['unlock']
+        self.logger.info(f"Successfully enrolled PIN for logical user {next_available_slot}.")
+        return next_available_slot
+    
+    def enter_user_pin(self, event_data: EventData) -> bool:
+        """
+        Enters a specified user PIN to unlock the device. This is a 'before'
+        callback for the 'unlock_user' transition. It uses a logical `user_id`
+        provided by the caller to look up the correct PIN from the DUT model.
+
+        Args:
+            event_data: The event data object, containing the `user_id` in kwargs.
+
+        Returns:
+            True if the unlock pattern is confirmed, allowing the transition to
+            UNLOCKED_USER. False otherwise, canceling the transition.
+        """
+        user_id = event_data.kwargs.get('user_id')
+        if not user_id:
+            self.logger.error("Unlock user requires a 'user_id' to be passed.")
+            return False
+
+        pin_to_enter = DUT.userPIN.get(user_id)
+        if not pin_to_enter:
+            self.logger.error(f"Unlock failed: No PIN is tracked for logical user {user_id}.")
+            return False
+
+        self.logger.info(f"Attempting to unlock device with PIN from logical user slot {user_id}...")
+        self.at.sequence(pin_to_enter)
+
+        dest_state = "UNKNOWN"
+        if event_data and event_data.transition:
+            dest_state = event_data.transition.dest
+        context = {'fsm_current_state': self.state, 'fsm_destination_state': dest_state}
+        
+        unlock_user_ok = self.at.await_and_confirm_led_pattern(LEDs['ENUM'], timeout=15, replay_extra_context=context)
+        if not unlock_user_ok:
+            self.logger.error("Failed user unlock LED pattern. Aborting transition.")
+            self.post_fail(details="USER_UNLOCK_PATTERN_MISMATCH")
+            return False
+        
+        return True
+
     def press_lock_button(self, event_data: EventData) -> None:
         self.logger.info(f"Locking DUT from Unlocked Admin...")
         self.at.press("lock")
+
+
+    def do_user_reset(self, event_data: EventData) -> bool:
+        """
+        Performs the physical key sequence to trigger a user factory reset
+        from ADMIN_MODE. This is a 'before' callback for the 'user_reset'
+        transition.
+
+        It sends the reset key combination, verifies the 'RED_BLUE'
+        LED pattern, and clears the PINs from the DUT model to reflect
+        the device's new state.
+
+        Args:
+            event_data: The event data from the FSM trigger.
+
+        Returns:
+            True if the reset confirmation pattern is observed, allowing the
+            transition to OOB_MODE. False otherwise, canceling the transition.
+        """
+
+        dest_state = "UNKNOWN"
+        if event_data and event_data.transition:
+            dest_state = event_data.transition.dest
+        context = {
+            'fsm_current_state': self.state,
+            'fsm_destination_state': dest_state
+        }
+
+        self.logger.info("Initiating User Reset...")
+
+        self.at.sequence([["lock", "unlock", "key2"]])
+
+        reset_pattern_ok = self.at.confirm_led_solid(
+            LEDs["KEY_GENERATION"],
+            minimum=12,
+            timeout=15,
+            replay_extra_context=context
+        )
+
+        if not reset_pattern_ok:
+            self.logger.error("Failed to observe user reset confirmation (RED_BLUE) pattern. Aborting transition.")
+            return False
+
+        self.logger.info("User reset confirmation pattern observed. Resetting DUT model state...")
+        # Reset the DUT model to its factory default state
+        DUT.adminPIN = []
+        DUT.userPIN = {1: None, 2: None, 3: None, 4: None}
+        # To-do: Add any other DUT properties that should be reset to default here.
+
+        self.logger.info("DUT model state has been reset. Allowing transition to OOB_MODE.")
+        return True

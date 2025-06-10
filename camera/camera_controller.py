@@ -34,7 +34,7 @@ OVERLAY_FONT = cv2.FONT_HERSHEY_SIMPLEX
 OVERLAY_FONT_SCALE = 0.5
 OVERLAY_FONT_THICKNESS = 1
 OVERLAY_TEXT_COLOR_MAIN = (255, 255, 255)  # White
-OVERLAY_LINE_HEIGHT = 18 # Used as a spacer for positioning indicators
+OVERLAY_LINE_HEIGHT = 30 # Used as a spacer for positioning indicators
 OVERLAY_PADDING = 5
 
 # --- Constants for drawing LED status indicators on the replay video ---
