@@ -287,6 +287,25 @@ class LogitechLedChecker:
 
     def _draw_overlays(self, frame: np.ndarray, timestamp_in_replay: float, led_state_for_frame: Dict[str, int]) -> np.ndarray:
         overlay_frame = frame.copy()
+        current_y_offset = OVERLAY_PADDING
+
+        # --- MODIFICATION: Draw FSM context if available ---
+        if self.replay_extra_context:
+            fsm_curr = self.replay_extra_context.get('fsm_current_state', 'N/A')
+            fsm_dest = self.replay_extra_context.get('fsm_destination_state', 'N/A')
+            
+            # Draw Current State text on the video frame
+            cv2.putText(overlay_frame, f"Current State: {fsm_curr}", 
+                        (OVERLAY_PADDING, current_y_offset + OVERLAY_LINE_HEIGHT),
+                        OVERLAY_FONT, OVERLAY_FONT_SCALE, OVERLAY_TEXT_COLOR_MAIN, OVERLAY_FONT_THICKNESS, cv2.LINE_AA)
+            current_y_offset += OVERLAY_LINE_HEIGHT
+
+            # Draw Destination State text on the video frame
+            cv2.putText(overlay_frame, f"Destination State: {fsm_dest}",
+                        (OVERLAY_PADDING, current_y_offset + OVERLAY_LINE_HEIGHT),
+                        OVERLAY_FONT, OVERLAY_FONT_SCALE, OVERLAY_TEXT_COLOR_MAIN, OVERLAY_FONT_THICKNESS, cv2.LINE_AA)
+            # Add extra padding to separate this block from other potential overlays
+            current_y_offset += (OVERLAY_LINE_HEIGHT * 2)
 
         # Iterate through all configured LEDs to draw their ROI and status indicator
         ordered_leds = self._get_ordered_led_keys_for_display()

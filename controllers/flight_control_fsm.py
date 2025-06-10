@@ -103,6 +103,7 @@ class DeviceUnderTest:
 
     unattendedAutoLockCounter = 0
 
+    userForcedEnrollment = False
     userForcedEnrollmentUsed = False
 
     # MODIFICATION: Changed to an empty list to represent a new, un-enrolled device.
@@ -130,13 +131,16 @@ DUT = DeviceUnderTest()
 ## --- FSM Class Definition ---
 class SimplifiedDeviceFSM:
 
-    STATES: List[str] = ['OFF', 'STARTUP_SELF_TEST', 'OOB_MODE', 'STANDBY_MODE', 'UNLOCKED_ADMIN', 'POST_FAILED', 'ADMIN_MODE']
+    STATES: List[str] = ['OFF', 'POWER_ON_SELF_TEST', 'POST_FAILED', 'BRUTE_FORCE', 'OOB_MODE', 'STANDBY_MODE', 'USER_FORCED_ENROLLMENT',
+                         'UNLOCKED_ADMIN', 'UNLOCKED_USER',
+                         'ADMIN_MODE', 'DIAGNOSTIC_MODE'
+    ]
 
     logger: logging.Logger
     at: 'UnifiedController'
     machine: Machine
     state: str
-    source_state: str
+    source_state: str = 'OFF'
 
     def __init__(self, at_controller: 'UnifiedController'):
         self.logger = logging.getLogger("DeviceFSM.Simplified")
@@ -148,37 +152,67 @@ class SimplifiedDeviceFSM:
             initial='OFF',
             send_event=True,
             after_state_change='_log_state_change_details',
-            # MODIFICATION: Changed to True to let transitions find on_enter_STATE methods by convention.
-            auto_transitions=False,
+            auto_transitions=False, # MODIFICATION: Changed to True to let transitions find on_enter_STATE methods by convention.
             use_pygraphviz=False
         )
 
-        self.source_state = 'OFF'
-
+        # --- TRANSITIONS ---
+        # power on/off and POST
         self.power_on: Callable
-        self.post_test_complete: Callable
+        self.post_fail: Callable
         self.power_off: Callable
-        self.unlock_admin: Callable
-        self.lock_admin: Callable
-        self.post_failed: Callable
+        self.machine.add_transition(trigger='power_on', source='OFF', dest='POWER_ON_SELF_TEST', before='do_power_on_and_test')
+        self.machine.add_transition(trigger='post_fail', source='POWER_ON_SELF_TEST', dest='POST_FAILED')
+        self.machine.add_transition(trigger='power_off', source="*", dest='OFF')
+
+        # Idle State that can be held indefinitely
+        self.post_pass: Callable
+        self.machine.add_transition(trigger='post_pass', source='POWER_ON_SELF_TEST', dest='OOB_MODE', conditions=[lambda _: not DUT.adminPIN])
+        self.machine.add_transition(trigger='post_pass', source='POWER_ON_SELF_TEST', dest='STANDBY_MODE', conditions=[lambda _: bool(DUT.adminPIN)])
+        self.machine.add_transition(trigger='post_pass', source='POWER_ON_SELF_TEST', dest='USER_FORCED_ENROLLMENT', conditions=[lambda _: bool(DUT.userForcedEnrollment)])
+        self.machine.add_transition(trigger='post_pass', source='POWER_ON_SELF_TEST', dest='BRUTE_FORCE', conditions=[lambda _: DUT.bruteForceCounter == 0])
+
+        self.enter_diagnostic_mode: Callable
+        self.machine.add_transition(trigger='enter_diagnostic_mode', source=['BRUTE_FORCE', 'OOB_MODE', 'STANDBY_MODE', 'USER_FORCED_ENROLLMENT'], dest='DIAGNOSTIC_MODE')
+
+        # --- User Reset Transitions ---
+        self.machine.add_transition(trigger='user_reset', source=['BRUTE_FORCE', 'OOB_MODE', 'STANDBY_MODE', 'USER_FORCED_ENROLLMENT'], dest='OOB_MODE', conditions=[lambda _: not DUT.provisionLock])
+        self.machine.add_transition(trigger='user_reset', source='ADMIN_MODE', dest='OOB_MODE')
+
+        # --- Admin Mode Transition ---
         self.enroll_admin: Callable
-
-        # --- REFACTORED TRANSITIONS ---
-        # The 'before' callback performs the action. If it returns True, the transition to STARTUP_SELF_TEST occurs.
-        self.machine.add_transition(trigger='power_on', source='OFF', dest='STARTUP_SELF_TEST', before='do_power_on_and_test')
-        self.machine.add_transition(trigger='post_failed', source='STARTUP_SELF_TEST', dest='POST_FAILED')
-        self.machine.add_transition(trigger='power_off', source=['STANDBY_MODE', 'OOB_MODE', 'POST_FAILED', 'ADMIN_MODE'], dest='OFF')
-
-        # The 'on_enter' for the new state now triggers the *next* logical step.
-        self.machine.add_transition(trigger='post_test_complete', source='STARTUP_SELF_TEST', dest='OOB_MODE', conditions=[lambda _: not DUT.adminPIN])
-        self.machine.add_transition(trigger='post_test_complete', source='STARTUP_SELF_TEST', dest='STANDBY_MODE', conditions=[lambda _: bool(DUT.adminPIN)])
-
-        # MODIFICATION: The 'enroll_admin' transition now uses a dedicated 'before' callback to perform the enrollment actions.
-        # The 'on_enter_ADMIN_MODE' method will be called automatically after the transition succeeds.
         self.machine.add_transition(trigger='enroll_admin', source='OOB_MODE', dest='ADMIN_MODE', before='admin_enrollment')
 
-        self.machine.add_transition(trigger='unlock_admin', source='STANDBY_MODE', dest='UNLOCKED_ADMIN', before='enter_admin_pin')
+        # # --- Admin Mode Enrollment Transitions ---
+        # self.machine.add_transition(trigger='enroll_user_pin', source='ADMIN_MODE', dest='ADMIN_MODE')
+        # self.machine.add_transition(trigger='set_brute_force_counter', source='ADMIN_MODE', dest='ADMIN_MODE')
+        # self.machine.add_transition(trigger='change_admin_pin', source='ADMIN_MODE', dest='ADMIN_MODE')
+        # self.machine.add_transition(trigger='enroll_self_destruct_pin', source='ADMIN_MODE', dest='ADMIN_MODE')
+        # self.machine.add_transition(trigger='set_min_pin_length', source='ADMIN_MODE', dest='ADMIN_MODE')
+        # self.machine.add_transition(trigger='enroll_recovery_pin', source='ADMIN_MODE', dest='ADMIN_MODE')
+
+        # # --- Admin Mode Toggle Transitions ---
+        # self.machine.add_transition(trigger='toggle_basic_disk', source='ADMIN_MODE', dest='ADMIN_MODE')
+        # self.machine.add_transition(trigger='delete_pins', source='ADMIN_MODE', dest='ADMIN_MODE')
+        # self.machine.add_transition(trigger='toggle_led_flicker', source='ADMIN_MODE', dest='ADMIN_MODE')
+        # self.machine.add_transition(trigger='toggle_lock_override', source='ADMIN_MODE', dest='ADMIN_MODE')
+        # self.machine.add_transition(trigger='enable_provision_lock', source='ADMIN_MODE', dest='ADMIN_MODE')
+        # self.machine.add_transition(trigger='toggle_read_only', source='ADMIN_MODE', dest='ADMIN_MODE')
+        # self.machine.add_transition(trigger='toggle_read_write', source='ADMIN_MODE', dest='ADMIN_MODE')
+        # self.machine.add_transition(trigger='toggle_removable_media', source='ADMIN_MODE', dest='ADMIN_MODE')
+        # self.machine.add_transition(trigger='toggle_self_destruct', source='ADMIN_MODE', dest='ADMIN_MODE')
+        # self.machine.add_transition(trigger='set_unattended_autolock', source='ADMIN_MODE', dest='ADMIN_MODE')
+        # self.machine.add_transition(trigger='toggle_user_forced_enrollment', source='ADMIN_MODE', dest='ADMIN_MODE')
+
+        # --- Admin Enum Transition ---
+        self.unlock_admin: Callable
+        self.lock_admin: Callable
+        self.machine.add_transition(trigger='unlock_admin', source=['STANDBY_MODE', 'USER_FORCED_ENROLLMENT'], dest='UNLOCKED_ADMIN', before='enter_admin_pin')
         self.machine.add_transition(trigger='lock_admin', source='UNLOCKED_ADMIN', dest='STANDBY_MODE', before='press_lock_button')
+
+        # --- User Enum Transition ---
+        self.unlock_user: Callable
+        self.machine.add_transition(trigger='unlock_user', source=['STANDBY_MODE', 'USER_FORCED_ENROLLMENT'], dest='UNLOCKED_USER', before='enter_user_pin')
 
 
     def _log_state_change_details(self, event_data: EventData) -> None:
@@ -188,6 +222,83 @@ class SimplifiedDeviceFSM:
         self.source_state = event_data.transition.source
         self.logger.info(f"State changed: {self.source_state} -> {self.state} (Event: {event_data.event.name})")
 
+
+    ###########################################################################################################
+    # Transition Functions
+    
+    def on_enter_ADMIN_MODE(self, event_data: EventData) -> None:
+        """
+        Called automatically upon entering the ADMIN_MODE state.
+        Confirms the device shows the correct stable LED state.
+        """
+        self.logger.info(f"Entered ADMIN_MODE. Confirming stable state (solid Blue)...")
+        # This callback uses the safe `on_enter` pattern, no change needed.
+        context = {
+            'fsm_current_state': self.source_state,
+            'fsm_destination_state': self.state
+        }
+        if self.at.confirm_led_solid(LEDs['ADMIN_MODE'], minimum=3.0, timeout=5.0, replay_extra_context=context):
+            self.logger.info(f"Stable ADMIN_MODE confirmed.")
+        else:
+            self.logger.error(f"Failed to confirm stable ADMIN_MODE LEDs.")
+
+    def on_enter_POWER_ON_SELF_TEST(self, event_data: EventData) -> None:
+        """
+        Now this callback is very simple. Its only job is to trigger the next logical step.
+        The FSM is now officially in this state.
+        """
+        self.logger.info("Entered POWER_ON_SELF_TEST state. Evaluating next transition...")
+        self.post_pass()
+
+    def on_enter_OFF(self, event_data: EventData) -> None:
+        self.at.off("usb3")
+        self.at.off("connect")
+        # This callback uses the safe `on_enter` pattern, no change needed.
+        context = {
+            'fsm_current_state': self.source_state,
+            'fsm_destination_state': self.state
+        }
+        if self.at.confirm_led_solid(LEDs['ALL_OFF'], minimum=1.0, timeout=3.0, replay_extra_context=context):
+            self.logger.info("Device is confirmed OFF.")
+        else:
+            self.logger.error("Failed to confirm device LEDs are OFF.")
+    
+    def on_enter_OOB_MODE(self, event_data: EventData) -> None:
+        self.logger.info(f"Confirming OOB Mode (solid Green/Blue)...")
+        # This callback uses the safe `on_enter` pattern, no change needed.
+        context = {
+            'fsm_current_state': self.source_state,
+            'fsm_destination_state': self.state
+        }
+        if self.at.confirm_led_solid(LEDs['GREEN_BLUE_STATE'], minimum=3.0, timeout=5.0, replay_extra_context=context):
+            self.logger.info("Stable OOB_MODE confirmed.")
+        else:
+            self.logger.error("Failed to confirm OOB_MODE LEDs.")
+
+    def on_enter_STANDBY_MODE(self, event_data: EventData) -> None:
+        self.logger.info(f"Confirming Standby Mode (solid Red)...")
+        # This callback uses the safe `on_enter` pattern, no change needed.
+        context = {
+            'fsm_current_state': self.source_state,
+            'fsm_destination_state': self.state
+        }
+        if self.at.confirm_led_solid(LEDs['STANDBY_MODE'], minimum=3.0, timeout=5.0, replay_extra_context=context):
+            self.logger.info("Stable STANDBY_MODE confirmed.")
+        else:
+            self.logger.error("Failed to confirm STANDBY_MODE LEDs.")
+
+    def on_enter_UNLOCKED_ADMIN(self, event_data: EventData) -> None:
+        self.logger.info("Confirming device enumeration post-unlock...")
+        if not self.at.confirm_enum():
+             self.logger.error("Device did not enumerate after admin unlock.")
+             self.post_fail(details="ADMIN_UNLOCK_ENUM_FAILED")
+        else:
+             self.logger.info("Admin unlock successful, device enumerated.")
+
+
+    ###########################################################################################################
+    # Atomic Functions
+    
     def do_power_on_and_test(self, event_data: EventData) -> bool:
         """
         This is a 'before' callback. It performs the power-on and POST.
@@ -198,64 +309,25 @@ class SimplifiedDeviceFSM:
         self.at.on("connect")
         time.sleep(0.5)
 
-        post_animation_observed_ok: bool = self.at.confirm_led_pattern(LEDs['STARTUP'], clear_buffer=True)
+        dest_state = "UNKNOWN"
+        if event_data and event_data.transition:
+            dest_state = event_data.transition.dest
+        context = {
+            'fsm_current_state': self.state,
+            'fsm_destination_state': dest_state
+        }
+        
+        post_animation_observed_ok: bool = self.at.confirm_led_pattern(
+            LEDs['STARTUP'], clear_buffer=True, replay_extra_context=context
+        )
 
         if not post_animation_observed_ok:
             self.logger.error("Failed Startup Self-Test LED confirmation. Aborting transition.")
-            self.post_failed(details="POST_ANIMATION_MISMATCH")
-            return False # This stops the FSM from entering the STARTUP_SELF_TEST state
+            self.post_fail(details="POST_ANIMATION_MISMATCH")
+            return False # This stops the FSM from entering the POWER_ON_SELF_TEST state
         
-        self.logger.info("Startup Self-Test successful. Proceeding to STARTUP_SELF_TEST state.")
+        self.logger.info("Startup Self-Test successful. Proceeding to POWER_ON_SELF_TEST state.")
         return True # Allows the transition to complete
-    
-    def on_enter_ADMIN_MODE(self, event_data: EventData) -> None:
-        """
-        Called automatically upon entering the ADMIN_MODE state.
-        Confirms the device shows the correct stable LED state.
-        """
-        self.logger.info(f"Entered ADMIN_MODE. Confirming stable state (solid Blue)...")
-        if self.at.confirm_led_solid(LEDs['ADMIN_MODE'], minimum=3.0, timeout=5.0):
-            self.logger.info(f"Stable ADMIN_MODE confirmed.")
-        else:
-            self.logger.error(f"Failed to confirm stable ADMIN_MODE LEDs.")
-
-    def on_enter_STARTUP_SELF_TEST(self, event_data: EventData) -> None:
-        """
-        Now this callback is very simple. Its only job is to trigger the next logical step.
-        The FSM is now officially in this state.
-        """
-        self.logger.info("Entered STARTUP_SELF_TEST state. Evaluating next transition...")
-        self.post_test_complete()
-
-    def on_enter_OFF(self, event_data: EventData) -> None:
-        self.at.off("usb3")
-        self.at.off("connect")
-        if self.at.confirm_led_solid(LEDs['ALL_OFF'], minimum=1.0, timeout=3.0):
-            self.logger.info("Device is confirmed OFF.")
-        else:
-            self.logger.error("Failed to confirm device LEDs are OFF.")
-    
-    def on_enter_OOB_MODE(self, event_data: EventData) -> None:
-        self.logger.info(f"Confirming OOB Mode (solid Green/Blue)...")
-        if self.at.confirm_led_solid(LEDs['GREEN_BLUE_STATE'], minimum=3.0, timeout=5.0):
-            self.logger.info("Stable OOB_MODE confirmed.")
-        else:
-            self.logger.error("Failed to confirm OOB_MODE LEDs.")
-
-    def on_enter_STANDBY_MODE(self, event_data: EventData) -> None:
-        self.logger.info(f"Confirming Standby Mode (solid Red)...")
-        if self.at.confirm_led_solid(LEDs['STANDBY_MODE'], minimum=3.0, timeout=5.0):
-            self.logger.info("Stable STANDBY_MODE confirmed.")
-        else:
-            self.logger.error("Failed to confirm STANDBY_MODE LEDs.")
-
-    def on_enter_UNLOCKED_ADMIN(self, event_data: EventData) -> None:
-        self.logger.info("Confirming device enumeration post-unlock...")
-        if not self.at.confirm_enum():
-             self.logger.error("Device did not enumerate after admin unlock.")
-             self.post_failed(details="ADMIN_UNLOCK_ENUM_FAILED")
-        else:
-             self.logger.info("Admin unlock successful, device enumerated.")
 
     def admin_enrollment(self, event_data: EventData) -> bool:
         """
@@ -264,17 +336,22 @@ class SimplifiedDeviceFSM:
         
         Call it via: fsm.enroll_admin(new_pin=['key1', 'key2', ...])
         """
-        # Retrieve the new_pin from the event_data object
         new_pin = event_data.kwargs.get('new_pin')
-
-        # Add robust validation
         if not new_pin or not isinstance(new_pin, list):
             self.logger.error("Admin enrollment requires a 'new_pin' list passed as a keyword argument.")
-            return False # Cancel the transition
+            return False
+
+        dest_state = "UNKNOWN"
+        if event_data and event_data.transition:
+            dest_state = event_data.transition.dest
+        context = {
+            'fsm_current_state': self.state,
+            'fsm_destination_state': dest_state
+        }
         
         self.logger.info(f"Entering Admin PIN Enrollment...")
         self.at.press(['unlock', 'key9'])
-        if not self.at.await_and_confirm_led_pattern(LEDs['GREEN_BLUE'], timeout=5.0):
+        if not self.at.await_and_confirm_led_pattern(LEDs['GREEN_BLUE'], timeout=5.0, replay_extra_context=context):
             self.logger.error("Did not observe GREEN_BLUE pattern. Enrollment aborted.")
             return False
 
@@ -282,11 +359,11 @@ class SimplifiedDeviceFSM:
         self.at.sequence(new_pin)
 
         self.logger.info("Verifying PIN confirmation...")
-        if not self.at.await_and_confirm_led_pattern(LEDs['ACCEPT_PATTERN'], timeout=5.0):
+        if not self.at.await_and_confirm_led_pattern(LEDs['ACCEPT_PATTERN'], timeout=5.0, replay_extra_context=context):
             self.logger.error("Did not observe ACCEPT_PATTERN pattern after first PIN entry.")
             return False
 
-        if not self.at.await_and_confirm_led_pattern(LEDs['GREEN_BLUE'], timeout=5.0):
+        if not self.at.await_and_confirm_led_pattern(LEDs['GREEN_BLUE'], timeout=5.0, replay_extra_context=context):
             self.logger.error("Did not observe GREEN_BLUE pattern after first PIN entry. Enrollment aborted.")
             return False
 
@@ -294,12 +371,11 @@ class SimplifiedDeviceFSM:
         self.at.sequence(new_pin)
         
         self.logger.info("Awaiting 'ACCEPT_PATTERN' to confirm successful enrollment...")
-        if not self.at.await_led_state(LEDs['ACCEPT_STATE'], timeout=5.0):
+        if not self.at.await_led_state(LEDs['ACCEPT_STATE'], timeout=5.0, replay_extra_context=context):
             self.logger.error("Did not observe ACCEPT_PATTERN after PIN confirmation. Enrollment likely failed.")
             return False
             
         self.logger.info("Admin enrollment sequence completed successfully. Updating DUT model.")
-        
         DUT.adminPIN = new_pin + ['unlock']
         self.logger.info("Updated DUT with new admin PIN. Allowing FSM transition to ADMIN_MODE.")
         
@@ -308,10 +384,19 @@ class SimplifiedDeviceFSM:
     def enter_admin_pin(self, event_data: EventData) -> bool:
         self.logger.info("Unlocking DUT with Admin PIN...")
         self.at.sequence(DUT.adminPIN)
-        unlock_admin_ok: bool = self.at.await_and_confirm_led_pattern(LEDs['ENUM'], timeout=15)
+
+        dest_state = "UNKNOWN"
+        if event_data and event_data.transition:
+            dest_state = event_data.transition.dest
+        context = {
+            'fsm_current_state': self.state,
+            'fsm_destination_state': dest_state
+        }
+
+        unlock_admin_ok: bool = self.at.await_and_confirm_led_pattern(LEDs['ENUM'], timeout=15, replay_extra_context=context)
         if not unlock_admin_ok:
             self.logger.error("Failed admin unlock LED pattern. Aborting transition.")
-            self.post_failed(details="ADMIN_UNLOCK_PATTERN_MISMATCH")
+            self.post_fail(details="ADMIN_UNLOCK_PATTERN_MISMATCH")
             return False # Cancel the transition
         return True
 
