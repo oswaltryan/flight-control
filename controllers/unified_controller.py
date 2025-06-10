@@ -6,7 +6,7 @@ import logging
 import sys
 import os
 import time 
-from typing import Optional, List, Dict, Any 
+from typing import Optional, List, Dict, Any, Union
 from pprint import pprint
 
 # --- Path Setup ---
@@ -34,6 +34,12 @@ except ImportError as e_import:
 
 
 class UnifiedController:
+    _phidget_controller: Optional[PhidgetController]
+    _camera_checker: Optional[LogitechLedChecker]
+    logger: logging.Logger
+    phidget_config_to_use: Dict[str, Any]
+    effective_led_duration_tolerance: float
+
     def __init__(self,
                  script_map_config: Optional[Dict[str, Any]] = None,
                  camera_id: int = 0,
@@ -79,15 +85,15 @@ class UnifiedController:
     def off(self, channel_name: str):
         if not self._phidget_controller: self.logger.error("Phidget not init for 'off'."); return
         self._phidget_controller.off(channel_name)
-    def hold(self, channel_name: str, duration_ms: int = 200):
+    def hold(self, channel_name: str, duration_ms: float = 200):
         if not self._phidget_controller: self.logger.error("Phidget not init for 'hold'."); return
         self._phidget_controller.hold(channel_name, duration_ms)
-    def press(self, channel_name: str, duration_ms: int = 200):
+    def press(self, channel_or_channels: Union[str, List[str]], duration_ms: float = 100):
         if not self._phidget_controller: self.logger.error("Phidget not init for 'press'."); return
-        self._phidget_controller.press(channel_name, duration_ms=duration_ms)
-    def sequence(self, pin_sequence: List[str], press_duration_ms: float = 100, pause_duration_ms: float = 100):
+        self._phidget_controller.press(channel_or_channels, duration_ms=duration_ms)
+    def sequence(self, pin_sequence: List[Any], press_duration_ms: float = 100, pause_duration_ms: float = 100):
         if not self._phidget_controller: self.logger.error("Phidget not init for 'sequence'."); return
-        self._phidget_controller.sequence(pin_sequence, press_duration_ms, pause_duration_ms)
+        self._phidget_controller.sequence(pin_sequence, press_ms=press_duration_ms, pause_ms=pause_duration_ms)
     def read_input(self, channel_name: str) -> Optional[bool]:
         if not self._phidget_controller: self.logger.error("Phidget not init for 'read_input'."); return None
         return self._phidget_controller.read_input(channel_name)
@@ -102,53 +108,48 @@ class UnifiedController:
 
     def confirm_led_solid(self, state: dict, minimum: float = 2, timeout: float = 10,
                                  fail_leds: Optional[List[str]] = None, clear_buffer: bool = True, 
-                                 manage_replay: bool = True, **kwargs) -> bool:
+                                 manage_replay: bool = True, replay_extra_context: Optional[Dict[str, Any]] = None) -> bool:
         checker = self._camera_checker
         if checker is None or not checker.is_camera_initialized:
             self.logger.error("Camera not ready for confirm_led_solid.")
             return False
-        replay_extra_context = {k: v for k, v in kwargs.items() if k.startswith("replay_")}
         return checker.confirm_led_solid(state, minimum, timeout, fail_leds, clear_buffer, 
                                          manage_replay=manage_replay, replay_extra_context=replay_extra_context)
 
     def confirm_led_solid_strict(self, state: dict, minimum: float, clear_buffer: bool = True, 
-                                 manage_replay: bool = True, **kwargs) -> bool:
+                                 manage_replay: bool = True, replay_extra_context: Optional[Dict[str, Any]] = None) -> bool:
         checker = self._camera_checker
         if checker is None or not checker.is_camera_initialized:
             self.logger.error("Camera not ready for confirm_led_solid_strict.")
             return False
-        replay_extra_context = {k: v for k, v in kwargs.items() if k.startswith("replay_")}
         return checker.confirm_led_solid_strict(state, minimum, clear_buffer, 
                                                 manage_replay=manage_replay, replay_extra_context=replay_extra_context)
 
     def await_led_state(self, state: dict, timeout: float = 1,
                                fail_leds: Optional[List[str]] = None, clear_buffer: bool = True, 
-                               manage_replay: bool = True, **kwargs) -> bool:
+                               manage_replay: bool = True, replay_extra_context: Optional[Dict[str, Any]] = None) -> bool:
         checker = self._camera_checker
         if checker is None or not checker.is_camera_initialized:
             self.logger.error("Camera not ready for await_led_state.")
             return False
-        replay_extra_context = {k: v for k, v in kwargs.items() if k.startswith("replay_")}
         return checker.await_led_state(state, timeout, fail_leds, clear_buffer, 
                                        manage_replay=manage_replay, replay_extra_context=replay_extra_context)
 
     def confirm_led_pattern(self, pattern: list, clear_buffer: bool = True, 
-                            manage_replay: bool = True, **kwargs) -> bool:
+                            manage_replay: bool = True, replay_extra_context: Optional[Dict[str, Any]] = None) -> bool:
         checker = self._camera_checker
         if checker is None or not checker.is_camera_initialized:
             self.logger.error("Camera not ready for confirm_led_pattern.")
             return False
-        replay_extra_context = {k: v for k, v in kwargs.items() if k.startswith("replay_")}
         return checker.confirm_led_pattern(pattern, clear_buffer, 
                                            manage_replay=manage_replay, replay_extra_context=replay_extra_context)
 
     def await_and_confirm_led_pattern(self, pattern: list, timeout: float,
-                                             clear_buffer: bool = True, manage_replay: bool = True, **kwargs) -> bool:
+                                             clear_buffer: bool = True, manage_replay: bool = True, replay_extra_context: Optional[Dict[str, Any]] = None) -> bool:
         checker = self._camera_checker
         if checker is None or not checker.is_camera_initialized:
             self.logger.error("Camera not ready for await_and_confirm_led_pattern.")
             return False
-        replay_extra_context = {k: v for k, v in kwargs.items() if k.startswith("replay_")}
         return checker.await_and_confirm_led_pattern(pattern, timeout, clear_buffer, 
                                                      manage_replay=manage_replay, replay_extra_context=replay_extra_context)
 
@@ -203,3 +204,59 @@ class UnifiedController:
     def handle_critical_error(self, event_data: Any) -> None:
         details = event_data.kwargs.get('details', "No details provided") if event_data and hasattr(event_data, 'kwargs') else "No details provided"
         self.logger.critical(f"UnifiedController: Handling CRITICAL error. Details from FSM: {details}")
+
+# --- For direct testing ---
+if __name__ == '__main__':
+    try:
+        from utils.logging_config import setup_logging
+        setup_logging(default_log_level=logging.DEBUG) 
+    except ImportError:
+        logging.basicConfig(stream=sys.stdout, level=logging.DEBUG,
+                            format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+        logging.getLogger().critical("Could not import 'utils.logging_config.setup_logging' for direct test. Using basicConfig.")
+
+    direct_test_logger = logging.getLogger("UnifiedControllerDirectTest")
+    direct_test_logger.info("UnifiedController direct test logging configured and starting...")
+    uc_instance_for_test = None
+    try:
+        test_replay_dir = os.path.join(PROJECT_ROOT, "logs", "test_replays_uc_direct")
+        os.makedirs(test_replay_dir, exist_ok=True)
+
+        uc_instance_for_test = UnifiedController(
+            logger_instance=direct_test_logger.getChild("TestUCInstance"),
+            camera_id=0, 
+            led_duration_tolerance_sec=0.08, 
+            replay_post_failure_duration_sec=2.0, # Shorter for quick testing
+            replay_output_dir=test_replay_dir 
+        )
+        direct_test_logger.info(f"Test UnifiedController instance created. Camera Ready: {uc_instance_for_test.is_camera_ready}")
+        if uc_instance_for_test._camera_checker:
+            direct_test_logger.info(f"  Replay dir: {uc_instance_for_test._camera_checker.replay_output_dir}")
+
+        if uc_instance_for_test.is_camera_ready:
+            direct_test_logger.info("--- Testing Camera Replay with Context ---")
+            fail_state = {"red": 1, "green": 1, "blue": 1} # A state likely to fail
+            
+            # Simulate context that an FSM might provide
+            test_context = {
+                "replay_script_name": os.path.basename(__file__),
+                "replay_fsm_test_case": "DirectUCTest_Failure",
+                "replay_some_other_info": "Value123"
+            }
+            direct_test_logger.info(f"Attempting confirm_led_solid for {fail_state} (expecting failure and replay with context).")
+            # input("Prepare for FAILING confirm_led_solid test with context. Press Enter...")
+            
+            uc_instance_for_test.confirm_led_solid(
+                fail_state, minimum=0.1, timeout=0.5, replay_extra_context=test_context
+            )
+            direct_test_logger.info(f"  Check for replay video in: {test_replay_dir}")
+        else:
+            direct_test_logger.warning("Camera component not ready, skipping camera replay test.")
+            
+    except Exception as e_test_main:
+        direct_test_logger.error(f"Error during UnifiedController direct test: {e_test_main}", exc_info=True)
+    finally:
+        if uc_instance_for_test:
+            direct_test_logger.info("Closing UnifiedController instance from direct test...")
+            uc_instance_for_test.close()
+        direct_test_logger.info("UnifiedController direct test finished.")

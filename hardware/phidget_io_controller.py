@@ -10,6 +10,7 @@ from Phidget22.Devices.DigitalOutput import DigitalOutput
 from Phidget22.Devices.DigitalInput import DigitalInput
 from Phidget22.PhidgetException import PhidgetException
 from Phidget22.ErrorCode import ErrorCode
+from typing import Optional, List, Any, Union
 
 # Get the logger for this module. Its name will be 'hardware.phidget_io_controller'.
 # Configuration (handlers, level, format) comes from the global setup.
@@ -116,13 +117,12 @@ class PhidgetController:
         if expected_type and not isinstance(ch, expected_type): raise TypeError(f"Channel '{name}' not {expected_type.__name__}, found {type(ch).__name__}.")
         if not ch.getAttached():
             self.logger.error(f"Channel '{name}' (S/N {ch.getDeviceSerialNumber()}, Ch {ch.getChannel()}) not attached.")
-            # The PhidgetException constructor takes only one argument, the error code.
             raise PhidgetException(ErrorCode.EPHIDGET_NOTATTACHED)
         return ch
 
     def set_output(self, name, state):
         do_ch = self._get_channel_object(name, DigitalOutput)
-        try: do_ch.setState(bool(state)); self.logger.debug(f"Output '{name}' set to {'ON' if state else 'OFF'}.") # Already DEBUG
+        try: do_ch.setState(bool(state)); self.logger.debug(f"Output '{name}' set to {'ON' if state else 'OFF'}.")
         except PhidgetException as e: self.logger.error(f"Error setting output '{name}': {e.description}", exc_info=False); raise
 
     def on(self, name): self.set_output(name, True)
@@ -140,55 +140,120 @@ class PhidgetController:
             except Exception as e:
                 self.logger.error(f"Error turning off '{name}' during hold: {e}", exc_info=True)
 
-    def press(self, name: str, duration_ms: float = 100):
-        self.logger.debug(f"Pressing '{name}' (ON for {duration_ms}ms).")
+    def press(self, channel_or_channels: Union[str, List[str]], duration_ms: float = 100):
+        """
+        Turns on an output channel, holds, then releases. Can handle single or
+        multiple channels for simultaneous presses.
+
+        Args:
+            channel_or_channels (Union[str, List[str]]): A single channel name (str)
+                or a list of channel names (List[str]) to be pressed simultaneously.
+            duration_ms (float): The duration for the press in milliseconds. Default 100.
+
+        Example:
+            press("lock")
+                # 'Press' lock key (holding for 0.1s)
+
+            press("key1", duration_ms=500)
+                # 'Press' channel "key1" (holding for 0.5s)
+
+            press(["key1", "key2"], duration_ms=3000)
+                # 'Press' key1 and key2 simultaneously (holding for 3s)
+        """
+        if isinstance(channel_or_channels, list):
+            self._pulse_simultaneous(channel_or_channels, duration_ms=duration_ms)
+        elif isinstance(channel_or_channels, str):
+            self.hold(channel_or_channels, duration_ms=duration_ms)
+        else:
+            raise TypeError(f"Argument for 'press' must be a string or a list of strings, but got {type(channel_or_channels)}.")
+
+    def _pulse_simultaneous(self, pins: List[str], duration_ms: float):
+        """Turns on a list of pins simultaneously, holds, then turns them off."""
+        self.logger.debug(f"Simultaneous press: {pins} for {duration_ms}ms.")
         try:
-            self.on(name)
+            for pin in pins:
+                self.on(pin)
             time.sleep(duration_ms / 1000.0)
         finally:
-            try:
-                self.off(name)
-            except Exception as e:
-                self.logger.error(f"Error turning off '{name}' during press: {e}", exc_info=True)
+            for pin in pins:
+                try:
+                    self.off(pin)
+                except Exception as e:
+                    self.logger.error(f"Error turning off '{pin}' during simultaneous pulse: {e}", exc_info=True)
 
-    def sequence(self, pins: list, press_ms: float = 100, pause_ms: float = 100):
-        if not pins or not isinstance(pins, list) or not all(isinstance(p, (str,int)) for p in pins) \
-           or not (isinstance(press_ms, (int,float)) and press_ms >=0) \
-           or not (isinstance(pause_ms, (int,float)) and pause_ms >=0):
-            raise ValueError("Invalid sequence parameters.")
-        self.logger.debug(f"Sequence: {pins} (Press: {press_ms}ms, Pause: {pause_ms}ms)") # MODIFIED: INFO to DEBUG
-        for i, pin_name in enumerate(pins):
-            self.logger.debug(f"  Seq step {i+1}/{len(pins)}: Pulse '{pin_name}'.") # Already DEBUG
-            try: self.hold(pin_name, duration_ms=press_ms) # hold() will now use DEBUG logging
-            except Exception as e: self.logger.error(f"Error pulsing '{pin_name}' in seq (step {i+1}): {e}", exc_info=True); raise
-            if i < len(pins) - 1 and pause_ms > 0: self.logger.debug(f"  Pause {pause_ms}ms after '{pin_name}'."); time.sleep(pause_ms / 1000.0)
+    def sequence(self, pins: List[Any], press_ms: float = 100, pause_ms: float = 100):
+        """
+        'Presses' a list of outputs sequentially. The sequence is a list where each
+        item can be a channel name (str) for a single press, or a nested list of
+        channel names for a simultaneous press.
 
-    def read_input(self, name):
+        Args:
+            pins (List[Any]): A list of single channel names (str) or nested
+                              lists of channel names (List[str]).
+            press_ms (float): The duration for each press in milliseconds. Default 100.
+            pause_ms (float): The pause between presses in milliseconds. Default 100.
+        """
+        if not isinstance(pins, list):
+            raise ValueError(f"Pins argument must be a list, but got {type(pins)}")
+        if not isinstance(press_ms, (int, float)) or press_ms < 0:
+            raise ValueError(f"press_ms must be a non-negative number, but got {press_ms}")
+        if not isinstance(pause_ms, (int, float)) or pause_ms < 0:
+            raise ValueError(f"pause_ms must be a non-negative number, but got {pause_ms}")
+        
+        self.logger.debug(f"Sequence: {pins} (Press: {press_ms}ms, Pause: {pause_ms}ms)")
+        
+        for i, item in enumerate(pins):
+            if isinstance(item, list):
+                self._pulse_simultaneous(item, duration_ms=press_ms)
+            elif isinstance(item, str):
+                self.hold(item, duration_ms=press_ms)
+            else:
+                raise TypeError(f"Sequence item must be a string or a list of strings, but got {type(item)}.")
+
+            if i < len(pins) - 1 and pause_ms > 0:
+                self.logger.debug(f"  Pause {pause_ms}ms.")
+                time.sleep(pause_ms / 1000.0)
+
+    def read_input(self, name: str) -> Optional[bool]:
         di_ch = self._get_channel_object(name, DigitalInput)
-        try: state = di_ch.getState(); self.logger.info(f"Input '{name}' read as {'HIGH' if state else 'LOW'}."); return state
-        except PhidgetException as e: self.logger.error(f"Error reading input '{name}': {e.description}", exc_info=False); raise
+        try:
+            state = di_ch.getState()
+            self.logger.info(f"Input '{name}' read as {'HIGH' if state else 'LOW'}.")
+            return state
+        except PhidgetException as e:
+            self.logger.error(f"Error reading input '{name}': {e.description}", exc_info=False)
+            raise
 
-    def wait_for_input(self, name, expected_state:bool, timeout_s:float = 5, poll_s:float = 0.05) -> bool:
+    def wait_for_input(self, name: str, expected_state: bool, timeout_s: float = 5, poll_s: float = 0.05) -> bool:
         expected = bool(expected_state); start = time.time()
         self.logger.info(f"Waiting for input '{name}' to be {'HIGH' if expected else 'LOW'} (timeout: {timeout_s}s)...")
         while time.time() - start < timeout_s:
             try:
                 ch = self._get_channel_object(name, DigitalInput)
-                if ch.getState() == expected: self.logger.info(f"Input '{name}' reached state {'HIGH' if expected else 'LOW'}."); return True
+                if ch.getState() == expected:
+                    self.logger.info(f"Input '{name}' reached state {'HIGH' if expected else 'LOW'}.")
+                    return True
             except PhidgetException as e:
                 if e.code == ErrorCode.EPHIDGET_NOTATTACHED:
                     channel_for_log = self.channels.get(name)
                     serial_info = channel_for_log.getDeviceSerialNumber() if channel_for_log else "N/A"
                     self.logger.warning(f"Input '{name}' detached. Retrying. (S/N {serial_info})")
-                else: self.logger.error(f"PhidgetExc waiting for '{name}': {e.description}", exc_info=False)
-            except (NameError, RuntimeError, TypeError) as e: self.logger.error(f"Cannot wait for '{name}': {e}", exc_info=True); raise
+                else:
+                    self.logger.error(f"PhidgetExc waiting for '{name}': {e.description}", exc_info=False)
+            except (NameError, RuntimeError, TypeError) as e:
+                self.logger.error(f"Cannot wait for '{name}': {e}", exc_info=True)
+                raise
             time.sleep(poll_s)
         last_state = "UNKNOWN"; ch = self.channels.get(name)
         try:
-            if ch and ch.getAttached(): last_state = 'HIGH' if ch.getState() else 'LOW'
-            elif ch: last_state = "NOT ATTACHED"
-        except: pass
-        self.logger.warning(f"Timeout waiting for '{name}' to be {'HIGH' if expected else 'LOW'}. Last state: {last_state}."); return False
+            if ch and ch.getAttached():
+                last_state = 'HIGH' if ch.getState() else 'LOW'
+            elif ch:
+                last_state = "NOT ATTACHED"
+        except:
+            pass
+        self.logger.warning(f"Timeout waiting for '{name}' to be {'HIGH' if expected else 'LOW'}. Last state: {last_state}.")
+        return False
 
     def close_all(self):
         closed, failed = 0, 0

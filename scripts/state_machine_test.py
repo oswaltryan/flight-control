@@ -34,7 +34,7 @@ def run_sequence():
 
     # OOB Mode
     fsm.power_on()
-    fsm.enroll_admin()
+    fsm.enroll_admin(new_pin=["key1", "key1", "key2", "key2", "key3", "key3", "key4", "key4", "unlock"])
 
 if __name__ == "__main__":
     run_sequence()

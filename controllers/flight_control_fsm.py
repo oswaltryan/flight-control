@@ -257,15 +257,23 @@ class SimplifiedDeviceFSM:
         else:
              self.logger.info("Admin unlock successful, device enumerated.")
 
-    def admin_enrollment(self, new_pin, event_data: EventData) -> bool:
+    def admin_enrollment(self, event_data: EventData) -> bool:
         """
         Performs the full admin enrollment procedure. This is a 'before'
-        callback, returning True allows the state transition to proceed.
-        Call it via: fsm.enroll_admin(pin=['key1', 'key2', ...])
+        callback, which uses the 'new_pin' passed in the trigger call's kwargs.
+        
+        Call it via: fsm.enroll_admin(new_pin=['key1', 'key2', ...])
         """
+        # Retrieve the new_pin from the event_data object
+        new_pin = event_data.kwargs.get('new_pin')
 
+        # Add robust validation
+        if not new_pin or not isinstance(new_pin, list):
+            self.logger.error("Admin enrollment requires a 'new_pin' list passed as a keyword argument.")
+            return False # Cancel the transition
+        
         self.logger.info(f"Entering Admin PIN Enrollment...")
-        self.at.sequence(['unlock', 'key9'])
+        self.at.press(['unlock', 'key9'])
         if not self.at.await_and_confirm_led_pattern(LEDs['GREEN_BLUE'], timeout=5.0):
             self.logger.error("Did not observe GREEN_BLUE pattern. Enrollment aborted.")
             return False
@@ -292,8 +300,6 @@ class SimplifiedDeviceFSM:
             
         self.logger.info("Admin enrollment sequence completed successfully. Updating DUT model.")
         
-        # The standard admin PIN sequence in DUT includes the 'unlock' action. We add it here
-        # so the DUT model is consistent with how it's used for unlocking later.
         DUT.adminPIN = new_pin + ['unlock']
         self.logger.info("Updated DUT with new admin PIN. Allowing FSM transition to ADMIN_MODE.")
         
