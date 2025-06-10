@@ -396,7 +396,17 @@ class LogitechLedChecker:
             self.logger.error("Replay: Frame dimensions not set. Cannot save video.")
             return
 
-        filename_base = f"failure_instant_replay.mp4"
+        # --- MODIFICATION: Generate a unique, timestamped filename ---
+        # Get the current time in a format suitable for a filename.
+        timestamp_str = datetime.datetime.now().strftime("%H-%M-%S")
+        
+        # Sanitize the method name just in case it contains characters not suitable for filenames.
+        method_name_safe = self.replay_method_name.replace(" ", "_")
+
+        # Create a descriptive and unique filename.
+        filename_base = f"replay_{timestamp_str}_{method_name_safe}.mp4"
+        # --- END MODIFICATION ---
+
         filepath = os.path.join(self.replay_output_dir, filename_base)
 
         fourcc = int.from_bytes(b'mp4v', 'little')
@@ -419,6 +429,7 @@ class LogitechLedChecker:
                     resized_overlay_frame = cv2.resize(frame_with_overlays, (self.replay_frame_width, self.replay_frame_height))
                     video_writer.write(resized_overlay_frame)
             
+            # Use the new unique filepath in the log message.
             self.logger.info(f"Replay: Successfully wrote frames to {filepath}.")
         except Exception as e: 
             self.logger.error(f"Replay: Error during video writing for {filepath}: {e}", exc_info=True)

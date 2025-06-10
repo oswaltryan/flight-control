@@ -111,10 +111,13 @@ def _cleanup_global_at():
     else:
         pass # No 'at' instance to cleanup, already logged or handled
 
-if at is not None: # Check if 'at' was successfully created before registering cleanup
-    atexit.register(_cleanup_global_at)
+if 'pytest' not in sys.modules:
+    if at is not None: # Check if 'at' was successfully created before registering cleanup
+        atexit.register(_cleanup_global_at)
+    else:
+        global_at_logger.warning("Global 'at' instance is None; atexit cleanup for 'at' not registered.")
 else:
-    global_at_logger.warning("Global 'at' instance is None; atexit cleanup for 'at' not registered.")
+    global_at_logger.debug("Pytest is running. Skipping atexit registration for 'at' controller.")
 
 global_at_logger.info("")
 global_at_logger.info("____"*10)
