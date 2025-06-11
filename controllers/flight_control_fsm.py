@@ -23,6 +23,11 @@ from usb_tool import find_apricorn_device
 
 from .unified_controller import UnifiedController
 
+# --- Custom Exception for Transition Failures ---
+class TransitionCallbackError(Exception):
+    """Custom exception to be raised from 'before' callbacks on failure."""
+    pass
+
 # --- Load External JSON Configuration ---
 # Get a logger for this module-level operation
 _fsm_module_logger = logging.getLogger(__name__)
@@ -167,9 +172,9 @@ class SimplifiedDeviceFSM:
         # --- 'Idle' Mode Transitions ---
         self.post_pass: Callable
         self.machine.add_transition(trigger='post_pass', source='POWER_ON_SELF_TEST', dest='OOB_MODE', conditions=[lambda _: not DUT.adminPIN])
-        self.machine.add_transition(trigger='post_pass', source='POWER_ON_SELF_TEST', dest='STANDBY_MODE', conditions=[lambda _: bool(DUT.adminPIN)])
         self.machine.add_transition(trigger='post_pass', source='POWER_ON_SELF_TEST', dest='USER_FORCED_ENROLLMENT', conditions=[lambda _: bool(DUT.userForcedEnrollment)])
         self.machine.add_transition(trigger='post_pass', source='POWER_ON_SELF_TEST', dest='BRUTE_FORCE', conditions=[lambda _: DUT.bruteForceCounter == 0])
+        self.machine.add_transition(trigger='post_pass', source='POWER_ON_SELF_TEST', dest='STANDBY_MODE', conditions=[lambda _: bool(DUT.adminPIN)])
 
         # --- OOB Mode Transitions ---
         self.enter_diagnostic_mode: Callable
@@ -188,6 +193,7 @@ class SimplifiedDeviceFSM:
         self.machine.add_transition(trigger='unlock_admin', source='STANDBY_MODE', dest='UNLOCKED_ADMIN', before='enter_admin_pin')
         self.machine.add_transition(trigger='lock_admin', source='UNLOCKED_ADMIN', dest='STANDBY_MODE', before='press_lock_button')
         self.machine.add_transition(trigger='enter_diagnostic_mode', source='STANDBY_MODE', dest='DIAGNOSTIC_MODE')
+        self.machine.add_transition(trigger='self_destruct', source='STANDBY_MODE', dest='UNLOCKED_ADMIN', before='enter_self_destruct_pin')
         self.machine.add_transition(trigger='exit_diagnostic_mode', source='DIAGNOSTIC_MODE', dest='STANDBY_MODE', conditions=[lambda _: bool(DUT.adminPIN)])
         self.machine.add_transition(trigger='user_reset', source='STANDBY_MODE', dest='OOB_MODE', conditions=[lambda _: not DUT.provisionLock])
         self.machine.add_transition(trigger='unlock_user', source='STANDBY_MODE', dest='UNLOCKED_USER', before='enter_user_pin')
@@ -208,7 +214,7 @@ class SimplifiedDeviceFSM:
         self.machine.add_transition(trigger='enroll_user', source='USER_FORCED_ENROLLMENT', dest='STANDBY_MODE', before='user_enrollment')
         self.machine.add_transition(trigger='enter_diagnostic_mode', source='USER_FORCED_ENROLLMENT', dest='DIAGNOSTIC_MODE')
         self.machine.add_transition(trigger='exit_diagnostic_mode', source='DIAGNOSTIC_MODE', dest='USER_FORCED_ENROLLMENT', conditions=[lambda _: not DUT.adminPIN])
-        self.machine.add_transition(trigger='self_destruct', source='USER_FORCED_ENROLLMENT', dest='UNLOCKED_ADMIN')
+        self.machine.add_transition(trigger='self_destruct', source='USER_FORCED_ENROLLMENT', dest='UNLOCKED_ADMIN', before='enter_self_destruct_pin')
         self.machine.add_transition(trigger='user_reset', source='USER_FORCED_ENROLLMENT', dest='OOB_MODE', conditions=[lambda _: not DUT.provisionLock])
         self.machine.add_transition(trigger='unlock_user', source='USER_FORCED_ENROLLMENT', dest='UNLOCKED_USER', before='enter_user_pin', conditions=[lambda: any(pin is not None for pin in DUT.userPIN.values())])
         self.machine.add_transition(trigger='lock_user', source='UNLOCKED_USER', dest='USER_FORCED_ENROLLMENT', before='press_lock_button')
@@ -298,6 +304,7 @@ class SimplifiedDeviceFSM:
         }
         if not self.at.await_and_confirm_led_pattern(LEDs['ACCEPT_PATTERN'], timeout=5.0, replay_extra_context=context):
             self.logger.error("Did not observe ACCEPT_PATTERN pattern. POST failed.")
+            self.post_fail()
         else:
             self.post_pass()
 
@@ -386,316 +393,142 @@ class SimplifiedDeviceFSM:
     ###########################################################################################################
     # Before/After Functions
     
-    def do_power_on(self, event_data: EventData) -> bool:
-        """
-        This is a 'before' callback. It performs the power-on and POST.
-        It must return True for the transition to proceed, or False to cancel it.
-        """
+    def do_power_on(self, event_data: EventData) -> None:
         self.logger.info("Powering DUT on and performing self-test...")
         self.at.on("usb3")
         self.at.on("connect")
         time.sleep(0.5)
-
-        dest_state = "UNKNOWN"
-        if event_data and event_data.transition:
-            dest_state = event_data.transition.dest
-        context = {
-            'fsm_current_state': self.state,
-            'fsm_destination_state': dest_state
-        }
-
+        # FIX: Safely access destination state
+        dest_state = event_data.transition.dest if event_data.transition else "UNKNOWN"
+        context = {'fsm_current_state': self.state, 'fsm_destination_state': dest_state}
         if DUT.VBUS:
             if not self.at.confirm_led_pattern(LEDs['STARTUP'], clear_buffer=True, replay_extra_context=context):
-                self.logger.error("Failed Startup Self-Test LED confirmation. Aborting transition.")
-                return False # This stops the FSM from entering the POWER_ON_SELF_TEST state
-            else:
-                self.logger.info("Startup Self-Test successful. Proceeding to POWER_ON_SELF_TEST state.")
-            
-        return True # Allows the transition to complete
+                raise TransitionCallbackError("Failed Startup Self-Test LED confirmation.")
+            self.logger.info("Startup Self-Test successful. Proceeding to POWER_ON_SELF_TEST state.")
 
-    def admin_enrollment(self, event_data: EventData) -> bool:
-        """
-        Performs the full admin enrollment procedure. This is a 'before'
-        callback, which uses the 'new_pin' passed in the trigger call's kwargs.
-        """
+    def admin_enrollment(self, event_data: EventData) -> None:
         new_pin = event_data.kwargs.get('new_pin')
         if not new_pin or not isinstance(new_pin, list):
-            self.logger.error("Admin enrollment requires a 'new_pin' list passed as a keyword argument.")
-            return False
-
-        dest_state = "UNKNOWN"
-        if event_data and event_data.transition:
-            dest_state = event_data.transition.dest
-        context = {
-            'fsm_current_state': self.state,
-            'fsm_destination_state': dest_state
-        }
+            raise TransitionCallbackError("Admin enrollment requires a 'new_pin' list.")
+        
+        dest_state = event_data.transition.dest if event_data.transition else "UNKNOWN"
+        context = {'fsm_current_state': self.state, 'fsm_destination_state': dest_state}
         
         self.logger.info(f"Entering Admin PIN Enrollment...")
         self.at.press(['unlock', 'key9'])
         if not self.at.await_and_confirm_led_pattern(LEDs['GREEN_BLUE'], timeout=5.0, replay_extra_context=context):
-            self.logger.error("Did not observe GREEN_BLUE pattern. Enrollment aborted.")
-            return False
+            raise TransitionCallbackError("Did not observe GREEN_BLUE pattern.")
 
         self.logger.info(f"Entering new Admin PIN (first time)...")
         self.at.sequence(new_pin)
-
-        self.logger.info("Verifying PIN confirmation...")
         if not self.at.await_and_confirm_led_pattern(LEDs['ACCEPT_PATTERN'], timeout=5.0, replay_extra_context=context):
-            self.logger.error("Did not observe ACCEPT_PATTERN pattern after first PIN entry.")
-            return False
-
+            raise TransitionCallbackError("Did not observe ACCEPT_PATTERN after first PIN entry.")
         if not self.at.await_and_confirm_led_pattern(LEDs['GREEN_BLUE'], timeout=5.0, replay_extra_context=context):
-            self.logger.error("Did not observe GREEN_BLUE pattern after first PIN entry. Enrollment aborted.")
-            return False
+            raise TransitionCallbackError("Did not observe GREEN_BLUE pattern after first PIN entry.")
 
         self.logger.info("Re-entering Admin PIN for confirmation...")
         self.at.sequence(new_pin)
-        
-        self.logger.info("Awaiting 'ACCEPT_PATTERN' to confirm successful enrollment...")
         if not self.at.await_led_state(LEDs['ACCEPT_STATE'], timeout=5.0, replay_extra_context=context):
-            self.logger.error("Did not observe ACCEPT_PATTERN after PIN confirmation. Enrollment likely failed.")
-            return False
+            raise TransitionCallbackError("Did not observe ACCEPT_PATTERN after PIN confirmation.")
             
-        self.logger.info("Admin enrollment sequence completed successfully. Updating DUT model.")
         DUT.adminPIN = new_pin
-        self.logger.info("Updated DUT with new admin PIN. Allowing FSM transition to ADMIN_MODE.")
-        
-        return True
+        self.logger.info("Admin enrollment sequence completed successfully. Updated DUT model.")
 
-    def enter_admin_pin(self, event_data: EventData) -> bool:
-        """
-        Enters the stored Admin PIN to unlock the device. This is a 'before'
-        callback for the 'unlock_admin' transition.
-
-        It sends the PIN sequence stored in the DUT model and waits for the
-        'ENUM' LED pattern to confirm a successful unlock.
-        """
+    def enter_admin_pin(self, event_data: EventData) -> None:
         self.logger.info("Unlocking DUT with Admin PIN...")
         self.at.sequence(DUT.adminPIN)
+        dest_state = event_data.transition.dest if event_data.transition else "UNKNOWN"
+        context = {'fsm_current_state': self.state, 'fsm_destination_state': dest_state}
+        if not self.at.await_and_confirm_led_pattern(LEDs['ENUM'], timeout=15, replay_extra_context=context):
+            raise TransitionCallbackError("Failed admin unlock LED pattern.")
 
-        dest_state = "UNKNOWN"
-        if event_data and event_data.transition:
-            dest_state = event_data.transition.dest
-        context = {
-            'fsm_current_state': self.state,
-            'fsm_destination_state': dest_state
-        }
-
-        unlock_admin_ok: bool = self.at.await_and_confirm_led_pattern(LEDs['ENUM'], timeout=15, replay_extra_context=context)
-        if not unlock_admin_ok:
-            self.logger.error("Failed admin unlock LED pattern. Aborting transition.")
-            self.post_fail(details="ADMIN_UNLOCK_PATTERN_MISMATCH")
-            return False # Cancel the transition
-        return True
-
-    def user_enrollment(self, event_data: EventData) -> Optional[int]:
-        """
-        Performs the user enrollment procedure. This is a 'before' callback
-        triggered from ADMIN_MODE. It finds the next available logical user
-        slot based on the device's FIPS level, performs the physical
-        enrollment sequence, and updates the DUT model.
-
-        Args:
-            event_data: The event data object, which contains the `new_pin`
-                        in its kwargs.
-
-        Returns:
-            An integer representing the logical user ID (1-based) that was
-            successfully enrolled, or None if enrollment failed.
-        """
+    def user_enrollment(self, event_data: EventData) -> int:
         new_pin = event_data.kwargs.get('new_pin')
         if not new_pin or not isinstance(new_pin, list):
-            self.logger.error("User enrollment requires a 'new_pin' list passed as a keyword argument.")
-            return None
+            raise TransitionCallbackError("User enrollment requires a 'new_pin' list.")
 
         max_users = 1 if DUT.fips in [2, 3] else 4
-        next_available_slot = None
-        for i in range(1, max_users + 1):
-            if DUT.userPIN.get(i) is None:
-                next_available_slot = i
-                break
+        next_available_slot = next((i for i in range(1, max_users + 1) if DUT.userPIN.get(i) is None), None)
 
         if next_available_slot is None:
-            self.logger.error(f"Cannot enroll new user. All {max_users} user slots are full.")
-            return False
+            raise TransitionCallbackError(f"Cannot enroll new user. All {max_users} user slots are full.")
         
         self.logger.info(f"Attempting to enroll new user into logical slot #{next_available_slot}...")
-        
-        context = {'fsm_current_state': self.state, 'fsm_destination_state': self.state}
+        dest_state = event_data.transition.dest if event_data.transition else "UNKNOWN"
+        context = {'fsm_current_state': self.state, 'fsm_destination_state': dest_state}
 
         self.at.press(['unlock', 'key1'])
         if not self.at.await_and_confirm_led_pattern(LEDs['GREEN_BLUE'], timeout=5.0, replay_extra_context=context):
-            self.logger.error("Did not observe GREEN_BLUE pattern for user enrollment. Aborted.")
-            return None
+            raise TransitionCallbackError("Did not observe GREEN_BLUE pattern for user enrollment.")
 
         self.logger.info(f"Entering new User PIN (first time)...")
         self.at.sequence(new_pin)
-
         if not self.at.await_and_confirm_led_pattern(LEDs['ACCEPT_PATTERN'], timeout=5.0, replay_extra_context=context):
-            self.logger.error("Did not observe ACCEPT_PATTERN after first user PIN entry.")
-            return None
-
+            raise TransitionCallbackError("Did not observe ACCEPT_PATTERN after first user PIN entry.")
         if not self.at.await_and_confirm_led_pattern(LEDs['GREEN_BLUE'], timeout=5.0, replay_extra_context=context):
-            self.logger.error("Did not observe GREEN_BLUE pattern after first user PIN entry. Aborted.")
-            return None
+            raise TransitionCallbackError("Did not observe GREEN_BLUE pattern after first user PIN entry.")
 
         self.logger.info("Re-entering User PIN for confirmation...")
         self.at.sequence(new_pin)
-
-        if not self.at.confirm_led_solid( LEDs["ACCEPT_STATE"], minimum=1, timeout=3, replay_extra_context=context):
-            self.logger.error("Did not observe final ACCEPT_PATTERN for user PIN confirmation. Enrollment failed.")
-            return None
+        if not self.at.confirm_led_solid(LEDs["ACCEPT_STATE"], minimum=1, timeout=3, replay_extra_context=context):
+            raise TransitionCallbackError("Did not observe final ACCEPT_PATTERN for user PIN confirmation.")
         
         DUT.userPIN[next_available_slot] = new_pin + ['unlock']
         self.logger.info(f"Successfully enrolled PIN for logical user {next_available_slot}.")
         return next_available_slot
     
-    def enter_user_pin(self, event_data: EventData) -> bool:
-        """
-        Enters a specified user PIN to unlock the device. This is a 'before'
-        callback for the 'unlock_user' transition. It uses a logical `user_id`
-        provided by the caller to look up the correct PIN from the DUT model.
-
-        Args:
-            event_data: The event data object, containing the `user_id` in kwargs.
-
-        Returns:
-            True if the unlock pattern is confirmed, allowing the transition to
-            UNLOCKED_USER. False otherwise, canceling the transition.
-        """
+    def enter_user_pin(self, event_data: EventData) -> None:
         user_id = event_data.kwargs.get('user_id')
         if not user_id:
-            self.logger.error("Unlock user requires a 'user_id' to be passed.")
-            return False
-
+            raise TransitionCallbackError("Unlock user requires a 'user_id' to be passed.")
         pin_to_enter = DUT.userPIN.get(user_id)
         if not pin_to_enter:
-            self.logger.error(f"Unlock failed: No PIN is tracked for logical user {user_id}.")
-            return False
+            raise TransitionCallbackError(f"Unlock failed: No PIN is tracked for logical user {user_id}.")
 
         self.logger.info(f"Attempting to unlock device with PIN from logical user slot {user_id}...")
         self.at.sequence(pin_to_enter)
-
-        dest_state = "UNKNOWN"
-        if event_data and event_data.transition:
-            dest_state = event_data.transition.dest
+        dest_state = event_data.transition.dest if event_data.transition else "UNKNOWN"
         context = {'fsm_current_state': self.state, 'fsm_destination_state': dest_state}
+        if not self.at.await_and_confirm_led_pattern(LEDs['ENUM'], timeout=15, replay_extra_context=context):
+            raise TransitionCallbackError("Failed user unlock LED pattern.")
         
-        unlock_user_ok = self.at.await_and_confirm_led_pattern(LEDs['ENUM'], timeout=15, replay_extra_context=context)
-        if not unlock_user_ok:
-            self.logger.error("Failed user unlock LED pattern. Aborting transition.")
-            self.post_fail(details="USER_UNLOCK_PATTERN_MISMATCH")
-            return False
-        
-        return True
-
     def press_lock_button(self, event_data: EventData) -> None:
         self.logger.info(f"Locking DUT from Unlocked Admin...")
         self.at.press("lock")
 
-    def do_user_reset(self, event_data: EventData) -> bool:
-        """
-        Performs the physical key sequence to trigger a user factory reset
-        from ADMIN_MODE. This is a 'before' callback for the 'user_reset'
-        transition.
-
-        It sends the reset key combination, verifies the 'RED_BLUE'
-        LED pattern, and clears the PINs from the DUT model to reflect
-        the device's new state.
-
-        Args:
-            event_data: The event data from the FSM trigger.
-
-        Returns:
-            True if the reset confirmation pattern is observed, allowing the
-            transition to OOB_MODE. False otherwise, canceling the transition.
-        """
-
-        dest_state = "UNKNOWN"
-        if event_data and event_data.transition:
-            dest_state = event_data.transition.dest
-        context = {
-            'fsm_current_state': self.state,
-            'fsm_destination_state': dest_state
-        }
-
+    def do_user_reset(self, event_data: EventData) -> None:
+        dest_state = event_data.transition.dest if event_data.transition else "UNKNOWN"
+        context = {'fsm_current_state': self.state, 'fsm_destination_state': dest_state}
         self.logger.info("Initiating User Reset...")
-
         if self.state == "ADMIN_MODE":
             self.at.sequence([["lock", "unlock", "key2"]])
-
-        reset_pattern_ok = self.at.confirm_led_solid(
-            LEDs["KEY_GENERATION"],
-            minimum=12,
-            timeout=15,
-            replay_extra_context=context
-        )
-
+        reset_pattern_ok = self.at.confirm_led_solid(LEDs["KEY_GENERATION"], minimum=12, timeout=15, replay_extra_context=context)
         if not reset_pattern_ok:
-            self.logger.error("Failed to observe user reset confirmation (RED_BLUE) pattern. Aborting transition.")
-            return False
-
+            raise TransitionCallbackError("Failed to observe user reset confirmation pattern.")
+        
         self.logger.info("User reset confirmation pattern observed. Resetting DUT model state...")
-        # Reset the DUT model to its factory default state
         DUT.adminPIN = []
         DUT.userPIN = {1: None, 2: None, 3: None, 4: None}
-        # To-do: Add any other DUT properties that should be reset to default here.
-
-        self.logger.info("DUT model state has been reset. Allowing transition to OOB_MODE.")
-        return True
+        self.logger.info("DUT model state has been reset.")
     
     def enter_admin_mode(self, event_data: EventData) -> None:
-        """
-        This function will be used to login to ADMIN_MODE
-        """
-        dest_state = "UNKNOWN"
-        if event_data and event_data.transition:
-            dest_state = event_data.transition.dest
-        context = {
-            'fsm_current_state': self.state,
-            'fsm_destination_state': dest_state
-        }
-
+        dest_state = event_data.transition.dest if event_data.transition else "UNKNOWN"
+        context = {'fsm_current_state': self.state, 'fsm_destination_state': dest_state}
         self.at.press(['key0', 'unlock'], duration_ms=6000)
         if not self.at.confirm_led_pattern(LEDs['RED_LOGIN'], clear_buffer=True, replay_extra_context=context):
-                self.logger.error("Failed Admin Mode Login LED confirmation. Aborting transition.")
-                self.post_fail(details="ADMIN_MODE_LOGIN_MISMATCH")
-        
+                raise TransitionCallbackError("Failed Admin Mode Login LED confirmation.")
         self.at.sequence(DUT.adminPIN)
 
     def enter_self_destruct_pin(self, event_data: EventData) -> None:
-        """
-        This function will be used to enter the Self Destruct PIN
-        """
-        dest_state = "UNKNOWN"
-        if event_data and event_data.transition:
-            dest_state = event_data.transition.dest
-        context = {
-            'fsm_current_state': self.state,
-            'fsm_destination_state': dest_state
-        }
-        self.logger.info("Unlocking DUT with Admin PIN...")
+        self.logger.info("Entering Self Destruct PIN...")
         self.at.sequence(DUT.selfDestructPIN)
         
     def enter_last_try_pin(self, event_data: EventData) -> None:
-        """
-        This function will be used to clear BRUTE_FORCE Mode
-        """
-        dest_state = "UNKNOWN"
-        if event_data and event_data.transition:
-            dest_state = event_data.transition.dest
-        context = {
-            'fsm_current_state': self.state,
-            'fsm_destination_state': dest_state
-        }
         self.logger.info(f"Entering Last Try Login...")
         self.at.press(['key5', 'unlock'], duration_ms=6000)
         if not self.at.await_and_confirm_led_pattern(LEDs["RED_GREEN"], timeout=10):
-            self.logger.error("Failed 'LASTTRY' Login confirmation. Aborting transition.")
-            self.post_fail(details="LASTTRY_LOGIN_MISMATCH")
-        else:
-            self.at.sequence(['key5', 'key2', 'key7', 'key8', 'key8', 'key7', 'key9', 'unlock'])
+            raise TransitionCallbackError("Failed 'LASTTRY' Login confirmation.")
+        self.at.sequence(['key5', 'key2', 'key7', 'key8', 'key8', 'key7', 'key9', 'unlock'])
 
     def enter_invalid_pin(self, event_data: EventData) -> bool:
         """
@@ -706,18 +539,17 @@ class SimplifiedDeviceFSM:
         Returns:
             True if the REJECT pattern was successfully observed, False otherwise.
         """
-        # 1. Define a generic, incorrect PIN.
         invalid_pin_sequence = ['key9', 'key9', 'key9', 'key9', 'key9', 'key9', 'key9', 'unlock']
-        
-        # 2. Perform the physical action.
         self.logger.info("Intentionally entering an invalid PIN...")
         self.at.sequence(invalid_pin_sequence)
         
-        # 3. Verify the device's failure response.
-        reject_ok = self.at.await_and_confirm_led_pattern(LEDs['REJECT'], timeout=5)
-        if not reject_ok:
+        if not self.at.await_and_confirm_led_pattern(LEDs['REJECT'], timeout=5):
             self.logger.error("Device did not show REJECT pattern after invalid PIN entry.")
             return False
             
+        if DUT.bruteForceCurrent > 0:
+            DUT.bruteForceCurrent -= 1
+        
         self.logger.info("Device correctly showed REJECT pattern.")
         return True
+        
