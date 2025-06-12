@@ -279,13 +279,6 @@ def test_full_enrollment_flow(fsm, mock_at, dut_instance):
     fsm.lock_admin()
     assert fsm.state == 'STANDBY_MODE'
 
-def test_brute_force_decrement(fsm, mock_at, dut_instance):
-    fsm.state = 'STANDBY_MODE'
-    initial_attempts = dut_instance.bruteForceCurrent = 10
-    fsm.fail_unlock()
-    assert fsm.state == 'STANDBY_MODE'
-    assert dut_instance.bruteForceCurrent == initial_attempts - 1
-
 def test_lock_admin_from_unlocked_state(fsm, mock_at):
     """
     Tests locking the device from the UNLOCKED_ADMIN state. This covers a
@@ -334,28 +327,6 @@ def test_lock_admin_from_invalid_state(fsm, mock_at):
     assert fsm.state == 'OOB_MODE'
     mock_at.press.assert_not_called()
 
-# def test_user_reset_path_success(fsm, mock_at, dut_instance):
-#     """
-#     Tests that a successful user reset clears PINs and returns to OOB_MODE.
-#     This is the happy path.
-#     """
-#     # GIVEN
-#     fsm.state = 'ADMIN_MODE'
-#     dut_instance.adminPIN = ['key1', 'key2', 'key3']
-#     dut_instance.userPIN[1] = ['key4', 'key5', 'key6']
-#     # Ensure the hardware check for the reset pattern passes
-#     mock_at.confirm_led_solid.return_value = True
-
-#     # WHEN
-#     fsm.user_reset()
-
-#     # THEN
-#     assert fsm.state == 'OOB_MODE'
-#     assert dut_instance.adminPIN == []
-#     assert dut_instance.userPIN[1] is None
-#     mock_at.sequence.assert_called_with([['lock', 'unlock', 'key2']])
-#     mock_at.confirm_led_solid.assert_called_with(LEDs["KEY_GENERATION"], minimum=ANY, timeout=ANY, replay_extra_context=ANY)
-
 def test_user_reset_path_fails_on_hw_check(fsm, mock_at, dut_instance):
     """
     Tests that a user reset fails if the hardware confirmation pattern is not seen.
@@ -374,40 +345,6 @@ def test_user_reset_path_fails_on_hw_check(fsm, mock_at, dut_instance):
     # Assert that state has not changed and PINs were not cleared
     assert fsm.state == 'ADMIN_MODE'
     assert dut_instance.adminPIN == ['key1', 'key2', 'key3']
-
-# def test_user_enrollment_success_from_admin_mode(fsm, mock_at, dut_instance):
-#     """
-#     Tests the full, successful user enrollment procedure from ADMIN_MODE.
-#     This covers all success branches of the `user_enrollment` callback (lines 507-550).
-#     """
-#     # GIVEN
-#     fsm.state = 'ADMIN_MODE'
-#     user_pin = ['key1', 'key2', 'key3', 'key4', 'key5', 'key6', 'key7']
-    
-#     # Ensure all hardware checks for a successful enrollment pass
-#     mock_at.await_and_confirm_led_pattern.return_value = True
-#     mock_at.confirm_led_solid.return_value = True
-
-#     # WHEN
-#     result_id = fsm.enroll_user(new_pin=user_pin)
-
-#     # THEN
-#     # 1. The FSM should remain in ADMIN_MODE
-#     assert fsm.state == 'ADMIN_MODE'
-    
-#     # 2. A valid user ID should be returned
-#     assert result_id == 1
-    
-#     # 3. The DUT model should be updated with the new PIN and the 'unlock' key
-#     assert dut_instance.userPIN[1] == user_pin + ['unlock']
-    
-#     # 4. Verify the correct sequence of hardware interactions
-#     mock_at.press.assert_called_once_with(['unlock', 'key1'])
-#     # The PIN should be entered twice (initial and confirmation)
-#     assert mock_at.sequence.call_count == 2
-#     mock_at.sequence.assert_called_with(user_pin)
-#     # The final solid green check should be called
-#     mock_at.confirm_led_solid.assert_called_once_with(LEDs["ACCEPT_STATE"], minimum=ANY, timeout=ANY, replay_extra_context=ANY)
 
 
 def test_enter_admin_mode_fails_on_hw_check(fsm, mock_at, dut_instance):
@@ -430,29 +367,6 @@ def test_enter_admin_mode_fails_on_hw_check(fsm, mock_at, dut_instance):
     mock_at.press.assert_called_once_with(['key0', 'unlock'], duration_ms=6000)
     mock_at.confirm_led_pattern.assert_called_once_with(LEDs['RED_LOGIN'], clear_buffer=True, replay_extra_context=ANY)
     mock_at.sequence.assert_not_called()
-
-# def test_brute_force_entry(fsm, mock_at, dut_instance):
-#     # GIVEN
-#     fsm.state = 'STANDBY_MODE'
-#     dut_instance.bruteForceCurrent = 1
-#     mock_at.await_and_confirm_led_pattern.return_value = True
-
-#     # WHEN
-#     fsm.fail_unlock()
-
-#     # THEN
-#     assert dut_instance.bruteForceCurrent == 0
-#     assert fsm.state == 'BRUTE_FORCE'
-#     # Verify that the correct LED pattern was checked for
-#     mock_at.await_and_confirm_led_pattern.assert_called_with(LEDs['REJECT'], timeout=ANY)
-
-# def test_bricking_on_brute_force_entry(fsm, mock_at, dut_instance):
-#     fsm.state = 'STANDBY_MODE'
-#     dut_instance.bruteForceCurrent = 1
-#     dut_instance.provisionLock = True
-#     fsm.fail_unlock()
-#     assert dut_instance.bruteForceCurrent == 0
-#     assert fsm.state == 'BRICKED'
 
 def test_device_properties_load_success(monkeypatch):
     """
@@ -614,4 +528,63 @@ def test_device_properties_generic_exception(monkeypatch, caplog):
     assert f"An unexpected error occurred while loading" in caplog.text
     assert error_message in caplog.text
 
+def test_brute_force_decrement(fsm, mock_at, dut_instance):
+    """
+    Tests that a failed unlock attempt, when not hitting a brute-force
+    threshold, correctly decrements the counter and remains in STANDBY_MODE.
+    """
+    # GIVEN
+    # Start at a value that is > 1 but not the halfway point.
+    initial_attempts = dut_instance.bruteForceCurrent = 15
+    fsm.state = 'STANDBY_MODE'
+    mock_at.await_and_confirm_led_pattern.return_value = True
 
+    # WHEN
+    fsm.fail_unlock()
+
+    # THEN
+    # The counter should be decremented by the callback.
+    assert dut_instance.bruteForceCurrent == 14
+    # The state should remain STANDBY_MODE because the initial value (15)
+    # only matched the first, general-purpose transition condition.
+    assert fsm.state == 'STANDBY_MODE'
+
+def test_brute_force_entry_at_halfway_point(fsm, mock_at, dut_instance):
+    """
+    Tests that when the brute force counter IS AT the halfway point, a
+    failed unlock attempt correctly transitions the state to BRUTE_FORCE.
+    (This test replaces a previously flawed/contradictory test).
+    """
+    # GIVEN
+    dut_instance.bruteForceCounter = 20
+    initial_attempts = dut_instance.bruteForceCurrent = 11
+    fsm.state = 'STANDBY_MODE'
+    mock_at.await_and_confirm_led_pattern.return_value = True
+
+    # WHEN
+    fsm.fail_unlock()
+
+    # THEN
+    assert dut_instance.bruteForceCurrent == initial_attempts - 1
+    assert fsm.state == 'BRUTE_FORCE'
+
+
+def test_brute_force_final_attempt_and_entry(fsm, mock_at, dut_instance):
+    """
+    This test replaces the flawed "halfway_point" test. It tests the
+    transition from a state that is NOT a brute-force trigger to one that IS.
+    Tests that when only one attempt is remaining, a failed unlock
+    correctly transitions the state to BRUTE_FORCE.
+    """
+    # GIVEN
+    dut_instance.bruteForceCounter = 20
+    initial_attempts = dut_instance.bruteForceCurrent = 1
+    fsm.state = 'STANDBY_MODE'
+    mock_at.await_and_confirm_led_pattern.return_value = True
+
+    # WHEN
+    fsm.fail_unlock()
+
+    # THEN:
+    assert dut_instance.bruteForceCurrent == 0
+    assert fsm.state == 'BRUTE_FORCE'

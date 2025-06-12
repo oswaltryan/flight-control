@@ -196,8 +196,8 @@ class SimplifiedDeviceFSM:
         self.machine.add_transition(trigger='user_reset', source='STANDBY_MODE', dest='OOB_MODE', conditions=[lambda _: not DUT.provisionLock])
         self.machine.add_transition(trigger='unlock_user', source='STANDBY_MODE', dest='UNLOCKED_USER', before='enter_user_pin')
         self.machine.add_transition(trigger='lock_user', source='UNLOCKED_USER', dest='STANDBY_MODE', before='press_lock_button')
-        self.machine.add_transition(trigger='fail_unlock', source='STANDBY_MODE', dest='STANDBY_MODE', before='enter_invalid_pin', conditions=[lambda _: DUT.bruteForceCurrent > 1])
-        self.machine.add_transition(trigger='fail_unlock', source='STANDBY_MODE', dest='BRUTE_FORCE', before='enter_invalid_pin', conditions=[lambda _: DUT.bruteForceCurrent == DUT.bruteForceCounter/2 or DUT.bruteForceCurrent == 0])
+        self.machine.add_transition(trigger='fail_unlock', source='STANDBY_MODE', dest='STANDBY_MODE', before='enter_invalid_pin', conditions=[lambda _: DUT.bruteForceCurrent > 1 and not (DUT.bruteForceCurrent == (DUT.bruteForceCounter/2)+1)])
+        self.machine.add_transition(trigger='fail_unlock', source='STANDBY_MODE', dest='BRUTE_FORCE', before='enter_invalid_pin', conditions=[lambda _: (DUT.bruteForceCurrent == (DUT.bruteForceCounter/2)+1) or DUT.bruteForceCurrent == 1])
 
 
         # --- User-Forced Enrollment Mode Transitions ---
@@ -216,8 +216,8 @@ class SimplifiedDeviceFSM:
         self.machine.add_transition(trigger='user_reset', source='USER_FORCED_ENROLLMENT', dest='OOB_MODE', conditions=[lambda _: not DUT.provisionLock])
         self.machine.add_transition(trigger='unlock_user', source='USER_FORCED_ENROLLMENT', dest='UNLOCKED_USER', before='enter_user_pin', conditions=[lambda: any(pin is not None for pin in DUT.userPIN.values())])
         self.machine.add_transition(trigger='lock_user', source='UNLOCKED_USER', dest='USER_FORCED_ENROLLMENT', before='press_lock_button')
-        self.machine.add_transition(trigger='fail_unlock', source='USER_FORCED_ENROLLMENT', dest='STANDBY_MODE', before='enter_invalid_pin', conditions=[lambda _: DUT.bruteForceCurrent > 1])
-        self.machine.add_transition(trigger='fail_unlock', source='USER_FORCED_ENROLLMENT', dest='BRUTE_FORCE', before='enter_invalid_pin', conditions=[lambda _: DUT.bruteForceCurrent == DUT.bruteForceCounter/2 or DUT.bruteForceCurrent == 0])
+        self.machine.add_transition(trigger='fail_unlock', source='USER_FORCED_ENROLLMENT', dest='STANDBY_MODE', before='enter_invalid_pin', conditions=[lambda _: DUT.bruteForceCurrent > 1 and not (DUT.bruteForceCurrent == (DUT.bruteForceCounter/2)+1)])
+        self.machine.add_transition(trigger='fail_unlock', source='USER_FORCED_ENROLLMENT', dest='BRUTE_FORCE', before='enter_invalid_pin', conditions=[lambda _: DUT.bruteForceCurrent == DUT.bruteForceCounter/2 or DUT.bruteForceCurrent == 1])
 
         # --- Brute Force Mode Transitions ---
         self.admin_recovery_failed: Callable
@@ -262,8 +262,6 @@ class SimplifiedDeviceFSM:
         self.unlock_user: Callable
         self.lock_user: Callable
         
-
-
     def _log_state_change_details(self, event_data: EventData) -> None:
         if event_data.transition is None:
             self.logger.info(f"FSM initialized to state: {self.state}")
@@ -378,14 +376,8 @@ class SimplifiedDeviceFSM:
         if not self.at.confirm_led_pattern(LEDs['BRUTE_FORCED'], replay_extra_context=context):
             self.logger.error("Failed to confirm BRUTE_FORCE LED pattern.")
         
-        # This is the check you wanted to perform on entry.
-        if DUT.bruteForceCurrent == 0 and DUT.provisionLock:
-            self.logger.warning("Brute force limit reached with provision lock enabled. Admin has 5 attempts to recover DUT...")
-            # If the conditions are met, immediately trigger the next transition.
-            self.admin_recovery_failed()
-        else:
-            self.logger.info("Device is in BRUTE_FORCE Mode...")
-            # You could add an LED check here for the BRUTE_FORCED pattern if desired.
+        self.logger.info("Device is in BRUTE_FORCE Mode...")
+        # You could add an LED check here for the BRUTE_FORCED pattern if desired.
 
 
     ###########################################################################################################
