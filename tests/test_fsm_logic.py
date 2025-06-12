@@ -6,6 +6,14 @@ from unittest.mock import MagicMock, call, ANY
 from camera.led_dictionaries import LEDs
 from controllers.flight_control_fsm import SimplifiedDeviceFSM, DeviceUnderTest, TransitionCallbackError
 from transitions.core import MachineError
+from controllers import flight_control_fsm
+import json
+import importlib
+import io
+
+# Define a path that matches the one in the module for consistency.
+# We will intercept this path using mocks.
+MOCK_JSON_PATH = flight_control_fsm._json_path
 
 @pytest.fixture
 def mock_at():
@@ -445,3 +453,165 @@ def test_enter_admin_mode_fails_on_hw_check(fsm, mock_at, dut_instance):
 #     fsm.fail_unlock()
 #     assert dut_instance.bruteForceCurrent == 0
 #     assert fsm.state == 'BRICKED'
+
+def test_device_properties_load_success(monkeypatch):
+    """
+    GIVEN a valid JSON file exists at the expected path
+    WHEN the flight_control_fsm module is loaded
+    THEN the DEVICE_PROPERTIES dictionary is populated correctly.
+    """
+    # GIVEN: Create fake JSON content that includes the necessary keys
+    # that DeviceUnderTest will look for upon module load.
+    fake_json_content = """
+    {
+        "padlock3-3637": {
+            "bridgeFW": "0511",
+            "fips": 0,
+            "secureKey": false,
+            "model_id_digit_1": null,
+            "model_id_digit_2": null,
+            "hardware_major": null,
+            "hardware_minor": null,
+            "singleCodeBasePartNumber": null,
+            "singleCodeBase": false,
+            "minpin": 6,
+            "userCount": 4
+        }
+    }
+    """
+    mock_file = io.StringIO(fake_json_content)
+
+    # Use monkeypatch to replace the built-in `open` function.
+    monkeypatch.setattr("builtins.open", lambda path, mode: mock_file)
+
+    # WHEN: Force the module to re-run its top-level code
+    importlib.reload(flight_control_fsm)
+
+    # THEN: Check if the global variable was populated as expected
+    # We can now check for a key we know is in our fake data.
+    assert flight_control_fsm.DEVICE_PROPERTIES["padlock3-3637"]["bridgeFW"] == "0511"
+    assert flight_control_fsm.DEVICE_PROPERTIES["padlock3-3637"]["fips"] == 0
+
+
+def test_device_properties_file_not_found(monkeypatch):
+    """
+    GIVEN the JSON file does not exist at the expected path
+    WHEN the flight_control_fsm module is loaded
+    THEN a FileNotFoundError is raised.
+    """
+    # GIVEN: A mock `open` function that simulates a file not being found
+    def mock_open_raises_fnf(*args, **kwargs):
+        raise FileNotFoundError(f"File not found at {MOCK_JSON_PATH}")
+
+    monkeypatch.setattr("builtins.open", mock_open_raises_fnf)
+
+    # WHEN/THEN: Assert that reloading the module raises the expected error
+    with pytest.raises(FileNotFoundError):
+        importlib.reload(flight_control_fsm)
+
+
+def test_device_properties_json_decode_error(monkeypatch):
+    """
+    GIVEN the JSON file is malformed
+    WHEN the flight_control_fsm module is loaded
+    THEN a json.JSONDecodeError is raised.
+    """
+    # GIVEN: A mock file with invalid JSON content
+    invalid_json_content = '{"device_name": "test-device", "fips": 2,}' # Extra comma
+    mock_file = io.StringIO(invalid_json_content)
+    monkeypatch.setattr("builtins.open", lambda path, mode: mock_file)
+
+    # WHEN/THEN: Assert that reloading the module raises the expected error
+    with pytest.raises(json.JSONDecodeError):
+        importlib.reload(flight_control_fsm)
+
+def test_on_enter_off_success(fsm, mock_at, caplog):
+    """
+    Tests the on_enter_OFF callback when the hardware check succeeds.
+    Verifies that power-off signals are sent and the correct log message is recorded.
+    """
+    # GIVEN: The FSM is in a state from which it can transition to OFF.
+    # We can manually set the state for this test.
+    fsm.state = 'STANDBY_MODE'
+    # Ensure the hardware check for solid OFF LEDs will succeed.
+    mock_at.confirm_led_solid.return_value = True
+
+    # WHEN: The 'power_off' trigger is called, which will execute on_enter_OFF.
+    fsm.power_off()
+
+    # THEN:
+    # 1. The FSM state should be OFF.
+    assert fsm.state == 'OFF'
+    
+    # 2. The power-off hardware commands should have been called.
+    mock_at.off.assert_has_calls([
+        call("usb3"),
+        call("connect")
+    ], any_order=True) # Use any_order=True as their exact sequence isn't critical.
+
+    # 3. The specific LED state check should have been performed.
+    mock_at.confirm_led_solid.assert_called_once_with(
+        LEDs['ALL_OFF'], minimum=1.0, timeout=3.0, replay_extra_context=ANY
+    )
+    
+    # 4. The success log message should be present.
+    assert "Device is confirmed OFF." in caplog.text
+
+
+def test_on_enter_off_failure(fsm, mock_at, caplog):
+    """
+    Tests the on_enter_OFF callback when the hardware check fails.
+    Verifies that power-off signals are sent and the correct error is logged.
+    """
+    # GIVEN: The FSM is in a state from which it can transition to OFF.
+    fsm.state = 'STANDBY_MODE'
+    # Ensure the hardware check for solid OFF LEDs will FAIL.
+    mock_at.confirm_led_solid.return_value = False
+
+    # WHEN: The 'power_off' trigger is called.
+    fsm.power_off()
+
+    # THEN:
+    # 1. The FSM state should still be OFF, as the callback doesn't prevent the transition.
+    assert fsm.state == 'OFF'
+    
+    # 2. The power-off hardware commands should still have been called.
+    mock_at.off.assert_has_calls([
+        call("usb3"),
+        call("connect")
+    ], any_order=True)
+
+    # 3. The specific LED state check should have been performed.
+    mock_at.confirm_led_solid.assert_called_once_with(
+        LEDs['ALL_OFF'], minimum=1.0, timeout=3.0, replay_extra_context=ANY
+    )
+    
+    # 4. The failure log message should be present.
+    assert "Failed to confirm device LEDs are OFF." in caplog.text
+
+def test_device_properties_generic_exception(monkeypatch, caplog):
+    """
+    GIVEN an unexpected error occurs during json.load
+    WHEN the flight_control_fsm module is loaded
+    THEN a generic Exception is raised and the error is logged.
+    """
+    # GIVEN: An in-memory file that is valid to open
+    mock_file = io.StringIO('{}') # Content doesn't matter, just needs to be openable
+    monkeypatch.setattr("builtins.open", lambda path, mode: mock_file)
+
+    # Make the json.load function raise a generic Exception
+    error_message = "A simulated unexpected error!"
+    monkeypatch.setattr("json.load", lambda f: (_ for _ in ()).throw(Exception(error_message)))
+    
+    # Set the log level to capture CRITICAL messages
+    caplog.set_level("CRITICAL")
+
+    # WHEN / THEN: Assert that reloading the module raises the generic Exception
+    with pytest.raises(Exception, match=error_message):
+        importlib.reload(flight_control_fsm)
+
+    # Assert that the critical log message was recorded
+    assert f"An unexpected error occurred while loading" in caplog.text
+    assert error_message in caplog.text
+
+

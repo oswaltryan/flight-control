@@ -19,8 +19,6 @@ from transitions import EventData
 ###
 
 from usb_tool import find_apricorn_device
-
-
 from .unified_controller import UnifiedController
 
 # --- Custom Exception for Transition Failures ---
