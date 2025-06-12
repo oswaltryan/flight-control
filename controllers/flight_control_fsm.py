@@ -244,37 +244,46 @@ class SimplifiedDeviceFSM:
         # --- Admin Mode Enrollment Transitions ---
         self.user_reset: Callable
         self.set_brute_force_counter: Callable
-        self.enable_self_destruct: Callable
         self.enroll_self_destruct: Callable
         self.set_min_pin_counter: Callable
         self.enroll_recovery: Callable
+        self.enroll_unattended_auto_lock: Callable
         self.machine.add_transition(trigger='user_reset', source='ADMIN_MODE', dest='OOB_MODE', before='do_user_reset')
         self.machine.add_transition(trigger='enroll_admin', source='ADMIN_MODE', dest='ADMIN_MODE', before='admin_enrollment')
         self.machine.add_transition(trigger='enroll_user', source='ADMIN_MODE', dest='ADMIN_MODE', before='user_enrollment', conditions=[lambda _: any(pin_value is None for pin_value in DUT.userPIN.values())])
         self.machine.add_transition(trigger='set_brute_force_counter', source='ADMIN_MODE', dest='ADMIN_MODE', before='brute_force_counter_enrollment')
-        self.machine.add_transition(trigger='enable_self_destruct', source='ADMIN_MODE', dest='ADMIN_MODE', before='self_destruct_toggle')
         self.machine.add_transition(trigger='enroll_self_destruct', source='ADMIN_MODE', dest='ADMIN_MODE', before='self_destruct_enrollment')
         self.machine.add_transition(trigger='set_min_pin_counter', source='ADMIN_MODE', dest='ADMIN_MODE', before='min_pin_enrollment')
         self.machine.add_transition(trigger='enroll_recovery', source='ADMIN_MODE', dest='ADMIN_MODE', before='recovery_pin_enrollment')
+        self.machine.add_transition(trigger='enroll_unattended_auto_lock', source='ADMIN_MODE', dest='ADMIN_MODE', before='unattended_auto_lock_enrollment')
 
         # --- Admin Mode Toggle Transitions ---
-        # self.machine.add_transition(trigger='toggle_basic_disk', source='ADMIN_MODE', dest='ADMIN_MODE')
-        # self.machine.add_transition(trigger='delete_pins', source='ADMIN_MODE', dest='ADMIN_MODE')
-        # self.machine.add_transition(trigger='toggle_led_flicker', source='ADMIN_MODE', dest='ADMIN_MODE')
-        # self.machine.add_transition(trigger='toggle_lock_override', source='ADMIN_MODE', dest='ADMIN_MODE')
-        # self.machine.add_transition(trigger='enable_provision_lock', source='ADMIN_MODE', dest='ADMIN_MODE')
-        # self.machine.add_transition(trigger='toggle_read_only', source='ADMIN_MODE', dest='ADMIN_MODE')
-        # self.machine.add_transition(trigger='toggle_read_write', source='ADMIN_MODE', dest='ADMIN_MODE')
-        # self.machine.add_transition(trigger='toggle_removable_media', source='ADMIN_MODE', dest='ADMIN_MODE')
-        
-        # self.machine.add_transition(trigger='set_unattended_autolock', source='ADMIN_MODE', dest='ADMIN_MODE')
-        # self.machine.add_transition(trigger='toggle_user_forced_enrollment', source='ADMIN_MODE', dest='ADMIN_MODE')
+        self.toggle_basic_disk: Callable
+        self.toggle_removable_media: Callable
+        self.enable_led_flicker: Callable
+        self.disable_led_flicker: Callable
+        self.toggle_lock_override: Callable
+        self.enable_provision_lock: Callable
+        self.toggle_read_only: Callable
+        self.toggle_read_write: Callable
+        self.enable_self_destruct: Callable
+        self.toggle_user_forced_enrollment: Callable
+        self.machine.add_transition(trigger='toggle_basic_disk', source='ADMIN_MODE', dest='ADMIN_MODE', before='basic_disk_toggle')
+        self.machine.add_transition(trigger='toggle_removable_media', source='ADMIN_MODE', dest='ADMIN_MODE', before='removable_media_toggle')
+        self.machine.add_transition(trigger='enable_led_Flicker', source='ADMIN_MODE', dest='ADMIN_MODE', before='led_flicker_enable')
+        self.machine.add_transition(trigger='disable_led_Flicker', source='ADMIN_MODE', dest='ADMIN_MODE', before='led_flicker_disable')
+        self.machine.add_transition(trigger='delete_pins', source='ADMIN_MODE', dest='ADMIN_MODE', before='delete_pins_toggle')
+        self.machine.add_transition(trigger='toggle_lock_override', source='ADMIN_MODE', dest='ADMIN_MODE', before='lock_override_toggle')
+        self.machine.add_transition(trigger='enable_provision_lock', source='ADMIN_MODE', dest='ADMIN_MODE', before='provision_lock_toggle')
+        self.machine.add_transition(trigger='toggle_read_only', source='ADMIN_MODE', dest='ADMIN_MODE', before='read_only_toggle')
+        self.machine.add_transition(trigger='toggle_read_write', source='ADMIN_MODE', dest='ADMIN_MODE', before='read_write_toggle')
+        self.machine.add_transition(trigger='enable_self_destruct', source='ADMIN_MODE', dest='ADMIN_MODE', before='self_destruct_toggle')
+        self.machine.add_transition(trigger='toggle_user_forced_enrollment', source='ADMIN_MODE', dest='ADMIN_MODE', before='user_forced_enrollment_toggle')
 
         # --- Admin Mode Transition ---
         self.enroll_admin: Callable
         self.lock_admin: Callable
         
-
         # --- Admin Enum Transition ---
         self.unlock_admin: Callable
 
@@ -712,4 +721,180 @@ class SimplifiedDeviceFSM:
 
         DUT.recoveryPIN[next_available_slot] = new_pin
         self.logger.info(f"Successfully enrolled recovery PIN for logical slot {next_available_slot}.")
+
+
+
+
+    def basic_disk_toggle(self, event_data: EventData) -> None:
+        dest_state = event_data.transition.dest if event_data.transition else "UNKNOWN"
+        context = {'fsm_current_state': self.state, 'fsm_destination_state': dest_state}
+        
+        self.logger.info(f"Toggling Basic Disk Mode...")
+        self.at.press(['key2', 'key3'])
+        if not self.at.await_and_confirm_led_pattern(LEDs['ACCEPT_PATTERN'], timeout=5.0, replay_extra_context=context):
+            raise TransitionCallbackError("Did not observe ACCEPT_PATTERN for Basic Disk toggle.")
+        else:
+            DUT.basicDisk = True
+            self.logger.info(f"Basic Disk Mode toggled. New state: {DUT.basicDisk}")
+
+    def removable_media_toggle(self, event_data: EventData) -> None:
+        dest_state = event_data.transition.dest if event_data.transition else "UNKNOWN"
+        context = {'fsm_current_state': self.state, 'fsm_destination_state': dest_state}
+        
+        self.logger.info(f"Toggling Removable Media Mode...")
+        self.at.press(['key3', 'key7'])
+        if not self.at.await_and_confirm_led_pattern(LEDs['ACCEPT_PATTERN'], timeout=5.0, replay_extra_context=context):
+            raise TransitionCallbackError("Did not observe ACCEPT_PATTERN for Removable Media toggle.")
+        else:
+            DUT.basicDisk = True
+            self.logger.info(f"Removable Media Mode toggled. New state: {DUT.basicDisk}")
+
+    def led_flicker_enable(self, event_data: EventData) -> None:
+        dest_state = event_data.transition.dest if event_data.transition else "UNKNOWN"
+        context = {'fsm_current_state': self.state, 'fsm_destination_state': dest_state}
+        
+        self.logger.info(f"Enabling LED Flicker Mode...")
+        self.at.press(['key0', 'key3'])
+        if not self.at.await_and_confirm_led_pattern(LEDs['ACCEPT_PATTERN'], timeout=5.0, replay_extra_context=context):
+            raise TransitionCallbackError("Did not observe ACCEPT_PATTERN for LED Flicker toggle.")
+        else:
+            DUT.ledFlicker = True
+            self.logger.info(f"LED Flicker Mode enabled...")
+
+    def led_flicker_disable(self, event_data: EventData) -> None:
+        dest_state = event_data.transition.dest if event_data.transition else "UNKNOWN"
+        context = {'fsm_current_state': self.state, 'fsm_destination_state': dest_state}
+        
+        self.logger.info(f"Disabling LED Flicker Mode...")
+        self.at.press(['key0', 'key3'])
+        if not self.at.await_and_confirm_led_pattern(LEDs['ACCEPT_PATTERN'], timeout=5.0, replay_extra_context=context):
+            raise TransitionCallbackError("Did not observe ACCEPT_PATTERN for LED Flicker toggle.")
+        else:
+            DUT.ledFlicker = False
+            self.logger.info(f"LED Flicker Mode disabled...")
+
+    def lock_override_toggle(self, event_data: EventData) -> None:
+        dest_state = event_data.transition.dest if event_data.transition else "UNKNOWN"
+        context = {'fsm_current_state': self.state, 'fsm_destination_state': dest_state}
+        
+        self.logger.info(f"Disabling LED Flicker Mode...")
+        self.at.press(['key0', 'key3'])
+        if not self.at.await_and_confirm_led_pattern(LEDs['ACCEPT_PATTERN'], timeout=5.0, replay_extra_context=context):
+            raise TransitionCallbackError("Did not observe ACCEPT_PATTERN for LED Flicker toggle.")
+        else:
+            DUT.ledFlicker = False
+            self.logger.info(f"LED Flicker Mode disabled...")
+
+    def provision_lock_toggle(self, event_data: EventData) -> None:
+        dest_state = event_data.transition.dest if event_data.transition else "UNKNOWN"
+        context = {'fsm_current_state': self.state, 'fsm_destination_state': dest_state}
+        
+        if DUT.selfDestructEnabled:
+            self.logger.info(f"Toggling Provision Lock with Self-Destruct enabled...")
+            self.at.press(['key2', 'key5'])
+            if not self.at.await_and_confirm_led_pattern(LEDs['REJECT'], timeout=5.0, replay_extra_context=context):
+                raise TransitionCallbackError("Did not observe REJECT_PATTERN for Provision Lock toggle with Self-Destruct enabled.")
+        else:
+            self.logger.info(f"Toggling Provision Lock...")
+            self.at.press(['key2', 'key5'])
+            if not self.at.await_and_confirm_led_pattern(LEDs['ACCEPT_PATTERN'], timeout=5.0, replay_extra_context=context):
+                raise TransitionCallbackError("Did not observe ACCEPT_PATTERN for Provision Lock toggle.")
+            else:
+                DUT.provisionLock = not DUT.provisionLock
+                self.logger.info(f"Provision Lock toggled. New state: {DUT.provisionLock}")
+
+    def read_only_toggle(self, event_data: EventData) -> None:
+        dest_state = event_data.transition.dest if event_data.transition else "UNKNOWN"
+        context = {'fsm_current_state': self.state, 'fsm_destination_state': dest_state}
+        
+        self.logger.info(f"Toggling Read-Only Mode...")
+        self.at.press(['key6', 'key7'])
+        if not self.at.await_and_confirm_led_pattern(LEDs['ACCEPT_PATTERN'], timeout=5.0, replay_extra_context=context):
+            raise TransitionCallbackError("Did not observe ACCEPT_PATTERN for Read-Only toggle.")
+        else:
+            DUT.readOnlyEnabled = True
+            self.logger.info(f"Read-Only Mode toggled. New state: {DUT.readOnlyEnabled}")
+
+    def read_write_toggle(self, event_data: EventData) -> None:
+        dest_state = event_data.transition.dest if event_data.transition else "UNKNOWN"
+        context = {'fsm_current_state': self.state, 'fsm_destination_state': dest_state}
+        
+        self.logger.info(f"Toggling to Read-Write Mode...")
+        self.at.press(['key7', 'key9'])
+        if not self.at.await_and_confirm_led_pattern(LEDs['ACCEPT_PATTERN'], timeout=5.0, replay_extra_context=context):
+            raise TransitionCallbackError("Did not observe ACCEPT_PATTERN for Read-Write toggle.")
+        else:
+            DUT.readOnlyEnabled = False
+            self.logger.info(f"Read-Write Mode set. New readOnlyEnabled state: {DUT.readOnlyEnabled}")
+
+    def unattended_auto_lock_enrollment(self, event_data: EventData) -> None:
+        # The counter value (0-3) is passed in via 'new_counter' to maintain the calling convention.
+        counter = event_data.kwargs.get('new_counter')
+        if not counter or not isinstance(counter, int):
+            raise TransitionCallbackError("Unattended Auto-Lock Enrollment requires a 'new_counter' integer.")            
+        if len(str(counter)) != 1:
+            raise TransitionCallbackError("Unattended Auto-Lock Enrollment requires a single digit (0-3).")
+        
+        dest_state = event_data.transition.dest if event_data.transition else "UNKNOWN"
+        context = {'fsm_current_state': self.state, 'fsm_destination_state': dest_state}
+        
+        self.logger.info(f"Entering Unattended Auto-Lock Enrollment...")
+        self.at.press(['unlock', 'key6'], duration_ms=6000)
+        if not self.at.await_and_confirm_led_pattern(LEDs['RED_COUNTER'], timeout=5.0, replay_extra_context=context):
+            raise TransitionCallbackError("Did not observe Unattended Auto-Lock Enrollment pattern.")
+        
+        self.at.press(f"key{counter}")
+
+        # Validate the input range. The condition is the inverse of the valid range (-1 < counter < 4).
+        if counter < 0 or counter > 3:
+            if not self.at.await_and_confirm_led_pattern(LEDs['REJECT'], timeout=5.0, replay_extra_context=context):
+                raise TransitionCallbackError("Did not observe REJECT_PATTERN for invalid Unattended Auto-Lock value.")
+        else:
+            if not self.at.await_and_confirm_led_pattern(LEDs['ACCEPT_PATTERN'], timeout=5.0, replay_extra_context=context):
+                raise TransitionCallbackError("Did not observe ACCEPT_PATTERN for setting Auto-Lock to 0.")
+            else:
+                DUT.unattendedAutoLockCounter = counter
+                self.logger.info(f"Unattended Auto-Lock counter set to: {counter}")
+
+    def user_forced_enrollment_toggle(self, event_data: EventData) -> None:
+        dest_state = event_data.transition.dest if event_data.transition else "UNKNOWN"
+        context = {'fsm_current_state': self.state, 'fsm_destination_state': dest_state}
+        
+        if not DUT.userForcedEnrollment:
+            self.logger.info(f"Toggling User-Forced Enrollment...")
+            self.at.press(['key0', 'key1'])
+            if not self.at.await_and_confirm_led_pattern(LEDs['ACCEPT_PATTERN'], timeout=5.0, replay_extra_context=context):
+                raise TransitionCallbackError("Did not observe ACCEPT_PATTERN for User-Forced Enrollment toggle.")
+            else:
+                DUT.userForcedEnrollment = True
+                self.logger.info(f"User-Forced Enrollment toggled. New state: {DUT.userForcedEnrollment}")
+        else:
+            self.logger.info(f"Toggling User-Forced Enrollment with User-Forced Enrollment enabled...")
+            self.at.press(['key0', 'key1'])
+            if not self.at.await_and_confirm_led_pattern(LEDs['REJECT_PATTERN'], timeout=5.0, replay_extra_context=context):
+                raise TransitionCallbackError("Did not observe REJECT_PATTERN for User-Forced Enrollment toggle.")
+            else:
+                self.logger.info(f"User-Forced Enrollment cannot be disabled using this toggle...")
+
+    def delete_pins_toggle(self, event_data: EventData) -> None:
+        dest_state = event_data.transition.dest if event_data.transition else "UNKNOWN"
+        context = {'fsm_current_state': self.state, 'fsm_destination_state': dest_state}
+        
+        if not DUT.userForcedEnrollment:
+            self.logger.info(f"Toggling Delete PINs...")
+            self.at.press(['key7', 'key8'], duration_ms=6000)
+            if not self.at.await_and_confirm_led_pattern(LEDs['ACCEPT_PATTERN'], timeout=5.0, replay_extra_context=context):
+                raise TransitionCallbackError("Did not observe ACCEPT_PATTERN for Delete PINs toggle.")
+            else:
+                if not self.at.await_and_confirm_led_pattern(LEDs['RED_BLUE'], timeout=5.0, replay_extra_context=context):
+                    raise TransitionCallbackError("Did not observe RED_BLUE for Delete PINs initiation.")
+                else:
+                    self.at.press(['key7', 'key8'], duration_ms=6000)
+                    if not self.at.confirm_led_solid(LEDs["ACCEPT_STATE"], minimum=1, timeout=3, replay_extra_context=context):
+                        raise TransitionCallbackError("Did not observe final ACCEPT_PATTERN for recovery PIN confirmation.")
+                    else:
+                        self.logger.info(f"Delete PINs toggled. PINs deleted...")
+
+
+
 
