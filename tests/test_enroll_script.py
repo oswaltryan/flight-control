@@ -59,7 +59,6 @@ def mock_fsm(mock_dut): # MODIFICATION: The FSM fixture now depends on the DUT f
     fsm.lock_user.side_effect = lambda: set_state('STANDBY_MODE')
     fsm.unlock_admin.side_effect = lambda: set_state('UNLOCKED_ADMIN')
     fsm.lock_admin.side_effect = lambda: set_state('ADMIN_MODE')
-    fsm.enroll_user_pin.return_value = 1 
     
     return fsm
 
@@ -77,7 +76,7 @@ def test_enroll_script_logic(mock_fsm, mock_dut):
     assert mock_fsm.power_on.call_count == 2
     
     mock_fsm.enroll_admin.assert_called_once()
-    assert mock_fsm.enroll_user_pin.call_count == 4
+    assert mock_fsm.enroll_user.call_count == 4
     mock_fsm.power_off.assert_called_once()
     assert mock_fsm.unlock_user.call_count == 4
     assert mock_fsm.lock_user.call_count == 4

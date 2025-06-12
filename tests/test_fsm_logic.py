@@ -1,6 +1,13 @@
 # Directory: tests/
 # Filename: test_fsm_logic.py
 
+#############################################################
+##
+## Run this test with the following command:
+## pytest --cov=controllers.flight_control_fsm --cov-report term-missing
+##
+#############################################################
+
 import pytest
 from unittest.mock import MagicMock, call, ANY
 from camera.led_dictionaries import LEDs
@@ -156,6 +163,33 @@ def test_user_enrollment_fails_on_hw_check(fsm, mock_at, dut_instance):
     assert fsm.state == 'ADMIN_MODE'
     mock_at.press.assert_called_with(['unlock', 'key1'])
     mock_at.sequence.assert_not_called()
+
+def test_user_enrollment_fails_if_no_user_pin(fsm, mock_at, dut_instance):
+    """
+    Tests that user enrollment fails if all user PIN slots are already full.
+    The FSM should not allow the transition.
+    With auto_transitions=True, the trigger should return False.
+    """
+    # GIVEN: All user PIN slots are pre-filled (no available slots)
+    # GIVEN: The FSM is in admin mode and all user PIN slots are full.
+    fsm.state = 'ADMIN_MODE'
+    for i in range(1, 5): # Fill all 4 user slots
+        dut_instance.userPIN[i] = [f'key{i}', 'key1', 'key2']
+    new_pin_attempt = ['key9', 'key9', 'key9', 'key9', 'key9', 'key9', 'key9']
+
+    # WHEN / THEN: Calling enroll_user should raise a MachineError
+    fsm.enroll_user(new_pin=new_pin_attempt)
+    # Verify that no hardware actions were attempted for this enrollment
+    # WHEN: We attempt to enroll another user
+    result = fsm.enroll_user(new_pin=new_pin_attempt)
+
+    # THEN:
+    # 1. The trigger method should return False, indicating the condition was not met.
+    assert result is False
+    # 2. The FSM's state should not have changed.
+    assert fsm.state == 'ADMIN_MODE'
+    # 3. The 'before' callback ('user_enrollment') should not have been called.
+    mock_at.press.assert_not_called()
 
 def test_lock_from_admin_mode(fsm, mock_at):
     """Test locking the device from ADMIN_MODE returns it to STANDBY_MODE."""
@@ -557,7 +591,7 @@ def test_brute_force_entry_at_halfway_point(fsm, mock_at, dut_instance):
     """
     # GIVEN
     dut_instance.bruteForceCounter = 20
-    initial_attempts = dut_instance.bruteForceCurrent = 11
+    dut_instance.bruteForceCurrent = 11
     fsm.state = 'STANDBY_MODE'
     mock_at.await_and_confirm_led_pattern.return_value = True
 
@@ -565,7 +599,7 @@ def test_brute_force_entry_at_halfway_point(fsm, mock_at, dut_instance):
     fsm.fail_unlock()
 
     # THEN
-    assert dut_instance.bruteForceCurrent == initial_attempts - 1
+    assert dut_instance.bruteForceCurrent == dut_instance.bruteForceCounter / 2
     assert fsm.state == 'BRUTE_FORCE'
 
 
@@ -578,7 +612,7 @@ def test_brute_force_final_attempt_and_entry(fsm, mock_at, dut_instance):
     """
     # GIVEN
     dut_instance.bruteForceCounter = 20
-    initial_attempts = dut_instance.bruteForceCurrent = 1
+    dut_instance.bruteForceCurrent = 1
     fsm.state = 'STANDBY_MODE'
     mock_at.await_and_confirm_led_pattern.return_value = True
 
@@ -588,3 +622,4 @@ def test_brute_force_final_attempt_and_entry(fsm, mock_at, dut_instance):
     # THEN:
     assert dut_instance.bruteForceCurrent == 0
     assert fsm.state == 'BRUTE_FORCE'
+

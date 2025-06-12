@@ -13,8 +13,17 @@ from camera.led_dictionaries import LEDs
 # from transitions import Machine, EventData
 ###
 
-### For generating a diagram
-from transitions.extensions import GraphMachine as Machine
+# --- FSM Machine Type Selection ---
+# This allows us to use a lightweight machine for runtime and tests,
+# and a heavyweight machine for generating diagrams, without affecting the main code.
+DIAGRAM_MODE = os.environ.get('FSM_DIAGRAM_MODE', 'false').lower() == 'true'
+
+if DIAGRAM_MODE:
+    from transitions.extensions import GraphMachine as Machine
+    # This print statement is a helpful confirmation when generating diagrams
+    print("FSM running in DIAGRAM_MODE with GraphMachine.")
+else:
+    from transitions import Machine
 from transitions import EventData
 ###
 
@@ -113,9 +122,9 @@ class DeviceUnderTest:
     adminPIN = []
     oldAdminPIN = []
 
-    recoveryPIN: Dict[int, Dict] = {1: {}, 2: {}, 3: {}, 4: {}}
-    oldRecoveryPIN: Dict[int, Dict] = {1: {}, 2: {}, 3: {}, 4: {}}
-    usedRecovery: Dict[int, bool] = {1: False, 2: False, 3: False, 4: False}
+    recoveryPIN: Dict[int, Optional[List[str]]] = {i: None for i in range(1, 5)}
+    oldRecoveryPIN: Dict[int, Optional[List[str]]] = {i: None for i in range(1, 5)}
+    usedRecovery: Dict[int, bool] = {i: False for i in range(1, 5)}
     
     selfDestructEnabled = False
     selfDestructPIN = []
@@ -124,9 +133,10 @@ class DeviceUnderTest:
     selfDestructUsed = False
 
     userCount = DEVICE_PROPERTIES[device_name]['userCount']
-    userPIN: Dict[int, Optional[List[str]]] = {1: None, 2: None, 3: None, 4: None}
-    oldUserPIN: Dict[int, Optional[List[str]]] = {1: None, 2: None, 3: None, 4: None}
-    enumUser: Dict[int, bool] = {1: False, 2: False, 3: False, 4: False}
+    _max_users = 1 if fips in [2, 3] else 4
+    userPIN: Dict[int, Optional[List[str]]] = {i: None for i in range(1, _max_users + 1)}
+    oldUserPIN: Dict[int, Optional[List[str]]] = {i: None for i in range(1, _max_users + 1)}
+    enumUser: Dict[int, bool] = {i: False for i in range(1, _max_users + 1)}
 
 DUT = DeviceUnderTest()
 
@@ -148,15 +158,21 @@ class SimplifiedDeviceFSM:
         self.logger = logging.getLogger("DeviceFSM.Simplified")
         self.at = at_controller
 
-        self.machine = Machine(
-            model=self,
-            states=SimplifiedDeviceFSM.STATES,
-            initial='OFF',
-            send_event=True,
-            after_state_change='_log_state_change_details',
-            auto_transitions=True, # MODIFICATION: Changed to True to let transitions find on_enter_STATE methods by convention.
-            graph_engine='pygraphviz'
-        )
+        machine_kwargs = {
+            'model': self,
+            'states': SimplifiedDeviceFSM.STATES,
+            'initial': 'OFF',
+            'send_event': True,
+            'after_state_change': '_log_state_change_details',
+            'auto_transitions': True,
+        }
+
+        # Conditionally add the diagramming engine parameter
+        if DIAGRAM_MODE:
+            machine_kwargs['graph_engine'] = 'pygraphviz'
+
+        # Initialize the machine by unpacking the keyword arguments dictionary
+        self.machine = Machine(**machine_kwargs)
 
         # --- TRANSITIONS ---
         # --- Power On/Off Transitions ---
@@ -225,17 +241,21 @@ class SimplifiedDeviceFSM:
         self.machine.add_transition(trigger='user_reset', source='BRUTE_FORCE', dest='OOB_MODE', conditions=[lambda _: not DUT.provisionLock])
         self.machine.add_transition(trigger='admin_recovery_failed', source='BRUTE_FORCE', dest='BRICKED')
         
-        # --- Admin Mode Transitions ---
+        # --- Admin Mode Enrollment Transitions ---
         self.user_reset: Callable
+        self.set_brute_force_counter: Callable
+        self.enable_self_destruct: Callable
+        self.enroll_self_destruct: Callable
+        self.set_min_pin_counter: Callable
+        self.enroll_recovery: Callable
         self.machine.add_transition(trigger='user_reset', source='ADMIN_MODE', dest='OOB_MODE', before='do_user_reset')
-        self.machine.add_transition(trigger='enroll_user', source='ADMIN_MODE', dest='ADMIN_MODE', before='user_enrollment')
-
-
-        # self.machine.add_transition(trigger='set_brute_force_counter', source='ADMIN_MODE', dest='ADMIN_MODE')
-        # self.machine.add_transition(trigger='change_admin_pin', source='ADMIN_MODE', dest='ADMIN_MODE')
-        # self.machine.add_transition(trigger='enroll_self_destruct_pin', source='ADMIN_MODE', dest='ADMIN_MODE')
-        # self.machine.add_transition(trigger='set_min_pin_length', source='ADMIN_MODE', dest='ADMIN_MODE')
-        # self.machine.add_transition(trigger='enroll_recovery_pin', source='ADMIN_MODE', dest='ADMIN_MODE')
+        self.machine.add_transition(trigger='enroll_admin', source='ADMIN_MODE', dest='ADMIN_MODE', before='admin_enrollment')
+        self.machine.add_transition(trigger='enroll_user', source='ADMIN_MODE', dest='ADMIN_MODE', before='user_enrollment', conditions=[lambda _: any(pin_value is None for pin_value in DUT.userPIN.values())])
+        self.machine.add_transition(trigger='set_brute_force_counter', source='ADMIN_MODE', dest='ADMIN_MODE', before='brute_force_counter_enrollment')
+        self.machine.add_transition(trigger='enable_self_destruct', source='ADMIN_MODE', dest='ADMIN_MODE', before='self_destruct_toggle')
+        self.machine.add_transition(trigger='enroll_self_destruct', source='ADMIN_MODE', dest='ADMIN_MODE', before='self_destruct_enrollment')
+        self.machine.add_transition(trigger='set_min_pin_counter', source='ADMIN_MODE', dest='ADMIN_MODE', before='min_pin_enrollment')
+        self.machine.add_transition(trigger='enroll_recovery', source='ADMIN_MODE', dest='ADMIN_MODE', before='recovery_pin_enrollment')
 
         # --- Admin Mode Toggle Transitions ---
         # self.machine.add_transition(trigger='toggle_basic_disk', source='ADMIN_MODE', dest='ADMIN_MODE')
@@ -246,7 +266,7 @@ class SimplifiedDeviceFSM:
         # self.machine.add_transition(trigger='toggle_read_only', source='ADMIN_MODE', dest='ADMIN_MODE')
         # self.machine.add_transition(trigger='toggle_read_write', source='ADMIN_MODE', dest='ADMIN_MODE')
         # self.machine.add_transition(trigger='toggle_removable_media', source='ADMIN_MODE', dest='ADMIN_MODE')
-        # self.machine.add_transition(trigger='toggle_self_destruct', source='ADMIN_MODE', dest='ADMIN_MODE')
+        
         # self.machine.add_transition(trigger='set_unattended_autolock', source='ADMIN_MODE', dest='ADMIN_MODE')
         # self.machine.add_transition(trigger='toggle_user_forced_enrollment', source='ADMIN_MODE', dest='ADMIN_MODE')
 
@@ -432,20 +452,20 @@ class SimplifiedDeviceFSM:
         if not self.at.await_and_confirm_led_pattern(LEDs['ENUM'], timeout=15, replay_extra_context=context):
             raise TransitionCallbackError("Failed admin unlock LED pattern.")
 
-    def user_enrollment(self, event_data: EventData) -> int:
+    def user_enrollment(self, event_data: EventData) -> None:
+        dest_state = event_data.transition.dest if event_data.transition else "UNKNOWN"
+        context = {'fsm_current_state': self.state, 'fsm_destination_state': dest_state}
+
         new_pin = event_data.kwargs.get('new_pin')
         if not new_pin or not isinstance(new_pin, list):
             raise TransitionCallbackError("User enrollment requires a 'new_pin' list.")
 
-        max_users = 1 if DUT.fips in [2, 3] else 4
-        next_available_slot = next((i for i in range(1, max_users + 1) if DUT.userPIN.get(i) is None), None)
-
-        if next_available_slot is None:
-            raise TransitionCallbackError(f"Cannot enroll new user. All {max_users} user slots are full.")
-        
+        next_available_slot = next((i for i in DUT.userPIN.keys() if DUT.userPIN.get(i) is None), None)
         self.logger.info(f"Attempting to enroll new user into logical slot #{next_available_slot}...")
-        dest_state = event_data.transition.dest if event_data.transition else "UNKNOWN"
-        context = {'fsm_current_state': self.state, 'fsm_destination_state': dest_state}
+        if next_available_slot is None:
+            if not self.at.await_and_confirm_led_pattern(LEDs['REJECT_PATTERN'], timeout=5.0, replay_extra_context=context):
+                raise TransitionCallbackError("Did not observe REJECT_PATTERN on User PIN Enrollment entry.")
+            raise TransitionCallbackError(f"Enrollment failed as expected: All {len(DUT.userPIN)} user slots are full.")
 
         self.at.press(['unlock', 'key1'])
         if not self.at.await_and_confirm_led_pattern(LEDs['GREEN_BLUE'], timeout=5.0, replay_extra_context=context):
@@ -463,14 +483,16 @@ class SimplifiedDeviceFSM:
         if not self.at.confirm_led_solid(LEDs["ACCEPT_STATE"], minimum=1, timeout=3, replay_extra_context=context):
             raise TransitionCallbackError("Did not observe final ACCEPT_PATTERN for user PIN confirmation.")
         
-        DUT.userPIN[next_available_slot] = new_pin + ['unlock']
+        DUT.userPIN[next_available_slot] = new_pin
         self.logger.info(f"Successfully enrolled PIN for logical user {next_available_slot}.")
-        return next_available_slot
     
     def enter_user_pin(self, event_data: EventData) -> None:
         user_id = event_data.kwargs.get('user_id')
         if not user_id:
             raise TransitionCallbackError("Unlock user requires a 'user_id' to be passed.")
+        if user_id not in DUT.userPIN:
+            raise TransitionCallbackError(f"Unlock failed: User ID {user_id} is not a valid slot for this device. Available slots: {list(DUT.userPIN.keys())}")
+        
         pin_to_enter = DUT.userPIN.get(user_id)
         if not pin_to_enter:
             raise TransitionCallbackError(f"Unlock failed: No PIN is tracked for logical user {user_id}.")
@@ -542,4 +564,152 @@ class SimplifiedDeviceFSM:
         
         self.logger.info("Device correctly showed REJECT pattern.")
         return True
+    
+    def brute_force_counter_enrollment(self, event_data: EventData) -> None:
+        new_counter = event_data.kwargs.get('new_pin')
+        if not new_counter or not isinstance(new_counter, str):
+            raise TransitionCallbackError("Brute Force Counter Enrollment requires a 'new_counter' str.")
+        if len(new_counter) != 2:
+            raise TransitionCallbackError("Brute Force Counter Enrollment requires two-digits")
         
+        dest_state = event_data.transition.dest if event_data.transition else "UNKNOWN"
+        context = {'fsm_current_state': self.state, 'fsm_destination_state': dest_state}
+
+        BRUTE_FORCE_COUNTER_ENROLLMENT_FEEDBACK = []
+        for iteration in range(int(new_counter)):
+            BRUTE_FORCE_COUNTER_ENROLLMENT_FEEDBACK.append({'red':0, 'green':0, 'blue':0, 'duration': (0.00,  3.0)})
+            BRUTE_FORCE_COUNTER_ENROLLMENT_FEEDBACK.append({'red':0, 'green':1, 'blue':0, 'duration': (0.01,  1.0)})
+        
+        self.logger.info(f"Entering Brute Force Counter Enrollment...")
+        self.at.press(['unlock', 'key5'], duration_ms=6000)
+        if not self.at.await_and_confirm_led_pattern(LEDs['RED_COUNTER'], timeout=5.0, replay_extra_context=context):
+            raise TransitionCallbackError("Did not observe Brute Force Counter Enrollment pattern.")
+        
+        self.at.press(new_counter[0])
+        self.at.press(new_counter[1])
+        if int(new_counter) < 2 or int(new_counter) > 10:
+            if not self.at.await_and_confirm_led_pattern(LEDs['REJECT_PATTERN'], timeout=5.0, replay_extra_context=context):
+                raise TransitionCallbackError("Did not observe REJECT_PATTERN for invalid Brute Force Counter Enrollment value.")
+        else:
+            if not self.at.await_and_confirm_led_pattern(BRUTE_FORCE_COUNTER_ENROLLMENT_FEEDBACK, timeout=5.0, replay_extra_context=context):
+                raise TransitionCallbackError("Did not observe BRUTE_FORCE_COUNTER_ENROLLMENT_FEEDBACKt pattern.")
+        
+    def self_destruct_toggle(self, event_data: EventData) -> None:
+        dest_state = event_data.transition.dest if event_data.transition else "UNKNOWN"
+        context = {'fsm_current_state': self.state, 'fsm_destination_state': dest_state}
+
+        if DUT.provisionLock:
+            self.logger.info(f"Toggling Self-Destruct PIN with Provision Lock enabled...")
+            self.at.press(['key4', 'key7'])
+            if not self.at.await_and_confirm_led_pattern(LEDs['REJECT_PATTERN'], timeout=5.0, replay_extra_context=context):
+                raise TransitionCallbackError("Did not observe REJECT_PATTERN for Self-Destruct toggle with Provision Lock enabled.")
+        else:
+            self.logger.info(f"Toggling Self-Destruct PIN...")
+            self.at.press(['key4', 'key7'])
+            if not self.at.await_and_confirm_led_pattern(LEDs['ACCEPT_PATTERN'], timeout=5.0, replay_extra_context=context):
+                raise TransitionCallbackError("Did not observe ACCEPT_PATTERN for Self-Destruct toggle.")
+            else:
+                DUT.selfDestructEnabled = True
+
+    def self_destruct_enrollment(self, event_data: EventData) -> None:
+        new_pin = event_data.kwargs.get('new_pin')
+        if not new_pin or not isinstance(new_pin, list):
+            raise TransitionCallbackError("Self-Destruct enrollment requires a 'new_pin' list.")
+        
+        dest_state = event_data.transition.dest if event_data.transition else "UNKNOWN"
+        context = {'fsm_current_state': self.state, 'fsm_destination_state': dest_state}
+
+        if not DUT.selfDestructEnabled:
+            self.logger.info(f"Attempting Self-Destruct PIN Enrollment without Self-Destruct enabled...")
+            self.at.press(['key4', 'key7'])
+            if not self.at.await_and_confirm_led_pattern(LEDs['REJECT_PATTERN'], timeout=5.0, replay_extra_context=context):
+                raise TransitionCallbackError("Did not observe REJECT_PATTERN for Self-Destruct toggle with Provision Lock enabled.")
+        else:
+            self.logger.info(f"Entering Self-Destruct PIN Enrollment...")
+            self.at.press(['key3', 'unlock'])
+            if not self.at.await_and_confirm_led_pattern(LEDs['RED_BLUE'], timeout=5.0, replay_extra_context=context):
+                raise TransitionCallbackError("Did not observe RED_BLUE pattern.")
+
+            self.logger.info(f"Entering new Self-Destruct PIN (first time)...")
+            self.at.sequence(new_pin)
+            if not self.at.await_and_confirm_led_pattern(LEDs['ACCEPT_PATTERN'], timeout=5.0, replay_extra_context=context):
+                raise TransitionCallbackError("Did not observe ACCEPT_PATTERN after first PIN entry.")
+            if not self.at.await_and_confirm_led_pattern(LEDs['RED_BLUE'], timeout=5.0, replay_extra_context=context):
+                raise TransitionCallbackError("Did not observe RED_BLUE pattern after first PIN entry.")
+
+            self.logger.info("Re-entering Self-Destruct PIN for confirmation...")
+            self.at.sequence(new_pin)
+            if not self.at.await_led_state(LEDs['ACCEPT_STATE'], timeout=5.0, replay_extra_context=context):
+                raise TransitionCallbackError("Did not observe ACCEPT_PATTERN after PIN confirmation.")
+                
+            DUT.selfDestructPIN = new_pin
+            self.logger.info("Self-Destruct enrollment sequence completed successfully. Updated DUT model.")
+
+    def min_pin_enrollment(self, event_data: EventData) -> None:
+        new_counter = event_data.kwargs.get('new_pin')
+        if not new_counter or not isinstance(new_counter, str):
+            raise TransitionCallbackError("Minimum PIN Length Enrollment requires a 'new_counter' str.")
+        if len(new_counter) != 2:
+            raise TransitionCallbackError("Minimum PIN Length Enrollment requires two-digits")
+        
+        dest_state = event_data.transition.dest if event_data.transition else "UNKNOWN"
+        context = {'fsm_current_state': self.state, 'fsm_destination_state': dest_state}
+
+        self.logger.info(f"Entering Minimum PIN Length Counter Enrollment...")
+        self.at.press(['unlock', 'key4'], duration_ms=6000)
+        if not self.at.await_and_confirm_led_pattern(LEDs['RED_COUNTER'], timeout=5.0, replay_extra_context=context):
+            raise TransitionCallbackError("Did not observe Minimum PIN Length Counter Enrollment pattern.")
+        
+        self.at.press(new_counter[0])
+        self.at.press(new_counter[1])
+
+        if int(new_counter) < DUT.defaultMinPINCounter or int(new_counter) > DUT.maxPINCounter:
+            if not self.at.await_and_confirm_led_pattern(LEDs['REJECT_PATTERN'], timeout=5.0, replay_extra_context=context):
+                raise TransitionCallbackError("Did not observe REJECT_PATTERN for invalid Brute Force Counter Enrollment value.")
+        else:
+            if not self.at.await_and_confirm_led_pattern(LEDs['ACCEPT_PATTERN'], timeout=5.0, replay_extra_context=context):
+                raise TransitionCallbackError("Did not observe ACCEPT_PATTERN after Minimum PIN Length Counter Enrollment.")
+
+    def recovery_enrollment(self, event_data: EventData) -> None:
+        dest_state = event_data.transition.dest if event_data.transition else "UNKNOWN"
+        context = {'fsm_current_state': self.state, 'fsm_destination_state': dest_state}
+
+        new_pin = event_data.kwargs.get('new_pin')
+        if not new_pin or not isinstance(new_pin, list):
+            raise TransitionCallbackError("Recovery enrollment requires a 'new_pin' list.")
+
+        next_available_slot = next((i for i in DUT.recoveryPIN.keys() if DUT.recoveryPIN.get(i) is None), None)
+        
+        # This logic now exactly mirrors your user_enrollment function
+        if next_available_slot is None:
+            self.logger.warning(f"No available recovery slots. This path assumes a REJECT pattern will be shown by the device.")
+            # This check for a REJECT pattern assumes the hardware key press was initiated *before* this check.
+            # Please ensure your calling script triggers the hardware action that would lead to rejection.
+            if not self.at.await_and_confirm_led_pattern(LEDs['REJECT'], timeout=5.0, replay_extra_context=context):
+                raise TransitionCallbackError("Did not observe REJECT_PATTERN on Recovery PIN Enrollment attempt when slots are full.")
+            # Halt execution if all slots are full.
+            raise TransitionCallbackError(f"Enrollment failed as expected: All {len(DUT.recoveryPIN)} recovery slots are full.")
+
+        # If the code reaches here, a slot is available.
+        self.logger.info(f"Attempting to enroll new recovery PIN into logical slot #{next_available_slot}...")
+        
+        # Please ADJUST ['unlock', 'key2'] to the correct physical key combination.
+        self.at.press(['unlock', 'key2'])
+        if not self.at.await_and_confirm_led_pattern(LEDs['GREEN_BLUE'], timeout=5.0, replay_extra_context=context):
+            raise TransitionCallbackError("Did not observe GREEN_BLUE pattern for recovery enrollment.")
+
+        self.logger.info(f"Entering new Recovery PIN (first time)...")
+        self.at.sequence(new_pin)
+        if not self.at.await_and_confirm_led_pattern(LEDs['ACCEPT_PATTERN'], timeout=5.0, replay_extra_context=context):
+            raise TransitionCallbackError("Did not observe ACCEPT_PATTERN after first recovery PIN entry.")
+        if not self.at.await_and_confirm_led_pattern(LEDs['GREEN_BLUE'], timeout=5.0, replay_extra_context=context):
+            raise TransitionCallbackError("Did not observe GREEN_BLUE pattern after first recovery PIN entry.")
+
+        self.logger.info("Re-entering Recovery PIN for confirmation...")
+        self.at.sequence(new_pin)
+        if not self.at.confirm_led_solid(LEDs["ACCEPT_STATE"], minimum=1, timeout=3, replay_extra_context=context):
+            raise TransitionCallbackError("Did not observe final ACCEPT_PATTERN for recovery PIN confirmation.")
+
+        DUT.recoveryPIN[next_available_slot] = new_pin
+        self.logger.info(f"Successfully enrolled recovery PIN for logical slot {next_available_slot}.")
+
