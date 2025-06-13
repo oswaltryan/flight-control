@@ -159,6 +159,92 @@ class SimplifiedDeviceFSM:
         self.logger = logging.getLogger("DeviceFSM.Simplified")
         self.at = at_controller
 
+        # This list is redundant, but necessary for building fsm diagrams
+        transitions = [
+            # --- Power On/Off Transitions ---
+            {'trigger': 'power_on', 'source': 'OFF', 'dest': 'POWER_ON_SELF_TEST', 'before': '_do_power_on'},
+            {'trigger': 'post_fail', 'source': 'POWER_ON_SELF_TEST', 'dest': 'ERROR_MODE'},
+            {'trigger': 'power_off', 'source': '*', 'dest': 'OFF'},
+
+            # --- 'Idle' Mode Transitions (from POST) ---
+            {'trigger': 'post_pass', 'source': 'POWER_ON_SELF_TEST', 'dest': 'OOB_MODE', 'conditions': '_is_not_enrolled'},
+            {'trigger': 'post_pass', 'source': 'POWER_ON_SELF_TEST', 'dest': 'USER_FORCED_ENROLLMENT', 'conditions': '_is_user_forced_enrollment_active'},
+            {'trigger': 'post_pass', 'source': 'POWER_ON_SELF_TEST', 'dest': 'BRUTE_FORCE', 'conditions': '_is_brute_forced_on_boot'},
+            {'trigger': 'post_pass', 'source': 'POWER_ON_SELF_TEST', 'dest': 'STANDBY_MODE', 'conditions': '_is_enrolled'},
+
+            # --- OOB Mode Transitions ---
+            {'trigger': 'enter_diagnostic_mode', 'source': 'OOB_MODE', 'dest': 'DIAGNOSTIC_MODE'},
+            {'trigger': 'exit_diagnostic_mode', 'source': 'DIAGNOSTIC_MODE', 'dest': 'OOB_MODE', 'conditions': '_is_not_enrolled'},
+            {'trigger': 'enroll_admin', 'source': 'OOB_MODE', 'dest': 'ADMIN_MODE', 'before': '_admin_enrollment'},
+            {'trigger': 'user_reset', 'source': 'OOB_MODE', 'dest': 'OOB_MODE', 'conditions': '_is_provision_lock_inactive'},
+
+            # --- Standby Mode Transitions ---
+            {'trigger': 'admin_mode_login', 'source': 'STANDBY_MODE', 'dest': 'ADMIN_MODE', 'before': '_enter_admin_mode'},
+            {'trigger': 'lock_admin', 'source': 'ADMIN_MODE', 'dest': 'STANDBY_MODE', 'before': '_press_lock_button'},
+            {'trigger': 'unlock_admin', 'source': 'STANDBY_MODE', 'dest': 'UNLOCKED_ADMIN', 'before': '_enter_admin_pin'},
+            {'trigger': 'lock_admin', 'source': 'UNLOCKED_ADMIN', 'dest': 'STANDBY_MODE', 'before': '_press_lock_button'},
+            {'trigger': 'enter_diagnostic_mode', 'source': 'STANDBY_MODE', 'dest': 'DIAGNOSTIC_MODE'},
+            {'trigger': 'self_destruct', 'source': 'STANDBY_MODE', 'dest': 'UNLOCKED_ADMIN', 'before': '_enter_self_destruct_pin'},
+            {'trigger': 'exit_diagnostic_mode', 'source': 'DIAGNOSTIC_MODE', 'dest': 'STANDBY_MODE', 'conditions': '_is_enrolled'},
+            {'trigger': 'user_reset', 'source': 'STANDBY_MODE', 'dest': 'OOB_MODE', 'conditions': '_is_provision_lock_inactive'},
+            {'trigger': 'unlock_user', 'source': 'STANDBY_MODE', 'dest': 'UNLOCKED_USER', 'before': '_enter_user_pin'},
+            {'trigger': 'lock_user', 'source': 'UNLOCKED_USER', 'dest': 'STANDBY_MODE', 'before': '_press_lock_button'},
+            {'trigger': 'fail_unlock', 'source': 'STANDBY_MODE', 'dest': 'STANDBY_MODE', 'before': '_enter_invalid_pin', 'conditions': '_is_not_at_brute_force_threshold'},
+            {'trigger': 'fail_unlock', 'source': 'STANDBY_MODE', 'dest': 'BRUTE_FORCE', 'before': '_enter_invalid_pin', 'conditions': '_is_brute_force_midpoint_or_final'},
+
+            # --- User-Forced Enrollment Mode Transitions ---
+            {'trigger': 'admin_mode_login', 'source': 'USER_FORCED_ENROLLMENT', 'dest': 'ADMIN_MODE', 'before': '_enter_admin_mode'},
+            {'trigger': 'lock_admin', 'source': 'ADMIN_MODE', 'dest': 'USER_FORCED_ENROLLMENT', 'before': '_press_lock_button'},
+            {'trigger': 'unlock_admin', 'source': 'USER_FORCED_ENROLLMENT', 'dest': 'UNLOCKED_ADMIN', 'before': '_enter_admin_pin'},
+            {'trigger': 'lock_admin', 'source': 'UNLOCKED_ADMIN', 'dest': 'USER_FORCED_ENROLLMENT', 'before': '_press_lock_button'},
+            {'trigger': 'enroll_user', 'source': 'USER_FORCED_ENROLLMENT', 'dest': 'STANDBY_MODE', 'before': '_user_enrollment'},
+            {'trigger': 'enter_diagnostic_mode', 'source': 'USER_FORCED_ENROLLMENT', 'dest': 'DIAGNOSTIC_MODE'},
+            {'trigger': 'exit_diagnostic_mode', 'source': 'DIAGNOSTIC_MODE', 'dest': 'USER_FORCED_ENROLLMENT', 'conditions': '_is_user_forced_enrollment_active'},
+            {'trigger': 'self_destruct', 'source': 'USER_FORCED_ENROLLMENT', 'dest': 'UNLOCKED_ADMIN', 'before': '_enter_self_destruct_pin'},
+            {'trigger': 'user_reset', 'source': 'USER_FORCED_ENROLLMENT', 'dest': 'OOB_MODE', 'conditions': '_is_provision_lock_inactive'},
+            {'trigger': 'unlock_user', 'source': 'USER_FORCED_ENROLLMENT', 'dest': 'UNLOCKED_USER', 'before': '_enter_user_pin', 'conditions': '_has_users_enrolled'},
+            {'trigger': 'lock_user', 'source': 'UNLOCKED_USER', 'dest': 'USER_FORCED_ENROLLMENT', 'before': '_press_lock_button'},
+            {'trigger': 'fail_unlock', 'source': 'USER_FORCED_ENROLLMENT', 'dest': 'STANDBY_MODE', 'before': '_enter_invalid_pin', 'conditions': '_is_not_at_brute_force_threshold'},
+            {'trigger': 'fail_unlock', 'source': 'USER_FORCED_ENROLLMENT', 'dest': 'BRUTE_FORCE', 'before': '_enter_invalid_pin', 'conditions': '_is_brute_force_midpoint_or_final'},
+
+            # --- Brute Force Mode Transitions ---
+            {'trigger': 'last_try_login', 'source': 'BRUTE_FORCE', 'dest': 'STANDBY_MODE', 'before': '_enter_last_try_pin', 'conditions': '_is_at_last_try_threshold'},
+            {'trigger': 'user_reset', 'source': 'BRUTE_FORCE', 'dest': 'OOB_MODE', 'conditions': '_is_provision_lock_inactive'},
+            {'trigger': 'admin_recovery_failed', 'source': 'BRUTE_FORCE', 'dest': 'BRICKED'},
+
+            # --- Admin Mode Enrollment Transitions ---
+            {'trigger': 'user_reset', 'source': 'ADMIN_MODE', 'dest': 'OOB_MODE', 'before': '_do_user_reset'},
+            # Counter Enrollments
+            {'trigger': 'enroll_brute_force_counter', 'source': 'ADMIN_MODE', 'dest': 'COUNTER_ENROLLMENT', 'before': '_brute_force_counter_enrollment'},
+            {'trigger': 'enroll_unattended_auto_lock_counter', 'source': 'ADMIN_MODE', 'dest': 'COUNTER_ENROLLMENT', 'before': '_unattended_auto_lock_enrollment'},
+            {'trigger': 'enroll_min_pin_counter', 'source': 'ADMIN_MODE', 'dest': 'COUNTER_ENROLLMENT', 'before': '_min_pin_enrollment'},
+            {'trigger': 'enroll_counter', 'source': 'COUNTER_ENROLLMENT', 'dest': 'ADMIN_MODE', 'before': '_counter_enrollment'},
+            {'trigger': 'timeout_enroll_counter', 'source': 'COUNTER_ENROLLMENT', 'dest': 'ADMIN_MODE', 'before': '_timeout_counter_enrollment'},
+            {'trigger': 'exit_enroll_counter', 'source': 'COUNTER_ENROLLMENT', 'dest': 'ADMIN_MODE', 'before': '_press_lock_button'},
+            # PIN Enrollments
+            {'trigger': 'enroll_admin', 'source': 'ADMIN_MODE', 'dest': 'PIN_ENROLLMENT', 'before': '_admin_enrollment'},
+            {'trigger': 'enroll_user', 'source': 'ADMIN_MODE', 'dest': 'PIN_ENROLLMENT', 'before': '_user_enrollment', 'conditions': '_has_empty_user_slot'},
+            {'trigger': 'enroll_recovery', 'source': 'ADMIN_MODE', 'dest': 'PIN_ENROLLMENT', 'before': '_recovery_pin_enrollment'},
+            {'trigger': 'enroll_self_destruct', 'source': 'ADMIN_MODE', 'dest': 'PIN_ENROLLMENT', 'before': '_self_destruct_pin_enrollment'},
+            {'trigger': 'enroll_pin', 'source': 'PIN_ENROLLMENT', 'dest': 'ADMIN_MODE', 'before': '_pin_enrollment'},
+            {'trigger': 'timeout_enroll_pin', 'source': 'PIN_ENROLLMENT', 'dest': 'ADMIN_MODE', 'before': '_timeout_pin_enrollment'},
+            {'trigger': 'exit_enroll_pin', 'source': 'PIN_ENROLLMENT', 'dest': 'ADMIN_MODE', 'before': '_press_lock_button'},
+
+            # --- Admin Mode Toggle Transitions (Self-Loops) ---
+            {'trigger': 'toggle_basic_disk', 'source': 'ADMIN_MODE', 'dest': 'ADMIN_MODE', 'before': '_basic_disk_toggle'},
+            {'trigger': 'toggle_removable_media', 'source': 'ADMIN_MODE', 'dest': 'ADMIN_MODE', 'before': '_removable_media_toggle'},
+            {'trigger': 'enable_led_Flicker', 'source': 'ADMIN_MODE', 'dest': 'ADMIN_MODE', 'before': '_led_flicker_enable'},
+            {'trigger': 'disable_led_Flicker', 'source': 'ADMIN_MODE', 'dest': 'ADMIN_MODE', 'before': '_led_flicker_disable'},
+            {'trigger': 'delete_pins', 'source': 'ADMIN_MODE', 'dest': 'ADMIN_MODE', 'before': '_delete_pins_toggle'},
+            {'trigger': 'toggle_lock_override', 'source': 'ADMIN_MODE', 'dest': 'ADMIN_MODE', 'before': '_lock_override_toggle'},
+            {'trigger': 'enable_provision_lock', 'source': 'ADMIN_MODE', 'dest': 'ADMIN_MODE', 'before': '_provision_lock_toggle'},
+            {'trigger': 'toggle_read_only', 'source': 'ADMIN_MODE', 'dest': 'ADMIN_MODE', 'before': '_read_only_toggle'},
+            {'trigger': 'toggle_read_write', 'source': 'ADMIN_MODE', 'dest': 'ADMIN_MODE', 'before': '_read_write_toggle'},
+            {'trigger': 'enable_self_destruct', 'source': 'ADMIN_MODE', 'dest': 'ADMIN_MODE', 'before': '_self_destruct_toggle'},
+            {'trigger': 'toggle_user_forced_enrollment', 'source': 'ADMIN_MODE', 'dest': 'ADMIN_MODE', 'before': '_user_forced_enrollment_toggle'},
+        ]
+        self.transition_config = transitions
+
         machine_kwargs = {
             'model': self,
             'states': SimplifiedDeviceFSM.STATES,
