@@ -3,6 +3,7 @@
 
 import os
 import sys
+import inspect  # <--- ADD THIS IMPORT
 from typing import cast
 
 # --- Path Setup ---
@@ -45,20 +46,23 @@ if __name__ == "__main__":
     from controllers.unified_controller import UnifiedController
     from typing import cast
 
-    print("Initializing FSM...")
+    DOCS_DIR = os.path.join(PROJECT_ROOT, 'docs')
+    print(f"Ensuring output directory exists: {DOCS_DIR}")
+    os.makedirs(DOCS_DIR, exist_ok=True)
+
+    print("\nInitializing FSM...")
     mock_at = MockUnifiedController()
 
-    # Create the full FSM instance using the new declarative __init__
     full_fsm_instance = SimplifiedDeviceFSM(at_controller=cast(UnifiedController, mock_at))
 
-    # 1. Generate the complete, detailed diagram. This will now be correct and complete.
-    create_diagram(full_fsm_instance.machine, 'fsm_diagram_full_detail.png', title="Full FSM Diagram")
+    # 1. Generate the complete, detailed diagram
+    full_diagram_path = os.path.join(DOCS_DIR, 'fsm_diagram_full_detail.png')
+    create_diagram(full_fsm_instance.machine, full_diagram_path, title="Full FSM Diagram")
 
-    # 2. Generate a simplified, but still verbose, diagram
+    # 2. Generate a simplified diagram
     print("\nCreating a simplified FSM instance for a high-level diagram...")
     
     high_level_machine = GraphMachine(
-        # model=full_fsm_instance, # <-- REMOVE THIS LINE
         states=full_fsm_instance.STATES,
         initial=full_fsm_instance.state,
         auto_transitions=False,
@@ -66,32 +70,52 @@ if __name__ == "__main__":
         send_event=True
     )
 
-    # Iterate through all the transitions defined in our new list
     for transition_config in full_fsm_instance.transition_config:
         source = transition_config['source']
         dest = transition_config['dest']
 
-        # The key filter: skip self-loops
         if source == dest:
             continue
         
-        # Build a useful label for the diagram
         label = transition_config['trigger']
+        
+        # --- MODIFIED BLOCK TO FIX THE IDE ERROR ---
         if 'conditions' in transition_config:
             conditions = transition_config['conditions']
             if not isinstance(conditions, list):
                 conditions = [conditions]
             
-            condition_names = ", ".join(c for c in conditions)
-            label += f'\n[{condition_names}]'
+            label_parts = []
+            for c in conditions:
+                if isinstance(c, str):
+                    # It's a string name like '_is_not_enrolled', which is perfect.
+                    label_parts.append(c)
+                elif callable(c):
+                    # For callables (like lambdas), get the source code for a better label.
+                    try:
+                        source_code = inspect.getsource(c).strip()
+                        # Clean up 'lambda _: ...' to just be '...'
+                        if source_code.startswith('lambda'):
+                            condition_text = source_code.split(':', 1)[-1].strip()
+                            label_parts.append(condition_text)
+                        else:
+                            # For regular functions, fall back to the (safe) name.
+                            label_parts.append(getattr(c, '__name__', 'unnamed_callable'))
+                    except (TypeError, OSError):
+                        # If inspect fails, fallback to safe name access.
+                        label_parts.append(getattr(c, '__name__', '<callable>'))
+                else:
+                    label_parts.append(str(c)) # Fallback for any other type
 
-        # Add the filtered and labeled transition to our high-level machine
+            condition_names = ", ".join(label_parts)
+            label += f'\n[{condition_names}]'
+        # --- END MODIFIED BLOCK ---
+
         if isinstance(source, list):
             for src in source:
-                # Pass the simple string and ignore the type checker warning
                 high_level_machine.add_transition(trigger=transition_config['trigger'], source=src, dest=dest, label=label) # type: ignore
         else:
-            # Pass the simple string and ignore the type checker warning
             high_level_machine.add_transition(trigger=transition_config['trigger'], source=source, dest=dest, label=label) # type: ignore
 
-    create_diagram(high_level_machine, 'fsm_diagram_high_level.png', title="High-Level FSM Diagram (State Changes Only)")
+    high_level_diagram_path = os.path.join(DOCS_DIR, 'fsm_diagram_high_level.png')
+    create_diagram(high_level_machine, high_level_diagram_path, title="High-Level FSM Diagram (State Changes Only)")
