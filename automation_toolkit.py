@@ -35,7 +35,7 @@ global_at_logger = logging.getLogger("GlobalATController")
 # --- IMPORT CONTROLLERS AND FSM ---
 try:
     from controllers.unified_controller import UnifiedController # controllers is found
-    from controllers.flight_control_fsm import DeviceUnderTest, SimplifiedDeviceFSM # Import your FSM
+    from controllers.flight_control_fsm import DeviceUnderTest, ApricornDeviceFSM # Import your FSM
 except ImportError as e_uc_import:
     global_at_logger.critical(f"Import Error for UnifiedController or FSM: {e_uc_import}. Ensure paths are correct.", exc_info=True)
     raise
@@ -83,7 +83,7 @@ def get_dut():
 fsm = None
 if at: # Only initialize FSM if 'at' was successful
     try:
-        fsm = SimplifiedDeviceFSM(at_controller=at)
+        fsm = ApricornDeviceFSM(at_controller=at)
         global_at_logger.info(f"Global FSM initialized. Initial state: {fsm.state}")
     except Exception as e_fsm_create:
         global_at_logger.critical(f"Failed to create global 'fsm' instance: {e_fsm_create}", exc_info=True)

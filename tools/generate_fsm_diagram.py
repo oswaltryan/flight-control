@@ -41,7 +41,7 @@ def create_diagram(machine_instance, filename, title=""):
 if __name__ == "__main__":
     os.environ['FSM_DIAGRAM_MODE'] = 'true'
 
-    from controllers.flight_control_fsm import SimplifiedDeviceFSM
+    from controllers.flight_control_fsm import ApricornDeviceFSM
     from transitions.extensions import GraphMachine
     from controllers.unified_controller import UnifiedController
     from typing import cast
@@ -53,7 +53,7 @@ if __name__ == "__main__":
     print("\nInitializing FSM...")
     mock_at = MockUnifiedController()
 
-    full_fsm_instance = SimplifiedDeviceFSM(at_controller=cast(UnifiedController, mock_at))
+    full_fsm_instance = ApricornDeviceFSM(at_controller=cast(UnifiedController, mock_at))
 
     # 1. Generate the complete, detailed diagram
     full_diagram_path = os.path.join(DOCS_DIR, 'fsm_diagram_full_detail.png')

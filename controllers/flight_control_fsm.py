@@ -141,7 +141,7 @@ class DeviceUnderTest:
 DUT = DeviceUnderTest()
 
 ## --- FSM Class Definition ---
-class SimplifiedDeviceFSM:
+class ApricornDeviceFSM:
 
     STATES: List[str] = ['OFF', 'POWER_ON_SELF_TEST', 'ERROR_MODE', 'BRUTE_FORCE', 'BRICKED', 'OOB_MODE', 'STANDBY_MODE', 'USER_FORCED_ENROLLMENT',
                          'UNLOCKED_ADMIN', 'UNLOCKED_USER',
@@ -162,9 +162,9 @@ class SimplifiedDeviceFSM:
         # This list is redundant, but necessary for building fsm diagrams
         transitions = [
             # --- Power On/Off Transitions ---
-            {'trigger': 'power_on', 'source': 'OFF', 'dest': 'POWER_ON_SELF_TEST', 'before': '_do_power_on'},
+            {'trigger': 'power_on', 'source': 'OFF', 'dest': 'POWER_ON_SELF_TEST', 'before': '_power_toggle'},
             {'trigger': 'post_fail', 'source': 'POWER_ON_SELF_TEST', 'dest': 'ERROR_MODE'},
-            {'trigger': 'power_off', 'source': '*', 'dest': 'OFF'},
+            {'trigger': 'power_off', 'source': '*', 'dest': 'OFF', 'before': '_power_toggle'},
 
             # --- 'Idle' Mode Transitions (from POST) ---
             {'trigger': 'post_pass', 'source': 'POWER_ON_SELF_TEST', 'dest': 'OOB_MODE', 'conditions': '_is_not_enrolled'},
@@ -179,7 +179,7 @@ class SimplifiedDeviceFSM:
             {'trigger': 'user_reset', 'source': 'OOB_MODE', 'dest': 'OOB_MODE', 'conditions': '_is_provision_lock_inactive'},
 
             # --- Standby Mode Transitions ---
-            {'trigger': 'admin_mode_login', 'source': 'STANDBY_MODE', 'dest': 'ADMIN_MODE', 'before': '_enter_admin_mode'},
+            {'trigger': 'admin_mode_login', 'source': 'STANDBY_MODE', 'dest': 'ADMIN_MODE', 'before': '_enter_admin_mode_login'},
             {'trigger': 'lock_admin', 'source': 'ADMIN_MODE', 'dest': 'STANDBY_MODE', 'before': '_press_lock_button'},
             {'trigger': 'unlock_admin', 'source': 'STANDBY_MODE', 'dest': 'UNLOCKED_ADMIN', 'before': '_enter_admin_pin'},
             {'trigger': 'lock_admin', 'source': 'UNLOCKED_ADMIN', 'dest': 'STANDBY_MODE', 'before': '_press_lock_button'},
@@ -193,7 +193,7 @@ class SimplifiedDeviceFSM:
             {'trigger': 'fail_unlock', 'source': 'STANDBY_MODE', 'dest': 'BRUTE_FORCE', 'before': '_enter_invalid_pin', 'conditions': '_is_brute_force_midpoint_or_final'},
 
             # --- User-Forced Enrollment Mode Transitions ---
-            {'trigger': 'admin_mode_login', 'source': 'USER_FORCED_ENROLLMENT', 'dest': 'ADMIN_MODE', 'before': '_enter_admin_mode'},
+            {'trigger': 'admin_mode_login', 'source': 'USER_FORCED_ENROLLMENT', 'dest': 'ADMIN_MODE', 'before': '_enter_admin_mode_login'},
             {'trigger': 'lock_admin', 'source': 'ADMIN_MODE', 'dest': 'USER_FORCED_ENROLLMENT', 'before': '_press_lock_button'},
             {'trigger': 'unlock_admin', 'source': 'USER_FORCED_ENROLLMENT', 'dest': 'UNLOCKED_ADMIN', 'before': '_enter_admin_pin'},
             {'trigger': 'lock_admin', 'source': 'UNLOCKED_ADMIN', 'dest': 'USER_FORCED_ENROLLMENT', 'before': '_press_lock_button'},
@@ -247,7 +247,7 @@ class SimplifiedDeviceFSM:
 
         machine_kwargs = {
             'model': self,
-            'states': SimplifiedDeviceFSM.STATES,
+            'states': ApricornDeviceFSM.STATES,
             'initial': 'OFF',
             'send_event': True,
             'after_state_change': '_log_state_change_details',
@@ -262,34 +262,65 @@ class SimplifiedDeviceFSM:
         self.machine = Machine(**machine_kwargs)
 
         # --- TRANSITIONS ---
-        # --- Power On/Off Transitions ---
-        self.power_on: Callable
+        self.admin_mode_login: Callable
+        self.admin_recovery_failed: Callable
+        self.delete_pins: Callable
+        self.disable_led_Flicker: Callable
+        self.enable_led_Flicker: Callable
+        self.enable_provision_lock: Callable
+        self.enable_self_destruct: Callable
+        self.enroll_admin: Callable
+        self.enroll_brute_force_counter: Callable
+        self.enroll_counter: Callable
+        self.enroll_min_pin_counter: Callable
+        self.enroll_pin: Callable
+        self.enroll_recovery: Callable
+        self.enroll_self_destruct: Callable
+        self.enroll_unattended_auto_lock_counter: Callable
+        self.enroll_user: Callable
+        self.enter_diagnostic_mode: Callable
+        self.exit_diagnostic_mode: Callable
+        self.exit_enroll_counter: Callable
+        self.exit_enroll_pin: Callable
+        self.fail_unlock: Callable
+        self.last_try_login: Callable
+        self.lock_admin: Callable
+        self.lock_user: Callable
         self.post_fail: Callable
+        self.post_pass: Callable
         self.power_off: Callable
-        self.machine.add_transition(trigger='power_on', source='OFF', dest='POWER_ON_SELF_TEST', before='_do_power_on')
+        self.power_on: Callable
+        self.self_destruct: Callable
+        self.timeout_enroll_counter: Callable
+        self.timeout_enroll_pin: Callable
+        self.toggle_basic_disk: Callable
+        self.toggle_lock_override: Callable
+        self.toggle_read_only: Callable
+        self.toggle_read_write: Callable
+        self.toggle_removable_media: Callable
+        self.toggle_user_forced_enrollment: Callable
+        self.unlock_admin: Callable
+        self.unlock_user: Callable
+        self.user_reset: Callable
+
+        self.machine.add_transition(trigger='power_on', source='OFF', dest='POWER_ON_SELF_TEST', before='_power_toggle')
         self.machine.add_transition(trigger='post_fail', source='POWER_ON_SELF_TEST', dest='ERROR_MODE')
-        self.machine.add_transition(trigger='power_off', source="*", dest='OFF')
+        self.machine.add_transition(trigger='power_off', source="*", dest='OFF', before='_power_toggle')
 
         # --- 'Idle' Mode Transitions ---
-        self.post_pass: Callable
         self.machine.add_transition(trigger='post_pass', source='POWER_ON_SELF_TEST', dest='OOB_MODE', conditions=[lambda _: not DUT.adminPIN])
         self.machine.add_transition(trigger='post_pass', source='POWER_ON_SELF_TEST', dest='USER_FORCED_ENROLLMENT', conditions=[lambda _: bool(DUT.userForcedEnrollment)])
         self.machine.add_transition(trigger='post_pass', source='POWER_ON_SELF_TEST', dest='BRUTE_FORCE', conditions=[lambda _: DUT.bruteForceCounter == 0])
         self.machine.add_transition(trigger='post_pass', source='POWER_ON_SELF_TEST', dest='STANDBY_MODE', conditions=[lambda _: bool(DUT.adminPIN)])
 
         # --- OOB Mode Transitions ---
-        self.enter_diagnostic_mode: Callable
-        self.exit_diagnostic_mode: Callable
-        self.enroll_admin: Callable
-        self.user_reset: Callable
         self.machine.add_transition(trigger='enter_diagnostic_mode', source='OOB_MODE', dest='DIAGNOSTIC_MODE')
         self.machine.add_transition(trigger='exit_diagnostic_mode', source='DIAGNOSTIC_MODE', dest='OOB_MODE', conditions=[lambda _: not DUT.adminPIN])
         self.machine.add_transition(trigger='enroll_admin', source='OOB_MODE', dest='ADMIN_MODE', before='_admin_enrollment')
         self.machine.add_transition(trigger='user_reset', source='OOB_MODE', dest='OOB_MODE', conditions=[lambda _: not DUT.provisionLock])
- 
+
         # --- Standby Mode Transitions ---
-        self.fail_unlock: Callable
-        self.machine.add_transition(trigger='admin_mode_login', source='STANDBY_MODE', dest='ADMIN_MODE', before='_enter_admin_mode')
+        self.machine.add_transition(trigger='admin_mode_login', source='STANDBY_MODE', dest='ADMIN_MODE', before='_enter_admin_mode_login')
         self.machine.add_transition(trigger='lock_admin', source='ADMIN_MODE', dest='STANDBY_MODE', before='_press_lock_button')
         self.machine.add_transition(trigger='unlock_admin', source='STANDBY_MODE', dest='UNLOCKED_ADMIN', before='_enter_admin_pin')
         self.machine.add_transition(trigger='lock_admin', source='UNLOCKED_ADMIN', dest='STANDBY_MODE', before='_press_lock_button')
@@ -301,15 +332,9 @@ class SimplifiedDeviceFSM:
         self.machine.add_transition(trigger='lock_user', source='UNLOCKED_USER', dest='STANDBY_MODE', before='_press_lock_button')
         self.machine.add_transition(trigger='fail_unlock', source='STANDBY_MODE', dest='STANDBY_MODE', before='_enter_invalid_pin', conditions=[lambda _: DUT.bruteForceCurrent > 1 and not (DUT.bruteForceCurrent == (DUT.bruteForceCounter/2)+1)])
         self.machine.add_transition(trigger='fail_unlock', source='STANDBY_MODE', dest='BRUTE_FORCE', before='_enter_invalid_pin', conditions=[lambda _: (DUT.bruteForceCurrent == (DUT.bruteForceCounter/2)+1) or DUT.bruteForceCurrent == 1])
-        
-
 
         # --- User-Forced Enrollment Mode Transitions ---
-        self.unlock_admin: Callable
-        self.admin_mode_login: Callable
-        self.enroll_user: Callable
-        self.self_destruct: Callable
-        self.machine.add_transition(trigger='admin_mode_login', source='USER_FORCED_ENROLLMENT', dest='ADMIN_MODE', before='_enter_admin_mode')
+        self.machine.add_transition(trigger='admin_mode_login', source='USER_FORCED_ENROLLMENT', dest='ADMIN_MODE', before='_enter_admin_mode_login')
         self.machine.add_transition(trigger='lock_admin', source='ADMIN_MODE', dest='USER_FORCED_ENROLLMENT', before='_press_lock_button')
         self.machine.add_transition(trigger='unlock_admin', source='USER_FORCED_ENROLLMENT', dest='UNLOCKED_ADMIN', before='_enter_admin_pin')
         self.machine.add_transition(trigger='lock_admin', source='UNLOCKED_ADMIN', dest='USER_FORCED_ENROLLMENT', before='_press_lock_button')
@@ -328,33 +353,15 @@ class SimplifiedDeviceFSM:
         self.machine.add_transition(trigger='last_try_login', source='BRUTE_FORCE', dest='STANDBY_MODE', before='_enter_last_try_pin', conditions=[lambda _: DUT.bruteForceCurrent == DUT.bruteForceCounter/2])
         self.machine.add_transition(trigger='user_reset', source='BRUTE_FORCE', dest='OOB_MODE', conditions=[lambda _: not DUT.provisionLock])
         self.machine.add_transition(trigger='admin_recovery_failed', source='BRUTE_FORCE', dest='BRICKED')
-        
+
         # --- Admin Mode Enrollment Transitions ---
-        self.user_reset: Callable
-
-        self.enroll_brute_force_counter: Callable
-        self.enroll_self_destruct: Callable
-        self.enroll_min_pin_counter: Callable
-        self.enroll_recovery: Callable
-        self.enroll_unattended_auto_lock_counter: Callable
-
-        self.enroll_counter: Callable
-        self.timeout_enroll_counter: Callable
-        self.exit_enroll_counter: Callable
-
-        self.enroll_pin: Callable
-        self.timeout_enroll_pin: Callable
-        self.exit_enroll_pin: Callable
-
         self.machine.add_transition(trigger='user_reset', source='ADMIN_MODE', dest='OOB_MODE', before='_do_user_reset')
-
         self.machine.add_transition(trigger='enroll_brute_force_counter', source='ADMIN_MODE', dest='COUNTER_ENROLLMENT', before='_brute_force_counter_enrollment')
         self.machine.add_transition(trigger='enroll_unattended_auto_lock_counter', source='ADMIN_MODE', dest='COUNTER_ENROLLMENT', before='_unattended_auto_lock_enrollment')
         self.machine.add_transition(trigger='enroll_min_pin_counter', source='ADMIN_MODE', dest='COUNTER_ENROLLMENT', before='_min_pin_enrollment')
         self.machine.add_transition(trigger='enroll_counter', source='COUNTER_ENROLLMENT', dest='ADMIN_MODE', before='_counter_enrollment')
         self.machine.add_transition(trigger='timeout_enroll_counter', source='COUNTER_ENROLLMENT', dest='ADMIN_MODE', before='_timeout_counter_enrollment')
         self.machine.add_transition(trigger='exit_enroll_counter', source='COUNTER_ENROLLMENT', dest='ADMIN_MODE', before='_press_lock_button')
-
         self.machine.add_transition(trigger='enroll_admin', source='ADMIN_MODE', dest='PIN_ENROLLMENT', before='_admin_enrollment')
         self.machine.add_transition(trigger='enroll_user', source='ADMIN_MODE', dest='PIN_ENROLLMENT', before='_user_enrollment', conditions=[lambda _: any(pin_value is None for pin_value in DUT.userPIN.values())])
         self.machine.add_transition(trigger='enroll_recovery', source='ADMIN_MODE', dest='PIN_ENROLLMENT', before='_recovery_pin_enrollment')
@@ -364,16 +371,6 @@ class SimplifiedDeviceFSM:
         self.machine.add_transition(trigger='exit_enroll_pin', source='PIN_ENROLLMENT', dest='ADMIN_MODE', before='_press_lock_button')    
 
         # --- Admin Mode Toggle Transitions ---
-        self.toggle_basic_disk: Callable
-        self.toggle_removable_media: Callable
-        self.enable_led_flicker: Callable
-        self.disable_led_flicker: Callable
-        self.toggle_lock_override: Callable
-        self.enable_provision_lock: Callable
-        self.toggle_read_only: Callable
-        self.toggle_read_write: Callable
-        self.enable_self_destruct: Callable
-        self.toggle_user_forced_enrollment: Callable
         self.machine.add_transition(trigger='toggle_basic_disk', source='ADMIN_MODE', dest='ADMIN_MODE', before='_basic_disk_toggle')
         self.machine.add_transition(trigger='toggle_removable_media', source='ADMIN_MODE', dest='ADMIN_MODE', before='_removable_media_toggle')
         self.machine.add_transition(trigger='enable_led_Flicker', source='ADMIN_MODE', dest='ADMIN_MODE', before='_led_flicker_enable')
@@ -385,17 +382,6 @@ class SimplifiedDeviceFSM:
         self.machine.add_transition(trigger='toggle_read_write', source='ADMIN_MODE', dest='ADMIN_MODE', before='_read_write_toggle')
         self.machine.add_transition(trigger='enable_self_destruct', source='ADMIN_MODE', dest='ADMIN_MODE', before='_self_destruct_toggle')
         self.machine.add_transition(trigger='toggle_user_forced_enrollment', source='ADMIN_MODE', dest='ADMIN_MODE', before='_user_forced_enrollment_toggle')
-
-        # --- Admin Mode Transition ---
-        self.enroll_admin: Callable
-        self.lock_admin: Callable
-        
-        # --- Admin Enum Transition ---
-        self.unlock_admin: Callable
-
-        # --- User Enum Transition ---
-        self.unlock_user: Callable
-        self.lock_user: Callable
         
     def _log_state_change_details(self, event_data: EventData) -> None:
         if event_data.transition is None:
@@ -552,29 +538,74 @@ class SimplifiedDeviceFSM:
 
 ###########################################################################################################
 # Before/After Functions
-    
-    def _do_power_on(self, event_data: EventData) -> None:
-        self.logger.info("Powering DUT on and performing self-test...")
-        self.at.on("usb3")
-        self.at.on("connect")
-        time.sleep(0.5)
-        # FIX: Safely access destination state
+
+##########
+## Power
+
+    def _power_toggle(self, event_data: EventData) -> None:
         dest_state = event_data.transition.dest if event_data.transition else "UNKNOWN"
         context = {'fsm_current_state': self.state, 'fsm_destination_state': dest_state}
-        if DUT.VBUS:
-            if not self.at.confirm_led_pattern(LEDs['STARTUP'], clear_buffer=True, replay_extra_context=context):
-                raise TransitionCallbackError("Failed Startup Self-Test LED confirmation.")
-            self.logger.info("Startup Self-Test successful. Proceeding to POWER_ON_SELF_TEST state.")
+        trigger_name = event_data.event.name
+
+        if trigger_name == 'power_on':
+            self.logger.info("Powering DUT on and performing self-test...")
+            self.at.on("usb3")
+            self.at.on("connect")
+            time.sleep(0.5)
+            if DUT.VBUS:
+                if not self.at.confirm_led_pattern(LEDs['STARTUP'], clear_buffer=True, replay_extra_context=context):
+                    raise TransitionCallbackError("Failed Startup Self-Test LED confirmation.")
+                self.logger.info("Startup Self-Test successful. Proceeding to POWER_ON_SELF_TEST state.")
+        elif trigger_name == 'power_off':
+            self.logger.info("Powering off DUT...")
+            self.at.off("usb3")
+            self.at.off("connect")
+
+##########
+## Unlocks
 
     def _enter_admin_pin(self, event_data: EventData) -> None:
-        self.logger.info("Unlocking DUT with Admin PIN...")
-        self.at.sequence(DUT.adminPIN)
         dest_state = event_data.transition.dest if event_data.transition else "UNKNOWN"
         context = {'fsm_current_state': self.state, 'fsm_destination_state': dest_state}
-        if not self.at.await_and_confirm_led_pattern(LEDs['ENUM'], timeout=15, replay_extra_context=context):
-            raise TransitionCallbackError("Failed admin unlock LED pattern.")
 
+        self.logger.info("Unlocking DUT with Admin PIN...")
+        self.at.sequence(DUT.adminPIN)
+        if DUT.readOnlyEnabled and DUT.lockOverride:
+            if not self.at.await_and_confirm_led_pattern(LEDs['ENUM_LOCK_OVERRIDE_READ_ONLY'], timeout=15, replay_extra_context=context):
+                raise TransitionCallbackError("Failed Admin unlock LED pattern.")
+        elif DUT.readOnlyEnabled:
+            if not self.at.await_and_confirm_led_pattern(LEDs['ENUM_READ_ONLY'], timeout=15, replay_extra_context=context):
+                raise TransitionCallbackError("Failed Admin unlock LED pattern.")
+        elif DUT.lockOverride:
+            if not self.at.await_and_confirm_led_pattern(LEDs['ENUM_LOCK_OVERRIDE'], timeout=15, replay_extra_context=context):
+                raise TransitionCallbackError("Failed Admin unlock LED pattern.")
+        else:
+            if not self.at.await_and_confirm_led_pattern(LEDs['ENUM'], timeout=15, replay_extra_context=context):
+                raise TransitionCallbackError("Failed Admin unlock LED pattern.")
+        
+    def _enter_self_destruct_pin(self, event_data: EventData) -> None:
+        dest_state = event_data.transition.dest if event_data.transition else "UNKNOWN"
+        context = {'fsm_current_state': self.state, 'fsm_destination_state': dest_state}
+
+        self.logger.info("Unlocking DUT with Self-Destruct PIN...")
+        self.at.sequence(DUT.adminPIN)
+        if DUT.readOnlyEnabled and DUT.lockOverride:
+            if not self.at.await_and_confirm_led_pattern(LEDs['ENUM_LOCK_OVERRIDE_READ_ONLY'], timeout=15, replay_extra_context=context):
+                raise TransitionCallbackError("Failed Self-Destruct unlock LED pattern.")
+        elif DUT.readOnlyEnabled:
+            if not self.at.await_and_confirm_led_pattern(LEDs['ENUM_READ_ONLY'], timeout=15, replay_extra_context=context):
+                raise TransitionCallbackError("Failed Self-Destruct unlock LED pattern.")
+        elif DUT.lockOverride:
+            if not self.at.await_and_confirm_led_pattern(LEDs['ENUM_LOCK_OVERRIDE'], timeout=15, replay_extra_context=context):
+                raise TransitionCallbackError("Failed Self-Destruct unlock LED pattern.")
+        else:
+            if not self.at.await_and_confirm_led_pattern(LEDs['ENUM'], timeout=15, replay_extra_context=context):
+                raise TransitionCallbackError("Failed Self-Destruct unlock LED pattern.")
+        
     def _enter_user_pin(self, event_data: EventData) -> None:
+        dest_state = event_data.transition.dest if event_data.transition else "UNKNOWN"
+        context = {'fsm_current_state': self.state, 'fsm_destination_state': dest_state}
+
         user_id = event_data.kwargs.get('user_id')
         if not user_id:
             raise TransitionCallbackError("Unlock user requires a 'user_id' to be passed.")
@@ -587,14 +618,39 @@ class SimplifiedDeviceFSM:
 
         self.logger.info(f"Attempting to unlock device with PIN from logical user slot {user_id}...")
         self.at.sequence(pin_to_enter)
+        if DUT.readOnlyEnabled and DUT.lockOverride:
+            if not self.at.await_and_confirm_led_pattern(LEDs['ENUM_LOCK_OVERRIDE_READ_ONLY'], timeout=15, replay_extra_context=context):
+                raise TransitionCallbackError(f"Failed User {user_id} unlock LED pattern.")
+        elif DUT.readOnlyEnabled:
+            if not self.at.await_and_confirm_led_pattern(LEDs['ENUM_READ_ONLY'], timeout=15, replay_extra_context=context):
+                raise TransitionCallbackError(f"Failed User {user_id} unlock LED pattern.")
+        elif DUT.lockOverride:
+            if not self.at.await_and_confirm_led_pattern(LEDs['ENUM_LOCK_OVERRIDE'], timeout=15, replay_extra_context=context):
+                raise TransitionCallbackError(f"Failed User {user_id} unlock LED pattern.")
+        else:
+            if not self.at.await_and_confirm_led_pattern(LEDs['ENUM'], timeout=15, replay_extra_context=context):
+                raise TransitionCallbackError(f"Failed User {user_id} unlock LED pattern.")
+    
+##########
+## Logins
+
+    def _enter_admin_mode_login(self, event_data: EventData) -> None:
         dest_state = event_data.transition.dest if event_data.transition else "UNKNOWN"
         context = {'fsm_current_state': self.state, 'fsm_destination_state': dest_state}
-        if not self.at.await_and_confirm_led_pattern(LEDs['ENUM'], timeout=15, replay_extra_context=context):
-            raise TransitionCallbackError("Failed user unlock LED pattern.")
-        
-    def _press_lock_button(self, event_data: EventData) -> None:
-        self.logger.info(f"Locking DUT from Unlocked Admin...")
-        self.at.press("lock")
+        self.at.press(['key0', 'unlock'], duration_ms=6000)
+        if not self.at.confirm_led_pattern(LEDs['RED_LOGIN'], clear_buffer=True, replay_extra_context=context):
+                raise TransitionCallbackError("Failed Admin Mode Login LED confirmation.")
+        self.at.sequence(DUT.adminPIN)
+
+    def _enter_last_try_pin(self, event_data: EventData) -> None:
+        self.logger.info(f"Entering Last Try Login...")
+        self.at.press(['key5', 'unlock'], duration_ms=6000)
+        if not self.at.await_and_confirm_led_pattern(LEDs["RED_GREEN"], timeout=10):
+            raise TransitionCallbackError("Failed 'LASTTRY' Login confirmation.")
+        self.at.sequence(['key5', 'key2', 'key7', 'key8', 'key8', 'key7', 'key9', 'unlock']) 
+
+##########
+## Resets
 
     def _do_user_reset(self, event_data: EventData) -> None:
         dest_state = event_data.transition.dest if event_data.transition else "UNKNOWN"
@@ -611,24 +667,12 @@ class SimplifiedDeviceFSM:
         DUT.userPIN = {1: None, 2: None, 3: None, 4: None}
         self.logger.info("DUT model state has been reset.")
     
-    def _enter_admin_mode(self, event_data: EventData) -> None:
-        dest_state = event_data.transition.dest if event_data.transition else "UNKNOWN"
-        context = {'fsm_current_state': self.state, 'fsm_destination_state': dest_state}
-        self.at.press(['key0', 'unlock'], duration_ms=6000)
-        if not self.at.confirm_led_pattern(LEDs['RED_LOGIN'], clear_buffer=True, replay_extra_context=context):
-                raise TransitionCallbackError("Failed Admin Mode Login LED confirmation.")
-        self.at.sequence(DUT.adminPIN)
-
-    def _enter_self_destruct_pin(self, event_data: EventData) -> None:
-        self.logger.info("Entering Self Destruct PIN...")
-        self.at.sequence(DUT.selfDestructPIN)
+##########
+## Miscellaneous
         
-    def _enter_last_try_pin(self, event_data: EventData) -> None:
-        self.logger.info(f"Entering Last Try Login...")
-        self.at.press(['key5', 'unlock'], duration_ms=6000)
-        if not self.at.await_and_confirm_led_pattern(LEDs["RED_GREEN"], timeout=10):
-            raise TransitionCallbackError("Failed 'LASTTRY' Login confirmation.")
-        self.at.sequence(['key5', 'key2', 'key7', 'key8', 'key8', 'key7', 'key9', 'unlock'])
+    def _press_lock_button(self, event_data: EventData) -> None:
+        self.logger.info(f"Locking DUT from Unlocked Admin...")
+        self.at.press("lock")
 
     def _enter_invalid_pin(self, event_data: EventData) -> bool:
         """
@@ -654,7 +698,7 @@ class SimplifiedDeviceFSM:
         return True
     
 ##########
-## Counter Enrollments
+## Admin mode Counter Enrollments
 
     def _brute_force_counter_enrollment(self, event_data: EventData) -> None:
         dest_state = event_data.transition.dest if event_data.transition else "UNKNOWN"
@@ -751,7 +795,7 @@ class SimplifiedDeviceFSM:
                 raise TransitionCallbackError("Did not observe REJECT_PATTERN for counter enrollment timeout...")
 
 #################
-## PIN Enrollments
+## Admin mode PIN Enrollments
 
     def _admin_enrollment(self, event_data: EventData) -> None:       
         dest_state = event_data.transition.dest if event_data.transition else "UNKNOWN"
@@ -876,48 +920,45 @@ class SimplifiedDeviceFSM:
                 
             DUT.selfDestructPIN = new_pin
             self.logger.info("Self-Destruct enrollment sequence completed successfully. Updated DUT model.")
-        
-
-
 
 ##################
-## Toggles
+## Admin mode Toggles
 
     def _basic_disk_toggle(self, event_data: EventData) -> None:
         dest_state = event_data.transition.dest if event_data.transition else "UNKNOWN"
         context = {'fsm_current_state': self.state, 'fsm_destination_state': dest_state}
         
-        self.logger.info(f"Toggling Basic Disk Mode...")
+        self.logger.info(f"Toggling Basic Disk mode...")
         self.at.press(['key2', 'key3'])
         if not self.at.await_and_confirm_led_pattern(LEDs['ACCEPT_PATTERN'], timeout=5.0, replay_extra_context=context):
             raise TransitionCallbackError("Did not observe ACCEPT_PATTERN for Basic Disk toggle.")
         else:
             DUT.basicDisk = True
-            self.logger.info(f"Basic Disk Mode toggled. New state: {DUT.basicDisk}")
+            self.logger.info(f"Basic Disk mode: {DUT.basicDisk}")
 
     def _removable_media_toggle(self, event_data: EventData) -> None:
         dest_state = event_data.transition.dest if event_data.transition else "UNKNOWN"
         context = {'fsm_current_state': self.state, 'fsm_destination_state': dest_state}
         
-        self.logger.info(f"Toggling Removable Media Mode...")
+        self.logger.info(f"Toggling Removable Media mode...")
         self.at.press(['key3', 'key7'])
         if not self.at.await_and_confirm_led_pattern(LEDs['ACCEPT_PATTERN'], timeout=5.0, replay_extra_context=context):
             raise TransitionCallbackError("Did not observe ACCEPT_PATTERN for Removable Media toggle.")
         else:
             DUT.basicDisk = True
-            self.logger.info(f"Removable Media Mode toggled. New state: {DUT.basicDisk}")
+            self.logger.info(f"Removable Media mode: {DUT.removableMedia}")
 
     def _led_flicker_enable(self, event_data: EventData) -> None:
         dest_state = event_data.transition.dest if event_data.transition else "UNKNOWN"
         context = {'fsm_current_state': self.state, 'fsm_destination_state': dest_state}
         
-        self.logger.info(f"Enabling LED Flicker Mode...")
+        self.logger.info(f"Enabling LED Flicker mode...")
         self.at.press(['key0', 'key3'])
         if not self.at.await_and_confirm_led_pattern(LEDs['ACCEPT_PATTERN'], timeout=5.0, replay_extra_context=context):
             raise TransitionCallbackError("Did not observe ACCEPT_PATTERN for LED Flicker toggle.")
         else:
             DUT.ledFlicker = True
-            self.logger.info(f"LED Flicker Mode enabled...")
+            self.logger.info(f"LED Flicker mode: {DUT.ledFlicker}")
 
     def _led_flicker_disable(self, event_data: EventData) -> None:
         dest_state = event_data.transition.dest if event_data.transition else "UNKNOWN"
@@ -929,19 +970,19 @@ class SimplifiedDeviceFSM:
             raise TransitionCallbackError("Did not observe ACCEPT_PATTERN for LED Flicker toggle.")
         else:
             DUT.ledFlicker = False
-            self.logger.info(f"LED Flicker Mode disabled...")
+            self.logger.info(f"LED Flicker mode: {DUT.ledFlicker}")
 
     def _lock_override_toggle(self, event_data: EventData) -> None:
         dest_state = event_data.transition.dest if event_data.transition else "UNKNOWN"
         context = {'fsm_current_state': self.state, 'fsm_destination_state': dest_state}
         
-        self.logger.info(f"Disabling LED Flicker Mode...")
+        self.logger.info(f"Toggling Lock Override mode...")
         self.at.press(['key0', 'key3'])
         if not self.at.await_and_confirm_led_pattern(LEDs['ACCEPT_PATTERN'], timeout=5.0, replay_extra_context=context):
-            raise TransitionCallbackError("Did not observe ACCEPT_PATTERN for LED Flicker toggle.")
+            raise TransitionCallbackError("Did not observe ACCEPT_PATTERN for Lock Override toggle.")
         else:
             DUT.ledFlicker = False
-            self.logger.info(f"LED Flicker Mode disabled...")
+            self.logger.info(f"LED Override mode: {DUT.lockOverride}")
 
     def _provision_lock_toggle(self, event_data: EventData) -> None:
         dest_state = event_data.transition.dest if event_data.transition else "UNKNOWN"
@@ -959,31 +1000,31 @@ class SimplifiedDeviceFSM:
                 raise TransitionCallbackError("Did not observe ACCEPT_PATTERN for Provision Lock toggle.")
             else:
                 DUT.provisionLock = not DUT.provisionLock
-                self.logger.info(f"Provision Lock toggled. New state: {DUT.provisionLock}")
+                self.logger.info(f"Provision Lock mode: {DUT.provisionLock}")
 
     def _read_only_toggle(self, event_data: EventData) -> None:
         dest_state = event_data.transition.dest if event_data.transition else "UNKNOWN"
         context = {'fsm_current_state': self.state, 'fsm_destination_state': dest_state}
         
-        self.logger.info(f"Toggling Read-Only Mode...")
+        self.logger.info(f"Toggling Read-Only mode...")
         self.at.press(['key6', 'key7'])
         if not self.at.await_and_confirm_led_pattern(LEDs['ACCEPT_PATTERN'], timeout=5.0, replay_extra_context=context):
             raise TransitionCallbackError("Did not observe ACCEPT_PATTERN for Read-Only toggle.")
         else:
             DUT.readOnlyEnabled = True
-            self.logger.info(f"Read-Only Mode toggled. New state: {DUT.readOnlyEnabled}")
+            self.logger.info(f"Read-Only mode: {DUT.readOnlyEnabled}")
 
     def _read_write_toggle(self, event_data: EventData) -> None:
         dest_state = event_data.transition.dest if event_data.transition else "UNKNOWN"
         context = {'fsm_current_state': self.state, 'fsm_destination_state': dest_state}
         
-        self.logger.info(f"Toggling to Read-Write Mode...")
+        self.logger.info(f"Toggling to Read-Write mode...")
         self.at.press(['key7', 'key9'])
         if not self.at.await_and_confirm_led_pattern(LEDs['ACCEPT_PATTERN'], timeout=5.0, replay_extra_context=context):
             raise TransitionCallbackError("Did not observe ACCEPT_PATTERN for Read-Write toggle.")
         else:
             DUT.readOnlyEnabled = False
-            self.logger.info(f"Read-Write Mode set. New readOnlyEnabled state: {DUT.readOnlyEnabled}")
+            self.logger.info(f"Read-Write mode: {DUT.readOnlyEnabled}")
 
     def _self_destruct_toggle(self, event_data: EventData) -> None:
         dest_state = event_data.transition.dest if event_data.transition else "UNKNOWN"

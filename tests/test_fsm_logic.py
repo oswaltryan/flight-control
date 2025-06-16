@@ -11,7 +11,7 @@
 import pytest
 from unittest.mock import MagicMock, call, ANY
 from camera.led_dictionaries import LEDs
-from controllers.flight_control_fsm import SimplifiedDeviceFSM, DeviceUnderTest, TransitionCallbackError
+from controllers.flight_control_fsm import ApricornDeviceFSM, DeviceUnderTest, TransitionCallbackError
 from transitions.core import MachineError
 from controllers import flight_control_fsm
 import json
@@ -53,7 +53,7 @@ def fsm(mock_at, dut_instance, monkeypatch):
     its own isolated DUT instance.
     """
     monkeypatch.setattr('controllers.flight_control_fsm.DUT', dut_instance)
-    return SimplifiedDeviceFSM(at_controller=mock_at)
+    return ApricornDeviceFSM(at_controller=mock_at)
 
 # --- Happy Path Tests ---
 
