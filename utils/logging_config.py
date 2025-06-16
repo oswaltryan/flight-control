@@ -26,8 +26,8 @@ LOG_LEVEL_CONFIG = {
 }
 
 # --- Configuration for Log Output ---
-ENABLE_FILE_LOGGING = True
-LOG_FILE_PATH = "logs/automation_activity.log" # Relative to project root
+# LOG_FILE_PATH = "logs/automation_activity.log"
+# ENABLE_FILE_LOGGING = True
 LOG_FILE_MODE = "a" # "a" for append, "w" for overwrite
 
 ENABLE_CONSOLE_LOGGING = True
@@ -39,8 +39,7 @@ def setup_logging(
     date_format=DEFAULT_DATE_FORMAT,
     log_level_overrides=None,
     log_to_console=ENABLE_CONSOLE_LOGGING,
-    log_to_file=ENABLE_FILE_LOGGING,
-    log_file_path=LOG_FILE_PATH,
+    log_file_path=None,
     log_file_mode=LOG_FILE_MODE
 ):
     """
@@ -63,7 +62,8 @@ def setup_logging(
         console_handler.setFormatter(formatter)
         root_logger.addHandler(console_handler)
 
-    if log_to_file:
+    # MODIFIED: Logic now checks if a path was provided.
+    if log_file_path:
         try:
             log_dir = os.path.dirname(log_file_path)
             if log_dir and not os.path.exists(log_dir):
@@ -101,6 +101,8 @@ def setup_logging(
                 print(msg, file=sys.stderr)
     
     startup_logger = logging.getLogger("LoggingConfig") # Or root_logger
-    startup_logger.info(f"Logging configured. Root level: {logging.getLevelName(root_logger.level)}. Console: {log_to_console}, File: {log_to_file} ('{log_file_path}' if log_to_file else 'N/A').")
+    # MODIFIED: The log message now accurately reflects the file logging status.
+    file_logging_status = f"'{log_file_path}'" if log_file_path else "Disabled"
+    startup_logger.info(f"Logging configured. Root level: {logging.getLevelName(root_logger.level)}. Console: {log_to_console}, File: {file_logging_status}.")
     if combined_log_levels:
         startup_logger.debug(f"Specific logger levels applied: {combined_log_levels}")

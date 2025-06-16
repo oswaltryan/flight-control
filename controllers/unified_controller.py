@@ -164,15 +164,19 @@ class UnifiedController:
     def __enter__(self): return self
     def __exit__(self, exc_type, exc_val, exc_tb): self.close()
 
-    def confirm_enum(self, stable_min: float = 5, timeout: float = 15) -> bool:
+    def confirm_device_enum(self, stable_min: float = 5, timeout: float = 15) -> bool:
         self.logger.info(f"Confirming Drive enumeration (stable: {stable_min}s, overall_timeout: {timeout}s)...")
         overall_start_time = time.time()
-        DUT_ping_1 = find_apricorn_device()
+        DUT_ping_1 = find_apricorn_device()[0]
         if not DUT_ping_1: self.logger.warning("No device found on initial enum check."); return False
         
         # Assuming one device or interested in the first one. This might need adjustment for multi-device scenarios.
-        first_device_serial = DUT_ping_1[0].iSerial 
-        self.logger.info(f"Initial device found with iSerial: {first_device_serial}. Verifying stability...")
+        first_device_serial = DUT_ping_1.iSerial
+        if DUT_ping_1.driveSizeGB != "N/A (OOB Mode)":
+            self.logger.warning(f"Device volume is exposed!")
+            return False
+        else:
+            self.logger.info(f"Initial device found with iSerial: {first_device_serial}. Verifying stability...")
         
         stability_wait_start = time.time()
         while time.time() - stability_wait_start < stable_min:
@@ -181,17 +185,57 @@ class UnifiedController:
                 return False
             time.sleep(0.2) # Poll less aggressively during stability wait
 
-        DUT_ping_2 = find_apricorn_device()
+        DUT_ping_2 = find_apricorn_device()[0]
         if not DUT_ping_2:
             self.logger.warning(f"Device with iSerial {first_device_serial} disappeared after {time.time() - stability_wait_start:.2f}s stability wait.")
             return False
+        if DUT_ping_2.driveSizeGB != "N/A (OOB Mode)":
+            self.logger.warning(f"Device volume is exposed!")
+            return False
 
-        for device_after_wait in DUT_ping_2:
-            if device_after_wait.iSerial == first_device_serial: 
-                self.logger.info(f"Drive with iSerial {first_device_serial} confirmed stable for at least {stable_min}s:")
-                self.logger.info(f"  VID:PID  [Firm] @USB iSerial      iProduct")
-                self.logger.info(f"  {device_after_wait.idVendor}:{device_after_wait.idProduct} [{device_after_wait.bcdDevice}] @{device_after_wait.bcdUSB} {device_after_wait.iSerial} {device_after_wait.iProduct}")
-                return True
+        if DUT_ping_2.iSerial == first_device_serial:
+            self.logger.info(f"Drive with iSerial {first_device_serial} confirmed stable for at least {stable_min}s:")
+            self.logger.info(f"  VID:PID  [Firm] @USB iSerial      iProduct")
+            self.logger.info(f"  {DUT_ping_2.idVendor}:{DUT_ping_2.idProduct} [{DUT_ping_2.bcdDevice}] @{DUT_ping_2.bcdUSB} {DUT_ping_2.iSerial} {DUT_ping_2.iProduct}")
+            return True
+        
+        self.logger.warning(f"Device with iSerial {first_device_serial} did not remain stable or was not found after stability wait.")
+        return False
+    
+    def confirm_drive_enum(self, stable_min: float = 5, timeout: float = 15) -> bool:
+        self.logger.info(f"Confirming Drive enumeration (stable: {stable_min}s, overall_timeout: {timeout}s)...")
+        overall_start_time = time.time()
+        DUT_ping_1 = find_apricorn_device()[0]
+        if not DUT_ping_1: self.logger.warning("No device found on initial enum check."); return False
+        
+        # Assuming one device or interested in the first one. This might need adjustment for multi-device scenarios.
+        first_device_serial = DUT_ping_1.iSerial
+        if DUT_ping_1.driveSizeGB == "N/A (OOB Mode)":
+            self.logger.warning(f"Device volume is not exposed!")
+            return False
+        else:
+            self.logger.info(f"Initial device found with iSerial: {first_device_serial}. Verifying stability...")
+        
+        stability_wait_start = time.time()
+        while time.time() - stability_wait_start < stable_min:
+            if time.time() - overall_start_time > timeout:
+                self.logger.warning(f"Overall timeout ({timeout}s) reached while waiting for stability for device {first_device_serial}.")
+                return False
+            time.sleep(0.2) # Poll less aggressively during stability wait
+
+        DUT_ping_2 = find_apricorn_device()[0]
+        if not DUT_ping_2:
+            self.logger.warning(f"Device with iSerial {first_device_serial} disappeared after {time.time() - stability_wait_start:.2f}s stability wait.")
+            return False
+        if DUT_ping_2.driveSizeGB == "N/A (OOB Mode)":
+            self.logger.warning(f"Device volume is not exposed!")
+            return False
+
+        if DUT_ping_2.iSerial == first_device_serial:
+            self.logger.info(f"Drive with iSerial {first_device_serial} confirmed stable for at least {stable_min}s:")
+            self.logger.info(f"  VID:PID  [Firm] @USB iSerial      iProduct")
+            self.logger.info(f"  {DUT_ping_2.idVendor}:{DUT_ping_2.idProduct} [{DUT_ping_2.bcdDevice}] @{DUT_ping_2.bcdUSB} {DUT_ping_2.iSerial} {DUT_ping_2.iProduct}")
+            return True
         
         self.logger.warning(f"Device with iSerial {first_device_serial} did not remain stable or was not found after stability wait.")
         return False

@@ -68,17 +68,27 @@ except Exception as e:
     raise
 
 class DeviceUnderTest:
+    """
+    A stateful model representing the Device Under Test (DUT).
+
+    This class acts as a data container, tracking the known and assumed state
+    of the physical hardware device. It holds properties like enrolled PINs,
+    feature settings (e.g., read-only, self-destruct), security counters,
+    and hardware identifiers. The FSM and its callbacks read from and write
+    to an instance of this class to mirror the device's real-world state.
+    """
     device_name = "padlock3-3637"
 
     name = device_name
     battery = False
     battery_vbus = False
     vbus = True
-    bridge_fw = DEVICE_PROPERTIES[device_name]['bridgeFW']
+    bridge_fw = DEVICE_PROPERTIES[device_name]['bridge_fw']
+    pid = DEVICE_PROPERTIES[device_name]['id_product']
     mcu_fw = []
     mcu_fw_human_readable = ""
     fips = DEVICE_PROPERTIES[device_name]['fips']
-    secure_key = DEVICE_PROPERTIES[device_name]['secureKey']
+    secure_key = DEVICE_PROPERTIES[device_name]['secure_key']
     usb3 = False
     disk_path = ""
     mounted = False
@@ -90,8 +100,8 @@ class DeviceUnderTest:
     model_id_2 = DEVICE_PROPERTIES[device_name]['model_id_digit_2']
     hardware_id_1 = DEVICE_PROPERTIES[device_name]['hardware_major']
     hardware_id_2 = DEVICE_PROPERTIES[device_name]['hardware_minor']
-    scb_part_number = DEVICE_PROPERTIES[device_name]['singleCodeBasePartNumber']
-    single_code_base = DEVICE_PROPERTIES[device_name]['singleCodeBase']
+    scb_part_number = DEVICE_PROPERTIES[device_name]['scb_part_number']
+    single_code_base = scb_part_number is None
     
     basic_disk = True
     removable_media = False
@@ -105,8 +115,8 @@ class DeviceUnderTest:
     manufacturer_reset_enum = False
 
     maximum_pin_counter = 16
-    minimum_pin_counter = int(DEVICE_PROPERTIES[device_name]['minpin'])
-    default_minimum_pin_counter = int(DEVICE_PROPERTIES[device_name]['minpin'])
+    minimum_pin_counter = int(DEVICE_PROPERTIES[device_name]['minimum_pin_length'])
+    default_minimum_pin_counter = int(DEVICE_PROPERTIES[device_name]['minimum_pin_length'])
 
     provision_lock = False
     provision_lock_bricked = False
@@ -132,7 +142,7 @@ class DeviceUnderTest:
     self_destruct_enum = False
     self_destruct_used = False
 
-    user_count = DEVICE_PROPERTIES[device_name]['userCount']
+    user_count = DEVICE_PROPERTIES[device_name]['user_count']
     _max_users = 1 if fips in [2, 3] else 4
     user_pin: Dict[int, Optional[List[str]]] = {i: None for i in range(1, _max_users + 1)}
     old_user_pin: Dict[int, Optional[List[str]]] = {i: None for i in range(1, _max_users + 1)}
@@ -146,19 +156,55 @@ class CallableCondition:
     for diagram generation, allowing inline lambda definitions to be labeled.
     """
     def __init__(self, func: Callable[..., bool], name: str):
+        """
+        Initializes the CallableCondition.
+
+        Args:
+            func: The callable (e.g., a lambda) to be executed as the condition.
+            name: A human-readable name for the condition, used in diagrams.
+        """
         self.func = func
         self.__name__ = name  # <-- THE CRITICAL CHANGE
 
     def __call__(self, *args, **kwargs) -> bool:
+        """
+        Makes the object behave like a function for the FSM.
+
+        When the FSM evaluates this condition, this method is called, which
+        in turn executes the wrapped function.
+
+        Returns:
+            The boolean result of the wrapped function.
+        """
         # This makes the object behave like a function for the FSM
         return self.func(*args, **kwargs)
 
     def __repr__(self) -> str:
+        """
+        Provides a helpful string representation for debugging.
+        """
         # A helpful representation for debugging
         return f"<CallableCondition: {self.__name__}>"
 
 ## --- FSM Class Definition ---
 class ApricornDeviceFSM:
+    """
+    A Finite State Machine (FSM) to model and control an Apricorn secure device.
+
+    This class defines the operational states of the device and the transitions
+    between them. It uses a `UnifiedController` instance (`at`) to interact
+    with the physical hardware (key presses, LED state verification) and a
+    `DeviceUnderTest` instance (`DUT`) to maintain a model of the device's
+    current configuration and state.
+
+    Attributes:
+        STATES: A list of all possible states the machine can be in.
+        logger: A dedicated logger for FSM activities.
+        at: The `UnifiedController` instance for hardware interaction.
+        machine: The `transitions` library's `Machine` object that powers the FSM.
+        state: The current state of the FSM.
+        source_state: The state from which the last transition originated.
+    """
 
     STATES: List[str] = ['OFF', 'POWER_ON_SELF_TEST', 'ERROR_MODE', 'BRUTE_FORCE', 'BRICKED', 'OOB_MODE', 'STANDBY_MODE', 'USER_FORCED_ENROLLMENT',
                          'UNLOCKED_ADMIN', 'UNLOCKED_USER',
@@ -173,6 +219,15 @@ class ApricornDeviceFSM:
     source_state: str = 'OFF'
 
     def __init__(self, at_controller: 'UnifiedController'):
+        """
+        Initializes the ApricornDeviceFSM.
+
+        Sets up the states, transitions, and callbacks for the state machine.
+
+        Args:
+            at_controller: An initialized instance of the UnifiedController
+                           for interacting with the device hardware.
+        """
         self.logger = logging.getLogger("DeviceFSM.Simplified")
         self.at = at_controller
 
@@ -322,6 +377,17 @@ class ApricornDeviceFSM:
         self.user_reset: Callable
 
     def _log_state_change_details(self, event_data: EventData) -> None:
+        """
+        Logs the details of every state transition.
+
+        This callback is executed automatically by the FSM after any state
+        change. It captures the source state, destination state, and the
+        triggering event for logging purposes.
+
+        Args:
+            event_data: The event data provided by the FSM, containing
+                        details about the transition that just occurred.
+        """
         if event_data.transition is None:
             self.logger.info(f"FSM initialized to state: {self.state}")
             return
@@ -334,8 +400,15 @@ class ApricornDeviceFSM:
     
     def on_enter_ADMIN_MODE(self, event_data: EventData) -> None:
         """
-        Called automatically upon entering the ADMIN_MODE state.
-        Confirms the device shows the correct stable LED state.
+        Verifies the device state upon entering ADMIN_MODE.
+
+        This 'on_enter' callback is automatically executed when the FSM
+        transitions into the ADMIN_MODE state. It confirms that the device
+        is displaying the stable solid blue LED pattern, indicating it is
+        ready for administrative commands.
+
+        Args:
+            event_data: The event data provided by the FSM.
         """
         self.logger.info(f"Entered ADMIN_MODE. Confirming stable state (solid Blue)...")
         # This callback uses the safe `on_enter` pattern, no change needed.
@@ -350,7 +423,15 @@ class ApricornDeviceFSM:
 
     def on_enter_POWER_ON_SELF_TEST(self, event_data: EventData) -> None:
         """
-        This function will be the check of whether the POST passed or failed.
+        Verifies the Power-On Self-Test (POST) result.
+
+        This 'on_enter' callback is executed upon entering the
+        POWER_ON_SELF_TEST state. It checks for the 'ACCEPT_PATTERN' LED
+        sequence. On success, it triggers 'post_pass'; on failure, it
+        triggers 'post_fail'.
+
+        Args:
+            event_data: The event data provided by the FSM.
         """
         self.logger.info("Entered POWER_ON_SELF_TEST state. Confirming POST result...")
         context = {
@@ -364,6 +445,16 @@ class ApricornDeviceFSM:
             self.post_pass()
 
     def on_enter_OFF(self, event_data: EventData) -> None:
+        """
+        Confirms the device is powered off.
+
+        This 'on_enter' callback is executed when the FSM enters the OFF state.
+        It ensures the physical power relays are off and verifies that all
+        device LEDs are extinguished.
+
+        Args:
+            event_data: The event data provided by the FSM.
+        """
         self.at.off("usb3")
         self.at.off("connect")
         # This callback uses the safe `on_enter` pattern, no change needed.
@@ -377,6 +468,16 @@ class ApricornDeviceFSM:
             self.logger.error("Failed to confirm device LEDs are OFF.")
         
     def on_enter_OOB_MODE(self, event_data: EventData) -> None:
+        """
+        Verifies the device state upon entering Out-Of-Box (OOB) Mode.
+
+        This 'on_enter' callback confirms the device shows the correct
+        green/blue LED pattern for OOB mode and has successfully enumerated
+        on the USB bus.
+
+        Args:
+            event_data: The event data provided by the FSM.
+        """
         self.logger.info(f"Confirming OOB Mode (solid Green/Blue)...")
         # This callback uses the safe `on_enter` pattern, no change needed.
         context = {
@@ -388,7 +489,21 @@ class ApricornDeviceFSM:
         else:
             self.logger.error("Failed to confirm OOB_MODE LEDs.")
 
+        if not self.at.confirm_device_enum():
+            self.logger.error("Device did not enumerate in OOB_MODE.")
+            self.post_fail(details="OOB_MODE_ENUM_FAILED")
+
     def on_enter_STANDBY_MODE(self, event_data: EventData) -> None:
+        """
+        Verifies the device state upon entering Standby Mode.
+
+        This 'on_enter' callback confirms the device shows the stable solid
+        red LED pattern, indicating it is configured, locked, and awaiting a
+        PIN or command.
+
+        Args:
+            event_data: The event data provided by the FSM.
+        """
         self.logger.info(f"Confirming Standby Mode (solid Red)...")
         # This callback uses the safe `on_enter` pattern, no change needed.
         context = {
@@ -401,8 +516,18 @@ class ApricornDeviceFSM:
             self.logger.error("Failed to confirm STANDBY_MODE LEDs.")
 
     def on_enter_UNLOCKED_ADMIN(self, event_data: EventData) -> None:
+        """
+        Verifies device enumeration after an admin unlock.
+
+        This 'on_enter' callback is executed after successfully unlocking with
+        an Admin PIN. It confirms that the device's storage volume has
+        enumerated correctly on the host system.
+
+        Args:
+            event_data: The event data provided by the FSM.
+        """
         self.logger.info("Confirming device enumeration post-unlock...")
-        if not self.at.confirm_enum():
+        if not self.at.confirm_drive_enum():
              self.logger.error("Device did not enumerate after admin unlock.")
              self.post_fail(details="ADMIN_UNLOCK_ENUM_FAILED")
         else:
@@ -410,11 +535,17 @@ class ApricornDeviceFSM:
 
     def on_enter_UNLOCKED_USER(self, event_data: EventData) -> None:
         """
-        Called automatically upon entering the UNLOCKED_USER state.
-        Confirms the device has enumerated correctly.
+        Verifies device enumeration after a user unlock.
+
+        This 'on_enter' callback is executed after successfully unlocking with
+        a User PIN. It confirms that the device's storage volume has
+        enumerated correctly on the host system.
+
+        Args:
+            event_data: The event data provided by the FSM.
         """
         self.logger.info("Confirming device enumeration post-user-unlock...")
-        if not self.at.confirm_enum():
+        if not self.at.confirm_drive_enum():
              self.logger.error("Device did not enumerate after user unlock.")
              self.post_fail(details="USER_UNLOCK_ENUM_FAILED")
         else:
@@ -422,8 +553,13 @@ class ApricornDeviceFSM:
 
     def on_enter_BRUTE_FORCE(self, event_data: EventData) -> None:
         """
-        Called automatically upon entering BRUTE_FORCE. It immediately checks
-        if the device should be bricked.
+        Verifies the device state upon entering Brute Force protection mode.
+
+        This 'on_enter' callback confirms that the device is displaying the
+        correct LED pattern for brute force lockout.
+
+        Args:
+            event_data: The event data provided by the FSM.
         """
         self.logger.info("Entered BRUTE_FORCE mode. Checking conditions...")
         context = {
@@ -438,8 +574,14 @@ class ApricornDeviceFSM:
 
     def on_enter_COUNTER_ENROLLMENT(self, event_data: EventData) -> None:
         """
-        Called upon entering COUNTER_ENROLLMENT. It logs which specific
-        counter enrollment process was triggered.
+        Verifies the device state upon entering Counter Enrollment mode.
+
+        This 'on_enter' callback confirms the device is showing the red
+        blinking pattern, indicating it is ready to accept numeric input
+        for a counter setting (e.g., min PIN length).
+
+        Args:
+            event_data: The event data provided by the FSM.
         """
         context = {
             'fsm_current_state': self.source_state,
@@ -453,8 +595,19 @@ class ApricornDeviceFSM:
 
     def on_enter_PIN_ENROLLMENT(self, event_data: EventData) -> None:
         """
-        Called upon entering PIN_ENROLLMENT. It logs which specific
-        PIN enrollment process was triggered.
+        Verifies the device state upon entering PIN Enrollment mode.
+
+        This 'on_enter' callback confirms the device is showing the correct
+        LED pattern for the specific type of PIN being enrolled (e.g.,
+        green/blue for User, red/blue for Self-Destruct).
+
+        Args:
+            event_data: The event data from the FSM, which includes the
+                        trigger name to determine which PIN type is expected.
+
+        Raises:
+            TransitionCallbackError: If the expected LED pattern for the
+                                     enrollment type is not observed.
         """
         context = {
             'fsm_current_state': self.source_state,
@@ -481,13 +634,35 @@ class ApricornDeviceFSM:
 ## Power
 
     def _power_toggle(self, event_data: EventData) -> None:
+        """
+        Handles the physical power-on or power-off sequence for the DUT.
+
+        This 'before' callback is triggered by the 'power_on' or 'power_off'
+        events. It interacts with the Phidget controller to either supply or
+        cut power to the device and verifies the initial hardware response for
+        a power-on event.
+
+        Args:
+            event_data: The event data provided by the FSM, containing
+                        transition and trigger information. The `usb2` kwarg
+                        can be passed to control USB2/3 mode on power-on.
+
+        Raises:
+            TransitionCallbackError: If the 'power_on' event fails to confirm
+                                     the startup LED pattern.
+        """
         dest_state = event_data.transition.dest if event_data.transition else "UNKNOWN"
         context = {'fsm_current_state': self.state, 'fsm_destination_state': dest_state}
         trigger_name = event_data.event.name
+        usb2 = event_data.kwargs.get('usb2')
+
+        if type(usb2) != bool:
+            raise TransitionCallbackError("usb2 argument requires a boolean.")
 
         if trigger_name == 'power_on':
             self.logger.info("Powering DUT on and performing self-test...")
-            self.at.on("usb3")
+            if usb2:
+                self.at.on("usb3")
             self.at.on("connect")
             time.sleep(0.5)
             if DUT.vbus:
@@ -503,6 +678,20 @@ class ApricornDeviceFSM:
 ## Unlocks
 
     def _enter_admin_pin(self, event_data: EventData) -> None:
+        """
+        Performs the sequence to unlock the device with the Admin PIN.
+
+        This 'before' callback enters the stored Admin PIN and confirms the
+        correct enumeration LED pattern based on the device's current
+        configuration (e.g., read-only, lock-override).
+
+        Args:
+            event_data: The event data provided by the FSM.
+
+        Raises:
+            TransitionCallbackError: If the expected unlock LED pattern is not
+                                     observed.
+        """
         dest_state = event_data.transition.dest if event_data.transition else "UNKNOWN"
         context = {'fsm_current_state': self.state, 'fsm_destination_state': dest_state}
 
@@ -522,6 +711,20 @@ class ApricornDeviceFSM:
                 raise TransitionCallbackError("Failed Admin unlock LED pattern.")
         
     def _enter_self_destruct_pin(self, event_data: EventData) -> None:
+        """
+        Performs the sequence to unlock the device with the Self-Destruct PIN.
+
+        This 'before' callback enters the stored Self-Destruct PIN and confirms
+        the correct enumeration LED pattern, which will trigger the device
+        to wipe its data.
+
+        Args:
+            event_data: The event data provided by the FSM.
+
+        Raises:
+            TransitionCallbackError: If the expected unlock LED pattern is not
+                                     observed.
+        """
         dest_state = event_data.transition.dest if event_data.transition else "UNKNOWN"
         context = {'fsm_current_state': self.state, 'fsm_destination_state': dest_state}
 
@@ -541,6 +744,21 @@ class ApricornDeviceFSM:
                 raise TransitionCallbackError("Failed Self-Destruct unlock LED pattern.")
         
     def _enter_user_pin(self, event_data: EventData) -> None:
+        """
+        Performs the sequence to unlock the device with a User PIN.
+
+        This 'before' callback retrieves the PIN for the specified `user_id`,
+        enters it, and confirms the correct enumeration LED pattern.
+
+        Args:
+            event_data: Event data from the FSM. Must contain a `user_id` in
+                        its kwargs to identify which user PIN to use.
+
+        Raises:
+            TransitionCallbackError: If `user_id` is missing, invalid, or has
+                                     no enrolled PIN, or if the expected unlock
+                                     LED pattern is not observed.
+        """
         dest_state = event_data.transition.dest if event_data.transition else "UNKNOWN"
         context = {'fsm_current_state': self.state, 'fsm_destination_state': dest_state}
 
@@ -573,6 +791,20 @@ class ApricornDeviceFSM:
 ## Logins
 
     def _enter_admin_mode_login(self, event_data: EventData) -> None:
+        """
+        Performs the sequence to enter Admin configuration mode.
+
+        This 'before' callback presses the required key combination, confirms
+        the LED pattern indicating the device is ready for the admin PIN, and
+        then enters the admin PIN.
+
+        Args:
+            event_data: The event data provided by the FSM.
+
+        Raises:
+            TransitionCallbackError: If the admin mode login LED pattern is
+                                     not observed.
+        """
         dest_state = event_data.transition.dest if event_data.transition else "UNKNOWN"
         context = {'fsm_current_state': self.state, 'fsm_destination_state': dest_state}
         self.at.press(['key0', 'unlock'], duration_ms=6000)
@@ -581,6 +813,16 @@ class ApricornDeviceFSM:
         self.at.sequence(DUT.admin_pin)
 
     def _enter_last_try_pin(self, event_data: EventData) -> None:
+        """
+        Performs the special login sequence for the 'last try' from brute force.
+
+        Args:
+            event_data: The event data provided by the FSM.
+
+        Raises:
+            TransitionCallbackError: If the 'last try' login LED pattern is
+                                     not observed.
+        """
         self.logger.info(f"Entering Last Try Login...")
         self.at.press(['key5', 'unlock'], duration_ms=6000)
         if not self.at.await_and_confirm_led_pattern(LEDs["RED_GREEN"], timeout=10):
@@ -591,6 +833,20 @@ class ApricornDeviceFSM:
 ## Resets
 
     def _do_user_reset(self, event_data: EventData) -> None:
+        """
+        Performs a user reset (factory default) of the device.
+
+        This 'before' callback initiates the reset sequence from Admin Mode,
+        confirms the key generation LED pattern, and upon success, resets the
+        DUT model's state by clearing all PINs.
+
+        Args:
+            event_data: The event data provided by the FSM.
+
+        Raises:
+            TransitionCallbackError: If the reset confirmation LED pattern
+                                     is not observed.
+        """
         dest_state = event_data.transition.dest if event_data.transition else "UNKNOWN"
         context = {'fsm_current_state': self.state, 'fsm_destination_state': dest_state}
         self.logger.info("Initiating User Reset...")
@@ -609,14 +865,25 @@ class ApricornDeviceFSM:
 ## Miscellaneous
         
     def _press_lock_button(self, event_data: EventData) -> None:
+        """
+        Simulates pressing the physical lock button on the device.
+
+        Args:
+            event_data: The event data provided by the FSM.
+        """
         self.logger.info(f"Locking DUT from Unlocked Admin...")
         self.at.press("lock")
 
     def _enter_invalid_pin(self, event_data: EventData) -> bool:
         """
-        Atomically performs the action of entering a guaranteed-invalid PIN
-        and verifies the device's REJECT response. This is a reusable helper
-        method and not a direct transition callback.
+        Enters a guaranteed-invalid PIN and verifies the REJECT response.
+
+        This action is used to decrement the brute force counter. It enters
+        a wrong PIN, confirms the device's reject pattern, and decrements the
+        `bruteForceCurrent` counter in the DUT model.
+
+        Args:
+            event_data: The event data provided by the FSM.
 
         Returns:
             True if the REJECT pattern was successfully observed, False otherwise.
@@ -639,6 +906,12 @@ class ApricornDeviceFSM:
 ## Admin mode Counter Enrollments
 
     def _brute_force_counter_enrollment(self, event_data: EventData) -> None:
+        """
+        Initiates the sequence to enroll a new brute force counter value.
+
+        Args:
+            event_data: The event data provided by the FSM.
+        """
         dest_state = event_data.transition.dest if event_data.transition else "UNKNOWN"
         context = {'fsm_current_state': self.state, 'fsm_destination_state': dest_state}
         
@@ -646,6 +919,12 @@ class ApricornDeviceFSM:
         self.at.press(['unlock', 'key5'], duration_ms=6000)
 
     def _min_pin_enrollment(self, event_data: EventData) -> None:
+        """
+        Initiates the sequence to enroll a new minimum PIN length.
+
+        Args:
+            event_data: The event data provided by the FSM.
+        """
         dest_state = event_data.transition.dest if event_data.transition else "UNKNOWN"
         context = {'fsm_current_state': self.state, 'fsm_destination_state': dest_state}
 
@@ -653,6 +932,12 @@ class ApricornDeviceFSM:
         self.at.press(['unlock', 'key4'], duration_ms=6000)
 
     def _unattended_auto_lock_enrollment(self, event_data: EventData) -> None:
+        """
+        Initiates the sequence to enroll a new unattended auto-lock timer value.
+
+        Args:
+            event_data: The event data provided by the FSM.
+        """
         dest_state = event_data.transition.dest if event_data.transition else "UNKNOWN"
         context = {'fsm_current_state': self.state, 'fsm_destination_state': dest_state}
         
@@ -660,6 +945,22 @@ class ApricornDeviceFSM:
         self.at.press(['unlock', 'key6'], duration_ms=6000)
 
     def _counter_enrollment(self, event_data: EventData) -> None:
+        """
+        Enters a numeric value for a counter and confirms the result.
+
+        This 'before' callback is triggered after initiating a counter
+        enrollment. It enters the `new_counter` value provided in the event's
+        kwargs, checks for the appropriate ACCEPT or REJECT pattern, and
+        updates the DUT model on success.
+
+        Args:
+            event_data: Event data containing the trigger name and a
+                        `new_counter` value in its kwargs.
+
+        Raises:
+            TransitionCallbackError: If `new_counter` is missing or invalid,
+                                     or if the hardware confirmation fails.
+        """
         dest_state = event_data.transition.dest if event_data.transition else "UNKNOWN"
         context = {'fsm_current_state': self.state, 'fsm_destination_state': dest_state}
         trigger_name = event_data.event.name
@@ -722,6 +1023,20 @@ class ApricornDeviceFSM:
                     self.logger.info(f"Unattended Auto-Lock new_counter set to: {new_counter}")
 
     def _timeout_counter_enrollment(self, event_data: EventData) -> None:
+        """
+        Handles the timeout case for counter enrollment.
+
+        This callback simulates waiting for the 30-second enrollment window to
+        expire. It then checks for a REJECT pattern if a partial PIN was
+        entered before the timeout.
+
+        Args:
+            event_data: Event data containing a boolean `pin_entered` kwarg.
+
+        Raises:
+            TransitionCallbackError: If the REJECT pattern is not observed
+                                     after a timeout with a partial entry.
+        """
         pin_entered = event_data.kwargs.get('pin_entered')
         dest_state = event_data.transition.dest if event_data.transition else "UNKNOWN"
         context = {'fsm_current_state': self.state, 'fsm_destination_state': dest_state}
@@ -735,7 +1050,13 @@ class ApricornDeviceFSM:
 #################
 ## Admin mode PIN Enrollments
 
-    def _admin_enrollment(self, event_data: EventData) -> None:       
+    def _admin_enrollment(self, event_data: EventData) -> None:
+        """
+        Initiates the sequence to enroll or change the Admin PIN.
+
+        Args:
+            event_data: The event data provided by the FSM.
+        """
         dest_state = event_data.transition.dest if event_data.transition else "UNKNOWN"
         context = {'fsm_current_state': self.state, 'fsm_destination_state': dest_state}
         
@@ -743,6 +1064,16 @@ class ApricornDeviceFSM:
         self.at.press(['unlock', 'key9'])
 
     def _recovery_pin_enrollment(self, event_data: EventData) -> None:
+        """
+        Initiates the sequence to enroll a new Recovery PIN.
+
+        Args:
+            event_data: The event data provided by the FSM.
+
+        Raises:
+            TransitionCallbackError: If the initial green/blue LED pattern is
+                                     not observed.
+        """
         dest_state = event_data.transition.dest if event_data.transition else "UNKNOWN"
         context = {'fsm_current_state': self.state, 'fsm_destination_state': dest_state}
         
@@ -751,6 +1082,16 @@ class ApricornDeviceFSM:
             raise TransitionCallbackError("Did not observe GREEN_BLUE pattern for recovery enrollment.")
 
     def _user_enrollment(self, event_data: EventData) -> None:
+        """
+        Initiates the sequence to enroll a new User PIN.
+
+        Args:
+            event_data: The event data provided by the FSM.
+
+        Raises:
+            TransitionCallbackError: If the initial green/blue LED pattern is
+                                     not observed.
+        """
         dest_state = event_data.transition.dest if event_data.transition else "UNKNOWN"
         context = {'fsm_current_state': self.state, 'fsm_destination_state': dest_state}
 
@@ -759,6 +1100,21 @@ class ApricornDeviceFSM:
             raise TransitionCallbackError("Did not observe GREEN_BLUE pattern for user enrollment.")
 
     def _self_destruct_pin_enrollment(self, event_data: EventData) -> None:
+        """
+        Initiates the sequence to enroll a new Self-Destruct PIN.
+
+        This callback also checks if the self-destruct feature is enabled in
+        the DUT model; if not, it expects and confirms a REJECT pattern.
+
+        Args:
+            event_data: The event data provided by the FSM.
+
+        Raises:
+            TransitionCallbackError: If the self-destruct feature is disabled
+                                     and the REJECT pattern is not seen, or if
+                                     the feature is enabled and the enrollment
+                                     fails.
+        """
         dest_state = event_data.transition.dest if event_data.transition else "UNKNOWN"
         context = {'fsm_current_state': self.state, 'fsm_destination_state': dest_state}
 
@@ -772,6 +1128,25 @@ class ApricornDeviceFSM:
             self.at.press(['key3', 'unlock'])
 
     def _pin_enrollment(self, event_data: EventData) -> None:
+        """
+        Enters a new PIN, confirms it, and verifies the device's response.
+
+        This comprehensive 'before' callback handles the two-step entry process
+        for all PIN types (Admin, User, Recovery, Self-Destruct). It enters
+        the PIN, waits for the confirmation prompt, re-enters the PIN, and
+        verifies the final accept/reject signal. On success, it updates the
+        corresponding PIN in the DUT model.
+
+        Args:
+            event_data: Event data containing the trigger name and a `new_pin`
+                        list in its kwargs.
+
+        Raises:
+            TransitionCallbackError: If `new_pin` is missing/invalid, if any
+                                     hardware confirmation step fails, or if
+                                     enrollment is attempted when no slots
+                                     are available.
+        """
         dest_state = event_data.transition.dest if event_data.transition else "UNKNOWN"
         context = {'fsm_current_state': self.state, 'fsm_destination_state': dest_state}
         trigger_name = event_data.event.name
@@ -863,6 +1238,15 @@ class ApricornDeviceFSM:
 ## Admin mode Toggles
 
     def _basic_disk_toggle(self, event_data: EventData) -> None:
+        """
+        Toggles the device's basic disk mode.
+
+        Args:
+            event_data: The event data provided by the FSM.
+
+        Raises:
+            TransitionCallbackError: If the ACCEPT pattern is not observed.
+        """
         dest_state = event_data.transition.dest if event_data.transition else "UNKNOWN"
         context = {'fsm_current_state': self.state, 'fsm_destination_state': dest_state}
         
@@ -875,6 +1259,15 @@ class ApricornDeviceFSM:
             self.logger.info(f"Basic Disk mode: {DUT.basic_disk}")
 
     def _removable_media_toggle(self, event_data: EventData) -> None:
+        """
+        Toggles the device's removable media mode.
+
+        Args:
+            event_data: The event data provided by the FSM.
+
+        Raises:
+            TransitionCallbackError: If the ACCEPT pattern is not observed.
+        """
         dest_state = event_data.transition.dest if event_data.transition else "UNKNOWN"
         context = {'fsm_current_state': self.state, 'fsm_destination_state': dest_state}
         
@@ -887,6 +1280,15 @@ class ApricornDeviceFSM:
             self.logger.info(f"Removable Media mode: {DUT.removable_media}")
 
     def _led_flicker_enable(self, event_data: EventData) -> None:
+        """
+        Enables the device's LED flicker mode.
+
+        Args:
+            event_data: The event data provided by the FSM.
+
+        Raises:
+            TransitionCallbackError: If the ACCEPT pattern is not observed.
+        """
         dest_state = event_data.transition.dest if event_data.transition else "UNKNOWN"
         context = {'fsm_current_state': self.state, 'fsm_destination_state': dest_state}
         
@@ -899,6 +1301,15 @@ class ApricornDeviceFSM:
             self.logger.info(f"LED Flicker mode: {DUT.led_flicker}")
 
     def _led_flicker_disable(self, event_data: EventData) -> None:
+        """
+        Disables the device's LED flicker mode.
+
+        Args:
+            event_data: The event data provided by the FSM.
+
+        Raises:
+            TransitionCallbackError: If the ACCEPT pattern is not observed.
+        """
         dest_state = event_data.transition.dest if event_data.transition else "UNKNOWN"
         context = {'fsm_current_state': self.state, 'fsm_destination_state': dest_state}
         
@@ -911,6 +1322,15 @@ class ApricornDeviceFSM:
             self.logger.info(f"LED Flicker mode: {DUT.led_flicker}")
 
     def _lock_override_toggle(self, event_data: EventData) -> None:
+        """
+        Toggles the device's lock override feature.
+
+        Args:
+            event_data: The event data provided by the FSM.
+
+        Raises:
+            TransitionCallbackError: If the ACCEPT pattern is not observed.
+        """
         dest_state = event_data.transition.dest if event_data.transition else "UNKNOWN"
         context = {'fsm_current_state': self.state, 'fsm_destination_state': dest_state}
         
@@ -923,6 +1343,18 @@ class ApricornDeviceFSM:
             self.logger.info(f"LED Override mode: {DUT.lock_override}")
 
     def _provision_lock_toggle(self, event_data: EventData) -> None:
+        """
+        Toggles the device's provision lock feature.
+
+        This callback checks if self-destruct is enabled first, as these
+        features are mutually exclusive.
+
+        Args:
+            event_data: The event data provided by the FSM.
+
+        Raises:
+            TransitionCallbackError: If the feature toggle fails.
+        """
         dest_state = event_data.transition.dest if event_data.transition else "UNKNOWN"
         context = {'fsm_current_state': self.state, 'fsm_destination_state': dest_state}
         
@@ -941,6 +1373,15 @@ class ApricornDeviceFSM:
                 self.logger.info(f"Provision Lock mode: {DUT.provision_lock}")
 
     def _read_only_toggle(self, event_data: EventData) -> None:
+        """
+        Toggles the device to read-only mode.
+
+        Args:
+            event_data: The event data provided by the FSM.
+
+        Raises:
+            TransitionCallbackError: If the ACCEPT pattern is not observed.
+        """
         dest_state = event_data.transition.dest if event_data.transition else "UNKNOWN"
         context = {'fsm_current_state': self.state, 'fsm_destination_state': dest_state}
         
@@ -953,6 +1394,15 @@ class ApricornDeviceFSM:
             self.logger.info(f"Read-Only mode: {DUT.read_only_enabled}")
 
     def _read_write_toggle(self, event_data: EventData) -> None:
+        """
+        Toggles the device to read-write mode.
+
+        Args:
+            event_data: The event data provided by the FSM.
+
+        Raises:
+            TransitionCallbackError: If the ACCEPT pattern is not observed.
+        """
         dest_state = event_data.transition.dest if event_data.transition else "UNKNOWN"
         context = {'fsm_current_state': self.state, 'fsm_destination_state': dest_state}
         
@@ -965,6 +1415,18 @@ class ApricornDeviceFSM:
             self.logger.info(f"Read-Write mode: {DUT.read_only_enabled}")
 
     def _self_destruct_toggle(self, event_data: EventData) -> None:
+        """
+        Toggles the device's self-destruct feature.
+
+        This callback checks if provision lock is enabled first, as these
+        features are mutually exclusive.
+
+        Args:
+            event_data: The event data provided by the FSM.
+
+        Raises:
+            TransitionCallbackError: If the feature toggle fails.
+        """
         dest_state = event_data.transition.dest if event_data.transition else "UNKNOWN"
         context = {'fsm_current_state': self.state, 'fsm_destination_state': dest_state}
 
@@ -982,6 +1444,18 @@ class ApricornDeviceFSM:
                 DUT.self_destruct_enabled = True
 
     def _user_forced_enrollment_toggle(self, event_data: EventData) -> None:
+        """
+        Toggles the device's User-Forced Enrollment feature.
+
+        This feature can only be enabled; it cannot be disabled via the same
+        toggle. The callback confirms the correct ACCEPT or REJECT pattern.
+
+        Args:
+            event_data: The event data provided by the FSM.
+
+        Raises:
+            TransitionCallbackError: If the feature toggle fails.
+        """
         dest_state = event_data.transition.dest if event_data.transition else "UNKNOWN"
         context = {'fsm_current_state': self.state, 'fsm_destination_state': dest_state}
         
@@ -1002,6 +1476,15 @@ class ApricornDeviceFSM:
                 self.logger.info(f"User-Forced Enrollment cannot be disabled using this toggle...")
 
     def _delete_pins_toggle(self, event_data: EventData) -> None:
+        """
+        Performs the two-step sequence to delete all User and Recovery PINs.
+
+        Args:
+            event_data: The event data provided by the FSM.
+
+        Raises:
+            TransitionCallbackError: If any hardware confirmation step fails.
+        """
         dest_state = event_data.transition.dest if event_data.transition else "UNKNOWN"
         context = {'fsm_current_state': self.state, 'fsm_destination_state': dest_state}
         
@@ -1019,4 +1502,3 @@ class ApricornDeviceFSM:
                         raise TransitionCallbackError("Did not observe final ACCEPT_PATTERN for recovery PIN confirmation.")
                     else:
                         self.logger.info(f"Delete PINs toggled. PINs deleted...")
-
