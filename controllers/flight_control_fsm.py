@@ -8,6 +8,7 @@ import os
 from pprint import pprint
 import json
 from camera.led_dictionaries import LEDs
+import subprocess
 
 ### For running scripts
 # from transitions import Machine, EventData
@@ -79,74 +80,129 @@ class DeviceUnderTest:
     """
     device_name = "padlock3-3637"
 
-    name = device_name
-    battery = False
-    battery_vbus = False
-    vbus = True
-    bridge_fw = DEVICE_PROPERTIES[device_name]['bridge_fw']
-    pid = DEVICE_PROPERTIES[device_name]['id_product']
-    mcu_fw = []
-    mcu_fw_human_readable = ""
-    fips = DEVICE_PROPERTIES[device_name]['fips']
-    secure_key = DEVICE_PROPERTIES[device_name]['secure_key']
-    usb3 = False
-    disk_path = ""
-    mounted = False
-    serial_number = ""
-    dev_keypad_serial_number = ""
+    name: str = device_name
+    battery: bool = False
+    battery_vbus: bool = False
+    vbus: bool = True
+    bridge_fw: str = DEVICE_PROPERTIES[device_name]['bridge_fw']
+    pid: str = DEVICE_PROPERTIES[device_name]['id_product']
+    mcu_fw_human_readable = DEVICE_PROPERTIES[device_name]['mcu_fw']
+    mcu_fw: list[int] = mcu_fw_human_readable.split(".")
+    fips: int = DEVICE_PROPERTIES[device_name]['fips']
+    secure_key: bool = DEVICE_PROPERTIES[device_name]['secure_key']
+    usb3: bool = False
+    disk_path: str = ""
+    mounted: bool = False
+    serial_number: str = ""
+    dev_keypad_serial_number: str = ""
+    scanned_serial_number: str = ""
 
-    CMFR = False
-    model_id_1 = DEVICE_PROPERTIES[device_name]['model_id_digit_1']
-    model_id_2 = DEVICE_PROPERTIES[device_name]['model_id_digit_2']
-    hardware_id_1 = DEVICE_PROPERTIES[device_name]['hardware_major']
-    hardware_id_2 = DEVICE_PROPERTIES[device_name]['hardware_minor']
-    scb_part_number = DEVICE_PROPERTIES[device_name]['scb_part_number']
-    single_code_base = scb_part_number is None
+    model_id_1: int = DEVICE_PROPERTIES[device_name]['model_id_digit_1']
+    model_id_2: int = DEVICE_PROPERTIES[device_name]['model_id_digit_2']
+    hardware_id_1: int = DEVICE_PROPERTIES[device_name]['hardware_major']
+    hardware_id_2: int = DEVICE_PROPERTIES[device_name]['hardware_minor']
+    scb_part_number: str = DEVICE_PROPERTIES[device_name]['scb_part_number']
+    single_code_base: bool = scb_part_number is None
     
-    basic_disk = True
-    removable_media = False
+    basic_disk: bool = True
+    removable_media: bool = False
     
-    brute_force_counter = 20
-    brute_force_counter_current = 20
+    brute_force_counter: int = 20
+    brute_force_counter_current: int = 20
     
-    led_flicker = False
-    lock_override = False
+    led_flicker: bool = False
+    lock_override: bool = False
 
-    manufacturer_reset_enum = False
+    manufacturer_reset_enum: bool = False
 
-    maximum_pin_counter = 16
+    maximum_pin_counter: int = 16
     minimum_pin_counter = int(DEVICE_PROPERTIES[device_name]['minimum_pin_length'])
     default_minimum_pin_counter = int(DEVICE_PROPERTIES[device_name]['minimum_pin_length'])
 
-    provision_lock = False
-    provision_lock_bricked = False
-    provision_lock_recovery_counter = 5
+    provision_lock: bool = False
+    provision_lock_bricked: bool = False
+    provision_lock_recovery_counter: int = 5
 
-    read_only_enabled = False
+    read_only_enabled: bool = False
 
-    unattended_auto_lock_counter = 0
+    unattended_auto_lock_counter: int = 0
 
-    user_forced_enrollment = False
-    user_forced_enrollment_used = False
+    user_forced_enrollment: bool = False
+    user_forced_enrollment_used: bool = False
 
-    admin_pin = []
-    old_admin_pin = []
+    admin_pin: list[str] = []
+    old_admin_pin: list[str] = []
 
     recovery_pin: Dict[int, Optional[List[str]]] = {i: None for i in range(1, 5)}
     old_recovery_pin: Dict[int, Optional[List[str]]] = {i: None for i in range(1, 5)}
     recovery_pin_used: Dict[int, bool] = {i: False for i in range(1, 5)}
     
-    self_destruct_enabled = False
-    self_destruct_pin = []
-    old_self_destruct_pin = []
-    self_destruct_enum = False
-    self_destruct_used = False
+    self_destruct_enabled: bool = False
+    self_destruct_pin: list[str] = []
+    old_self_destruct_pin: list[str] = []
+    self_destruct_enum: bool = False
+    self_destruct_used: bool = False
 
     user_count = DEVICE_PROPERTIES[device_name]['user_count']
     _max_users = 1 if fips in [2, 3] else 4
     user_pin: Dict[int, Optional[List[str]]] = {i: None for i in range(1, _max_users + 1)}
     old_user_pin: Dict[int, Optional[List[str]]] = {i: None for i in range(1, _max_users + 1)}
     user_pin_enum: Dict[int, bool] = {i: False for i in range(1, _max_users + 1)}
+
+    def _delete_pins(self):
+        """ This function sets the current DUT recovery_pin, self_destruct and user_pin parameters to the 'old' parameters.
+            Then clears the current DUT recovery_pin, self_destruct_pin, user_forced_enrollment and user_pin parameters
+            Args:
+                None:
+        """
+        self.old_recovery_pin = self.recovery_pin
+        self.recovery_pin: Dict[int, Optional[List[str]]] = {i: None for i in range(1, 5)}
+        self.recovery_pin_used: Dict[int, bool] = {i: False for i in range(1, 5)}
+
+        self.old_self_destruct_pin = self.self_destruct_pin
+        self.self_destruct_pin = []
+        self.self_destruct_enabled = False
+        self.self_destruct_enum = False
+        self.self_destruct_used = False
+
+        self.old_user_pin = self.user_pin
+        self.user_count = DEVICE_PROPERTIES[self.device_name]['user_count']
+        self._max_users = 1 if self.fips in [2, 3] else 4
+        self.user_pin: Dict[int, Optional[List[str]]] = {i: None for i in range(1, self._max_users + 1)}
+        self.user_pin_enum: Dict[int, bool] = {i: False for i in range(1, self._max_users + 1)}
+
+        self.user_forced_enrollment = False
+        self.user_forced_enrollment_used = False
+
+    def _reset(self):
+        """ Resets all attributes of the DUT model to their default initial state.
+            Args:
+                None:
+        """
+        self.__init__()
+
+    def _self_destruct(self):
+        """ This function sets the current DUT admin_pin, recovery_pin, self_destruct_pin, and user_pin parameters to the 'old' parameters.
+            Then clears the current DUT admin_pin, recovery_pin, self_destruct_pin, user_forced_enrollment and user_pin parameters
+            Args:
+                None:
+        """
+        self.old_admin_pin = self.admin_pin
+        self.admin_pin = self.self_destruct_pin
+
+        self.old_recovery_pin = self.recovery_pin
+        self.recovery_pin: Dict[int, Optional[List[str]]] = {i: None for i in range(1, 5)}
+        self.recovery_pin_used: Dict[int, bool] = {i: False for i in range(1, 5)}
+
+        self.old_self_destruct_pin = self.self_destruct_pin
+        self.self_destruct_pin = []
+        self.self_destruct_enabled = False
+        self.self_destruct_used = True
+
+        self.brute_force_counter = 20
+        self.brute_force_counter_current = 20
+
+        self.unattended_auto_lock_counter = 0
 
 DUT = DeviceUnderTest()
 
@@ -334,7 +390,7 @@ class ApricornDeviceFSM:
         self.machine = Machine(**machine_kwargs)
         self.transition_config = transitions
 
-        # --- TRANSITIONS (Type Hinting for autocomplete and static analysis) ---
+        # --- Public functions --- #
         self.admin_mode_login: Callable
         self.admin_recovery_failed: Callable
         self.delete_pins: Callable
@@ -396,7 +452,7 @@ class ApricornDeviceFSM:
 
 
 ###########################################################################################################
-# Transition Functions (Automatic)
+# Transition Functions (Automatic on entry to state)
     
     def on_enter_ADMIN_MODE(self, event_data: EventData) -> None:
         """
@@ -628,7 +684,7 @@ class ApricornDeviceFSM:
                 self.logger.info("Awaiting PIN enrollment...")
 
 ###########################################################################################################
-# Before/After Functions
+# Before/After Functions (Automatic before entry to state)
 
 ##########
 ## Power
@@ -1501,4 +1557,23 @@ class ApricornDeviceFSM:
                     if not self.at.confirm_led_solid(LEDs["ACCEPT_STATE"], minimum=1, timeout=3, replay_extra_context=context):
                         raise TransitionCallbackError("Did not observe final ACCEPT_PATTERN for recovery PIN confirmation.")
                     else:
+                        DUT._delete_pins()
                         self.logger.info(f"Delete PINs toggled. PINs deleted...")
+
+#################
+## Verification of Toggled Behavior
+
+#################
+## Speed Test
+    def speed_test(self, target: str, event_data: EventData) -> None:
+        dest_state = event_data.transition.dest if event_data.transition else "UNKNOWN"
+        context = {'fsm_current_state': self.state, 'fsm_destination_state': dest_state}
+        
+        self.at.run_fio_tests(disk_path=target)
+
+#################
+## Barcode Scanner Integration
+
+
+
+

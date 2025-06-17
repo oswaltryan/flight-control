@@ -31,9 +31,11 @@ DEFAULT_SCRIPT_CHANNEL_MAP_CONFIG = {
         "key9":    {"phidget_id": "main_phidget", "physical_channel": 9},
         "lock":    {"phidget_id": "main_phidget", "physical_channel": 10},
         "unlock":  {"phidget_id": "main_phidget", "physical_channel": 11},
+        "hold":    {"phidget_id": "main_phidget", "physical_channel": 12},
         "connect": {"phidget_id": "main_phidget", "physical_channel": 13},
         "usb3":    {"phidget_id": "main_phidget", "physical_channel": 14},
-        "hold":    {"phidget_id": "main_phidget", "physical_channel": 12},
+        "barcode": {"phidget_id": "main_phidget", "physical_channel": 15}
+        
     },
     "inputs": {
         "prod_inserted": {"phidget_id": "main_phidget", "physical_channel": 0},

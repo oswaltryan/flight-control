@@ -1,13 +1,16 @@
 # Directory: controllers
 # Filename: unified_controller.py
+
 #!/usr/bin/env python3
 
+import json
 import logging
 import sys
 import os
 import time 
 from typing import Optional, List, Dict, Any, Union
 from pprint import pprint
+import subprocess
 
 # --- Path Setup ---
 CONTROLLERS_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -27,7 +30,7 @@ try:
     from Phidget22.PhidgetException import PhidgetException
     from camera.led_dictionaries import LEDs
     from usb_tool import find_apricorn_device
-    # from transitions import EventData # For FSM event data typing if needed
+    from transitions import EventData
 except ImportError as e_import:
     module_logger.critical(f"Critical Import Error in unified_controller.py: {e_import}. Check paths and dependencies.", exc_info=True)
     raise
@@ -56,6 +59,7 @@ class UnifiedController:
         phidget_ctrl_logger = self.logger.getChild("Phidget")
         camera_ctrl_logger = self.logger.getChild("Camera")
 
+        # --- Initialize Phidget --- #
         self._phidget_controller = None
         try:
             self._phidget_controller = PhidgetController(
@@ -63,6 +67,7 @@ class UnifiedController:
         except Exception as e_phidget_init:
             self.logger.error(f"Failed to initialize PhidgetController: {e_phidget_init}", exc_info=True)
 
+        # --- Initialize Camera --- #
         self._camera_checker = None
         self.effective_led_duration_tolerance = led_duration_tolerance_sec if led_duration_tolerance_sec is not None else CAMERA_DEFAULT_TOLERANCE
         effective_replay_duration = replay_post_failure_duration_sec if replay_post_failure_duration_sec is not None else CAMERA_DEFAULT_REPLAY_DURATION
@@ -239,6 +244,133 @@ class UnifiedController:
         
         self.logger.warning(f"Device with iSerial {first_device_serial} did not remain stable or was not found after stability wait.")
         return False
+    
+    def _get_fio_path(self) -> str:
+        """
+        Determines the correct path to the bundled FIO binary based on the OS.
+
+        Returns:
+            The absolute path to the FIO executable.
+
+        Raises:
+            FileNotFoundError: If the FIO binary for the current OS is not found.
+            NotImplementedError: If the current OS is not supported.
+        """
+        binaries_dir = os.path.join(PROJECT_ROOT, 'tools', 'binaries')
+        fio_path = None
+
+        if sys.platform == 'darwin':
+            fio_path = os.path.join(binaries_dir, 'fio-macos')
+        elif sys.platform.startswith('linux'):
+            fio_path = os.path.join(binaries_dir, 'fio-linux')
+        elif sys.platform == 'win32':
+            fio_path = os.path.join(binaries_dir, 'fio.exe')
+        else:
+            raise NotImplementedError(f"FIO automation is not supported on this OS: {sys.platform}")
+
+        if not os.path.isfile(fio_path):
+            raise FileNotFoundError(f"FIO executable not found at the expected path: {fio_path}")
+        
+        # On Linux/macOS, ensure it's executable
+        if not os.access(fio_path, os.X_OK) and sys.platform != 'win32':
+            self.logger.warning(f"FIO binary at {fio_path} is not executable. Attempting to run it anyway, but it may fail.")
+
+        return fio_path
+    
+    def run_fio_tests(self, disk_path: str, duration: int = 10, tests_to_run: Optional[List[Dict[str, Any]]] = None) -> bool:
+        """
+        Runs a series of specified FIO speed tests on the connected device.
+        If no tests are provided, runs a default sequential read/write test.
+
+        Args:
+            duration (int): The runtime in seconds for each test.
+            tests_to_run (Optional[List[Dict]]): A list of dictionaries defining
+                custom tests. If None, default tests are used.
+        Returns:
+            True if all tests complete successfully, False otherwise.
+        """
+        if tests_to_run is None:
+            self.logger.info("No specific tests provided, using default sequential R/W tests.")
+            tests_to_run = [
+                {
+                    "name": "W-SEQ-1M-Q32",
+                    "rw": "write",
+                    "bs": "1m",
+                    "iodepth": 32
+                },
+                {
+                    "name": "R-SEQ-1M-Q32",
+                    "rw": "read",
+                    "bs": "1m",
+                    "iodepth": 32
+                }
+            ]
+
+        self.logger.info(f"Starting FIO speed test sequence for {duration}s each.")
+        
+        try:
+            fio_path = self._get_fio_path()
+        except (FileNotFoundError, NotImplementedError) as e:
+            self.logger.error(f"Cannot run FIO tests: {e}")
+            raise
+        
+            
+        fio_target_file = os.path.join(disk_path, 'fio_speed_test.tmp')
+        self.logger.info(f"Target path for FIO test file: {fio_target_file}")
+
+        for test_params in tests_to_run:
+            self.logger.info(f"--- Preparing FIO test: {test_params.get('name', 'Unnamed')} ---")
+            
+            base_command = [
+                fio_path,
+                "--direct=1",
+                "--output-format=json",
+                "--random_generator=tausworthe64",
+                f"--filename={fio_target_file}",
+                f"--runtime={duration}",
+                f"--name={test_params.get('name')}",
+                f"--rw={test_params.get('rw')}",
+                f"--bs={test_params.get('bs')}",
+                f"--iodepth={test_params.get('iodepth')}",
+                "--group_reporting"
+            ]
+            
+            try:
+                self.logger.info(f"Executing command: {' '.join(base_command)}")
+                result = subprocess.run(base_command, check=True, capture_output=True, text=True)
+                
+                self.logger.info(f"--- FIO Test '{test_params.get('name')}' Output ---")
+                try:
+                    json_output = json.loads(result.stdout)
+                    self.logger.info(json.dumps(json_output, indent=2))
+                except json.JSONDecodeError:
+                    for line in result.stdout.splitlines():
+                        self.logger.info(f"  {line}")
+
+                if result.stderr:
+                    self.logger.warning(f"FIO Stderr: {result.stderr}")
+
+            except FileNotFoundError:
+                self.logger.error(f"FIO command not found at '{fio_path}'. This should not happen if _get_fio_path succeeded.")
+                raise
+            except subprocess.CalledProcessError as e:
+                self.logger.error(f"FIO test '{test_params.get('name')}' failed with exit code {e.returncode}.")
+                self.logger.error(f"  Stdout: {e.stdout}")
+                self.logger.error(f"  Stderr: {e.stderr}")
+                return False
+            except Exception as e:
+                self.logger.error(f"An unexpected error occurred during FIO test: {e}", exc_info=True)
+                return False
+
+        try:
+            self.logger.info(f"All tests passed. Cleaning up test file: {fio_target_file}")
+            if os.path.exists(fio_target_file):
+                os.remove(fio_target_file)
+        except Exception as e:
+            self.logger.warning(f"Could not clean up test file {fio_target_file}: {e}")
+
+        self.logger.info("FIO test sequence completed successfully.")
+        return True
 
     # --- FSM Event Handling Callbacks (High-Level) ---
     def handle_post_failure(self, event_data: Any) -> None: 

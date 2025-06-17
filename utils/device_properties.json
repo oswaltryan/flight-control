@@ -1,12 +1,6 @@
 {
     "scriptConfig": {
-        "power": "VBUS",
-        "collectusbmontraces": false,
-        "usbmonoob": 5,
-        "usbmonreset": 10,
-        "usbmonunlock": 5,
-        "usbmonSPI": 7,
-        "id_product": ""
+        "power": "VBUS"
     },
     "development-board-3637": {
         "name": "development-board-3637",
