@@ -70,7 +70,7 @@ except Exception as e:
 
 class DeviceUnderTest:
     """
-    A stateful model representing the Device Under Test (DUT).
+    A stateful model representing the Device Under Test (self.dut).
 
     This class acts as a data container, tracking the known and assumed state
     of the physical hardware device. It holds properties like enrolled PINs,
@@ -78,80 +78,92 @@ class DeviceUnderTest:
     and hardware identifiers. The FSM and its callbacks read from and write
     to an instance of this class to mirror the device's real-world state.
     """
-    device_name = "padlock3-3637"
+    def __init__(self, at_controller: 'UnifiedController'):
+        """
+        Initializes the DeviceUnderTest state model.
 
-    name: str = device_name
-    battery: bool = False
-    battery_vbus: bool = False
-    vbus: bool = True
-    bridge_fw: str = DEVICE_PROPERTIES[device_name]['bridge_fw']
-    pid: str = DEVICE_PROPERTIES[device_name]['id_product']
-    mcu_fw_human_readable = DEVICE_PROPERTIES[device_name]['mcu_fw']
-    mcu_fw: list[int] = mcu_fw_human_readable.split(".")
-    fips: int = DEVICE_PROPERTIES[device_name]['fips']
-    secure_key: bool = DEVICE_PROPERTIES[device_name]['secure_key']
-    usb3: bool = False
-    disk_path: str = ""
-    mounted: bool = False
-    serial_number: str = ""
-    dev_keypad_serial_number: str = ""
-    scanned_serial_number: str|None
+        Args:
+            at_controller: An instance of the UnifiedController to allow
+                           this model to interact with hardware if needed.
+        """
+        self.at = at_controller # <<< CHANGED: Store the controller instance.
 
-    model_id_1: int = DEVICE_PROPERTIES[device_name]['model_id_digit_1']
-    model_id_2: int = DEVICE_PROPERTIES[device_name]['model_id_digit_2']
-    hardware_id_1: int = DEVICE_PROPERTIES[device_name]['hardware_major']
-    hardware_id_2: int = DEVICE_PROPERTIES[device_name]['hardware_minor']
-    scb_part_number: str = DEVICE_PROPERTIES[device_name]['scb_part_number']
-    single_code_base: bool = scb_part_number is None
-    
-    basic_disk: bool = True
-    removable_media: bool = False
-    
-    brute_force_counter: int = 20
-    brute_force_counter_current: int = 20
-    
-    led_flicker: bool = False
-    lock_override: bool = False
+        # <<< CHANGED: All class attributes are now instance attributes.
+        self.device_name = "padlock3-3637"
 
-    manufacturer_reset_enum: bool = False
+        self.name: str = self.device_name
+        self.battery: bool = False
+        self.battery_vbus: bool = False
+        self.vbus: bool = True
+        self.bridge_fw: str = DEVICE_PROPERTIES[self.device_name]['bridge_fw']
+        self.pid: str = DEVICE_PROPERTIES[self.device_name]['id_product']
+        self.mcu_fw_human_readable = DEVICE_PROPERTIES[self.device_name]['mcu_fw']
+        self.mcu_fw: list[int] = self.mcu_fw_human_readable.split(".")
+        self.fips: int = DEVICE_PROPERTIES[self.device_name]['fips']
+        self.secure_key: bool = DEVICE_PROPERTIES[self.device_name]['secure_key']
+        self.usb3: bool = False
+        self.disk_path: str = ""
+        self.mounted: bool = False
+        self.serial_number: str = ""
+        self.dev_keypad_serial_number: str = ""
+        self.scanned_serial_number: str|None = self.at.scanned_serial_number
 
-    maximum_pin_counter: int = 16
-    minimum_pin_counter = int(DEVICE_PROPERTIES[device_name]['minimum_pin_length'])
-    default_minimum_pin_counter = int(DEVICE_PROPERTIES[device_name]['minimum_pin_length'])
+        self.model_id_1: int = DEVICE_PROPERTIES[self.device_name]['model_id_digit_1']
+        self.model_id_2: int = DEVICE_PROPERTIES[self.device_name]['model_id_digit_2']
+        self.hardware_id_1: int = DEVICE_PROPERTIES[self.device_name]['hardware_major']
+        self.hardware_id_2: int = DEVICE_PROPERTIES[self.device_name]['hardware_minor']
+        self.scb_part_number: str = DEVICE_PROPERTIES[self.device_name]['scb_part_number']
+        self.single_code_base: bool = self.scb_part_number is None
 
-    provision_lock: bool = False
-    provision_lock_bricked: bool = False
-    provision_lock_recovery_counter: int = 5
+        self.basic_disk: bool = True
+        self.removable_media: bool = False
 
-    read_only_enabled: bool = False
+        self.brute_force_counter: int = 20
+        self.brute_force_counter_current: int = 20
 
-    unattended_auto_lock_counter: int = 0
+        self.led_flicker: bool = False
+        self.lock_override: bool = False
 
-    user_forced_enrollment: bool = False
-    user_forced_enrollment_used: bool = False
+        self.manufacturer_reset_enum: bool = False
 
-    admin_pin: list[str] = []
-    old_admin_pin: list[str] = []
+        self.maximum_pin_counter: int = 16
+        self.minimum_pin_counter = int(DEVICE_PROPERTIES[self.device_name]['minimum_pin_length'])
+        self.default_minimum_pin_counter = int(DEVICE_PROPERTIES[self.device_name]['minimum_pin_length'])
 
-    recovery_pin: Dict[int, Optional[List[str]]] = {i: None for i in range(1, 5)}
-    old_recovery_pin: Dict[int, Optional[List[str]]] = {i: None for i in range(1, 5)}
-    recovery_pin_used: Dict[int, bool] = {i: False for i in range(1, 5)}
-    
-    self_destruct_enabled: bool = False
-    self_destruct_pin: list[str] = []
-    old_self_destruct_pin: list[str] = []
-    self_destruct_enum: bool = False
-    self_destruct_used: bool = False
+        self.provision_lock: bool = False
+        self.provision_lock_bricked: bool = False
+        self.provision_lock_recovery_counter: int = 5
 
-    user_count = DEVICE_PROPERTIES[device_name]['user_count']
-    _max_users = 1 if fips in [2, 3] else 4
-    user_pin: Dict[int, Optional[List[str]]] = {i: None for i in range(1, _max_users + 1)}
-    old_user_pin: Dict[int, Optional[List[str]]] = {i: None for i in range(1, _max_users + 1)}
-    user_pin_enum: Dict[int, bool] = {i: False for i in range(1, _max_users + 1)}
+        self.read_only_enabled: bool = False
+
+        self.unattended_auto_lock_counter: int = 0
+
+        self.user_forced_enrollment: bool = False
+        self.user_forced_enrollment_used: bool = False
+
+        self.admin_pin: list[str] = []
+        self.old_admin_pin: list[str] = []
+
+        self.recovery_pin: Dict[int, Optional[List[str]]] = {i: None for i in range(1, 5)}
+        self.old_recovery_pin: Dict[int, Optional[List[str]]] = {i: None for i in range(1, 5)}
+        self.recovery_pin_used: Dict[int, bool] = {i: False for i in range(1, 5)}
+
+        self.self_destruct_enabled: bool = False
+        self.self_destruct_pin: list[str] = []
+        self.old_self_destruct_pin: list[str] = []
+        self.self_destruct_enum: bool = False
+        self.self_destruct_used: bool = False
+
+        self.user_count = DEVICE_PROPERTIES[self.device_name]['user_count']
+        self._max_users = 1 if self.fips in [2, 3] else 4
+        self.user_pin: Dict[int, Optional[List[str]]] = {i: None for i in range(1, self._max_users + 1)}
+        self.old_user_pin: Dict[int, Optional[List[str]]] = {i: None for i in range(1, self._max_users + 1)}
+        self.user_pin_enum: Dict[int, bool] = {i: False for i in range(1, self._max_users + 1)}
+
 
     def _delete_pins(self):
-        """ This function sets the current DUT recovery_pin, self_destruct and user_pin parameters to the 'old' parameters.
-            Then clears the current DUT recovery_pin, self_destruct_pin, user_forced_enrollment and user_pin parameters
+        """ This function sets the current self.dut recovery_pin, self_destruct and user_pin parameters to the 'old' parameters.
+            Then clears the current self.dut recovery_pin, self_destruct_pin, user_forced_enrollment and user_pin parameters
             Args:
                 None:
         """
@@ -175,15 +187,16 @@ class DeviceUnderTest:
         self.user_forced_enrollment_used = False
 
     def _reset(self):
-        """ Resets all attributes of the DUT model to their default initial state.
+        """ Resets all attributes of the self.dut model to their default initial state.
             Args:
                 None:
         """
-        self.__init__()
+        # Re-call init, passing along the controller it already has
+        self.__init__(self.at)
 
     def _self_destruct(self):
-        """ This function sets the current DUT admin_pin, recovery_pin, self_destruct_pin, and user_pin parameters to the 'old' parameters.
-            Then clears the current DUT admin_pin, recovery_pin, self_destruct_pin, user_forced_enrollment and user_pin parameters
+        """ This function sets the current self.dut admin_pin, recovery_pin, self_destruct_pin, and user_pin parameters to the 'old' parameters.
+            Then clears the current self.dut admin_pin, recovery_pin, self_destruct_pin, user_forced_enrollment and user_pin parameters
             Args:
                 None:
         """
@@ -203,8 +216,6 @@ class DeviceUnderTest:
         self.brute_force_counter_current = 20
 
         self.unattended_auto_lock_counter = 0
-
-DUT = DeviceUnderTest()
 
 class CallableCondition:
     """
@@ -250,7 +261,7 @@ class ApricornDeviceFSM:
     This class defines the operational states of the device and the transitions
     between them. It uses a `UnifiedController` instance (`at`) to interact
     with the physical hardware (key presses, LED state verification) and a
-    `DeviceUnderTest` instance (`DUT`) to maintain a model of the device's
+    `DeviceUnderTest` instance (`self.dut`) to maintain a model of the device's
     current configuration and state.
 
     Attributes:
@@ -270,6 +281,7 @@ class ApricornDeviceFSM:
 
     logger: logging.Logger
     at: 'UnifiedController'
+    dut: 'DeviceUnderTest'
     machine: Machine
     state: str
     source_state: str = 'OFF'
@@ -277,17 +289,11 @@ class ApricornDeviceFSM:
     def __init__(self, at_controller: 'UnifiedController'):
         """
         Initializes the ApricornDeviceFSM.
-
-        Sets up the states, transitions, and callbacks for the state machine.
-
-        Args:
-            at_controller: An initialized instance of the UnifiedController
-                           for interacting with the device hardware.
+        ...
         """
         self.logger = logging.getLogger("DeviceFSM.Simplified")
         self.at = at_controller
-
-        DUT.scanned_serial_number = self.at.scanned_serial_number
+        self.dut = DeviceUnderTest(at_controller=self.at)
 
         # Define all transitions in a single list of dictionaries, including lambdas.
         transitions = [
@@ -297,16 +303,16 @@ class ApricornDeviceFSM:
             {'trigger': 'power_off', 'source': '*', 'dest': 'OFF', 'before': '_power_toggle'},
 
             # --- 'Idle' Mode Transitions (from POST) ---
-            {'trigger': 'post_pass', 'source': 'POWER_ON_SELF_TEST', 'dest': 'OOB_MODE', 'conditions': [CallableCondition(lambda _: not DUT.admin_pin, "DUT.admiPIN not enrolled")]},
-            {'trigger': 'post_pass', 'source': 'POWER_ON_SELF_TEST', 'dest': 'USER_FORCED_ENROLLMENT', 'conditions': [CallableCondition(lambda _: bool(DUT.user_forced_enrollment), "DUT.user_forced_enrollment == True")]},
-            {'trigger': 'post_pass', 'source': 'POWER_ON_SELF_TEST', 'dest': 'BRUTE_FORCE', 'conditions': [CallableCondition(lambda _: DUT.brute_force_counter == 0, "DUT.brute_force_counter == 0")]},
-            {'trigger': 'post_pass', 'source': 'POWER_ON_SELF_TEST', 'dest': 'STANDBY_MODE', 'conditions': [CallableCondition(lambda _: bool(DUT.admin_pin), "DUT.admin_pin enrolled")]},
+            {'trigger': 'post_pass', 'source': 'POWER_ON_SELF_TEST', 'dest': 'OOB_MODE', 'conditions': [CallableCondition(lambda _: not self.dut.admin_pin, "dut.admiPIN not enrolled")]},
+            {'trigger': 'post_pass', 'source': 'POWER_ON_SELF_TEST', 'dest': 'USER_FORCED_ENROLLMENT', 'conditions': [CallableCondition(lambda _: bool(self.dut.user_forced_enrollment), "dut.user_forced_enrollment == True")]},
+            {'trigger': 'post_pass', 'source': 'POWER_ON_SELF_TEST', 'dest': 'BRUTE_FORCE', 'conditions': [CallableCondition(lambda _: self.dut.brute_force_counter == 0, "dut.brute_force_counter == 0")]},
+            {'trigger': 'post_pass', 'source': 'POWER_ON_SELF_TEST', 'dest': 'STANDBY_MODE', 'conditions': [CallableCondition(lambda _: bool(self.dut.admin_pin), "dut.admin_pin enrolled")]},
 
             # --- OOB Mode Transitions ---
             {'trigger': 'enter_diagnostic_mode', 'source': 'OOB_MODE', 'dest': 'DIAGNOSTIC_MODE'},
-            {'trigger': 'exit_diagnostic_mode', 'source': 'DIAGNOSTIC_MODE', 'dest': 'OOB_MODE', 'conditions': [CallableCondition(lambda _: not DUT.admin_pin, "DUT.admin_pin not enrolled")]},
+            {'trigger': 'exit_diagnostic_mode', 'source': 'DIAGNOSTIC_MODE', 'dest': 'OOB_MODE', 'conditions': [CallableCondition(lambda _: not self.dut.admin_pin, "dut.admin_pin not enrolled")]},
             {'trigger': 'enroll_admin', 'source': 'OOB_MODE', 'dest': 'ADMIN_MODE', 'before': '_admin_enrollment'},
-            {'trigger': 'user_reset', 'source': 'OOB_MODE', 'dest': 'OOB_MODE', 'conditions': [CallableCondition(lambda _: not DUT.provision_lock, "DUT.provision_lock == False")]},
+            {'trigger': 'user_reset', 'source': 'OOB_MODE', 'dest': 'OOB_MODE', 'conditions': [CallableCondition(lambda _: not self.dut.provision_lock, "dut.provision_lock == False")]},
 
             # --- Standby Mode Transitions ---
             {'trigger': 'admin_mode_login', 'source': 'STANDBY_MODE', 'dest': 'ADMIN_MODE', 'before': '_enter_admin_mode_login'},
@@ -315,12 +321,12 @@ class ApricornDeviceFSM:
             {'trigger': 'lock_admin', 'source': 'UNLOCKED_ADMIN', 'dest': 'STANDBY_MODE', 'before': '_press_lock_button'},
             {'trigger': 'enter_diagnostic_mode', 'source': 'STANDBY_MODE', 'dest': 'DIAGNOSTIC_MODE'},
             {'trigger': 'self_destruct', 'source': 'STANDBY_MODE', 'dest': 'UNLOCKED_ADMIN', 'before': '_enter_self_destruct_pin'},
-            {'trigger': 'exit_diagnostic_mode', 'source': 'DIAGNOSTIC_MODE', 'dest': 'STANDBY_MODE', 'conditions': [CallableCondition(lambda _: bool(DUT.admin_pin), "DUT.admin_pin enrolled")]},
-            {'trigger': 'user_reset', 'source': 'STANDBY_MODE', 'dest': 'OOB_MODE', 'conditions': [CallableCondition(lambda _: not DUT.provision_lock, "DUT.provision_lock == False")]},
+            {'trigger': 'exit_diagnostic_mode', 'source': 'DIAGNOSTIC_MODE', 'dest': 'STANDBY_MODE', 'conditions': [CallableCondition(lambda _: bool(self.dut.admin_pin), "dut.admin_pin enrolled")]},
+            {'trigger': 'user_reset', 'source': 'STANDBY_MODE', 'dest': 'OOB_MODE', 'conditions': [CallableCondition(lambda _: not self.dut.provision_lock, "dut.provision_lock == False")]},
             {'trigger': 'unlock_user', 'source': 'STANDBY_MODE', 'dest': 'UNLOCKED_USER', 'before': '_enter_user_pin'},
             {'trigger': 'lock_user', 'source': 'UNLOCKED_USER', 'dest': 'STANDBY_MODE', 'before': '_press_lock_button'},
-            {'trigger': 'fail_unlock', 'source': 'STANDBY_MODE', 'dest': 'STANDBY_MODE', 'before': '_enter_invalid_pin', 'conditions': [CallableCondition(lambda _: DUT.brute_force_counter_current > 1 and not (DUT.brute_force_counter_current == (DUT.brute_force_counter/2)+1), "Brute Force not triggered")]},
-            {'trigger': 'fail_unlock', 'source': 'STANDBY_MODE', 'dest': 'BRUTE_FORCE', 'before': '_enter_invalid_pin', 'conditions': [CallableCondition(lambda _: (DUT.brute_force_counter_current == (DUT.brute_force_counter/2)+1) or DUT.brute_force_counter_current == 1, "Brute Force triggered")]},
+            {'trigger': 'fail_unlock', 'source': 'STANDBY_MODE', 'dest': 'STANDBY_MODE', 'before': '_enter_invalid_pin', 'conditions': [CallableCondition(lambda _: self.dut.brute_force_counter_current > 1 and not (self.dut.brute_force_counter_current == (self.dut.brute_force_counter/2)+1), "Brute Force not triggered")]},
+            {'trigger': 'fail_unlock', 'source': 'STANDBY_MODE', 'dest': 'BRUTE_FORCE', 'before': '_enter_invalid_pin', 'conditions': [CallableCondition(lambda _: (self.dut.brute_force_counter_current == (self.dut.brute_force_counter/2)+1) or self.dut.brute_force_counter_current == 1, "Brute Force triggered")]},
 
             # --- User-Forced Enrollment Mode Transitions ---
             {'trigger': 'admin_mode_login', 'source': 'USER_FORCED_ENROLLMENT', 'dest': 'ADMIN_MODE', 'before': '_enter_admin_mode_login'},
@@ -329,17 +335,17 @@ class ApricornDeviceFSM:
             {'trigger': 'lock_admin', 'source': 'UNLOCKED_ADMIN', 'dest': 'USER_FORCED_ENROLLMENT', 'before': '_press_lock_button'},
             {'trigger': 'enroll_user', 'source': 'USER_FORCED_ENROLLMENT', 'dest': 'STANDBY_MODE', 'before': '_user_enrollment'},
             {'trigger': 'enter_diagnostic_mode', 'source': 'USER_FORCED_ENROLLMENT', 'dest': 'DIAGNOSTIC_MODE'},
-            {'trigger': 'exit_diagnostic_mode', 'source': 'DIAGNOSTIC_MODE', 'dest': 'USER_FORCED_ENROLLMENT', 'conditions': [CallableCondition(lambda _: bool(DUT.user_forced_enrollment), "DUT.user_forced_enrollment == True")]},
+            {'trigger': 'exit_diagnostic_mode', 'source': 'DIAGNOSTIC_MODE', 'dest': 'USER_FORCED_ENROLLMENT', 'conditions': [CallableCondition(lambda _: bool(self.dut.user_forced_enrollment), "dut.user_forced_enrollment == True")]},
             {'trigger': 'self_destruct', 'source': 'USER_FORCED_ENROLLMENT', 'dest': 'UNLOCKED_ADMIN', 'before': '_enter_self_destruct_pin'},
-            {'trigger': 'user_reset', 'source': 'USER_FORCED_ENROLLMENT', 'dest': 'OOB_MODE', 'conditions': [CallableCondition(lambda _: not DUT.provision_lock, "DUT.provision_lock == False")]},
-            {'trigger': 'unlock_user', 'source': 'USER_FORCED_ENROLLMENT', 'dest': 'UNLOCKED_USER', 'before': '_enter_user_pin', 'conditions': [CallableCondition(lambda _: any(pin is not None for pin in DUT.user_pin.values()), "DUT.user_pin(s) enrolled")]},
+            {'trigger': 'user_reset', 'source': 'USER_FORCED_ENROLLMENT', 'dest': 'OOB_MODE', 'conditions': [CallableCondition(lambda _: not self.dut.provision_lock, "dut.provision_lock == False")]},
+            {'trigger': 'unlock_user', 'source': 'USER_FORCED_ENROLLMENT', 'dest': 'UNLOCKED_USER', 'before': '_enter_user_pin', 'conditions': [CallableCondition(lambda _: any(pin is not None for pin in self.dut.user_pin.values()), "dut.user_pin(s) enrolled")]},
             {'trigger': 'lock_user', 'source': 'UNLOCKED_USER', 'dest': 'USER_FORCED_ENROLLMENT', 'before': '_press_lock_button'},
-            {'trigger': 'fail_unlock', 'source': 'USER_FORCED_ENROLLMENT', 'dest': 'STANDBY_MODE', 'before': '_enter_invalid_pin', 'conditions': [CallableCondition(lambda _: DUT.brute_force_counter_current > 1 and not (DUT.brute_force_counter_current == (DUT.brute_force_counter/2)+1), "Brute Force not triggered")]},
-            {'trigger': 'fail_unlock', 'source': 'USER_FORCED_ENROLLMENT', 'dest': 'BRUTE_FORCE', 'before': '_enter_invalid_pin', 'conditions': [CallableCondition(lambda _: DUT.brute_force_counter_current == DUT.brute_force_counter/2 or DUT.brute_force_counter_current == 1, "Brute Force triggered")]},
+            {'trigger': 'fail_unlock', 'source': 'USER_FORCED_ENROLLMENT', 'dest': 'STANDBY_MODE', 'before': '_enter_invalid_pin', 'conditions': [CallableCondition(lambda _: self.dut.brute_force_counter_current > 1 and not (self.dut.brute_force_counter_current == (self.dut.brute_force_counter/2)+1), "Brute Force not triggered")]},
+            {'trigger': 'fail_unlock', 'source': 'USER_FORCED_ENROLLMENT', 'dest': 'BRUTE_FORCE', 'before': '_enter_invalid_pin', 'conditions': [CallableCondition(lambda _: self.dut.brute_force_counter_current == self.dut.brute_force_counter/2 or self.dut.brute_force_counter_current == 1, "Brute Force triggered")]},
 
             # --- Brute Force Mode Transitions ---
-            {'trigger': 'last_try_login', 'source': 'BRUTE_FORCE', 'dest': 'STANDBY_MODE', 'before': '_enter_last_try_pin', 'conditions': [CallableCondition(lambda _: DUT.brute_force_counter_current == DUT.brute_force_counter/2, "Brute Force halfway point")]},
-            {'trigger': 'user_reset', 'source': 'BRUTE_FORCE', 'dest': 'OOB_MODE', 'conditions': [CallableCondition(lambda _: not DUT.provision_lock, "DUT.provision_lock == False")]},
+            {'trigger': 'last_try_login', 'source': 'BRUTE_FORCE', 'dest': 'STANDBY_MODE', 'before': '_enter_last_try_pin', 'conditions': [CallableCondition(lambda _: self.dut.brute_force_counter_current == self.dut.brute_force_counter/2, "Brute Force halfway point")]},
+            {'trigger': 'user_reset', 'source': 'BRUTE_FORCE', 'dest': 'OOB_MODE', 'conditions': [CallableCondition(lambda _: not self.dut.provision_lock, "dut.provision_lock == False")]},
             {'trigger': 'admin_recovery_failed', 'source': 'BRUTE_FORCE', 'dest': 'BRICKED'},
 
             # --- Admin Mode Enrollment Transitions ---
@@ -353,7 +359,7 @@ class ApricornDeviceFSM:
             {'trigger': 'exit_enroll_counter', 'source': 'COUNTER_ENROLLMENT', 'dest': 'ADMIN_MODE', 'before': '_press_lock_button'},
             # PIN Enrollments
             {'trigger': 'enroll_admin', 'source': 'ADMIN_MODE', 'dest': 'PIN_ENROLLMENT', 'before': '_admin_enrollment'},
-            {'trigger': 'enroll_user', 'source': 'ADMIN_MODE', 'dest': 'PIN_ENROLLMENT', 'before': '_user_enrollment', 'conditions': [CallableCondition(lambda _: any(pin_value is None for pin_value in DUT.user_pin.values()), "Empty user slot available")]},
+            {'trigger': 'enroll_user', 'source': 'ADMIN_MODE', 'dest': 'PIN_ENROLLMENT', 'before': '_user_enrollment', 'conditions': [CallableCondition(lambda _: any(pin_value is None for pin_value in self.dut.user_pin.values()), "Empty user slot available")]},
             {'trigger': 'enroll_recovery', 'source': 'ADMIN_MODE', 'dest': 'PIN_ENROLLMENT', 'before': '_recovery_pin_enrollment'},
             {'trigger': 'enroll_self_destruct', 'source': 'ADMIN_MODE', 'dest': 'PIN_ENROLLMENT', 'before': '_self_destruct_pin_enrollment'},
             {'trigger': 'enroll_pin', 'source': 'PIN_ENROLLMENT', 'dest': 'ADMIN_MODE', 'before': '_pin_enrollment'},
@@ -693,7 +699,7 @@ class ApricornDeviceFSM:
 
     def _power_toggle(self, event_data: EventData) -> None:
         """
-        Handles the physical power-on or power-off sequence for the DUT.
+        Handles the physical power-on or power-off sequence for the self.dut.
 
         This 'before' callback is triggered by the 'power_on' or 'power_off'
         events. It interacts with the Phidget controller to either supply or
@@ -720,17 +726,17 @@ class ApricornDeviceFSM:
             raise TransitionCallbackError("usb2 argument requires a boolean.")
 
         if trigger_name == 'power_on':
-            self.logger.info("Powering DUT on and performing self-test...")
+            self.logger.info("Powering self.dut on and performing self-test...")
             if usb2:
                 self.at.on("usb3")
             self.at.on("connect")
             time.sleep(0.5)
-            if DUT.vbus:
+            if self.dut.vbus:
                 if not self.at.confirm_led_pattern(LEDs['STARTUP'], clear_buffer=True, replay_extra_context=context):
                     raise TransitionCallbackError("Failed Startup Self-Test LED confirmation.")
                 self.logger.info("Startup Self-Test successful. Proceeding to POWER_ON_SELF_TEST state.")
         elif trigger_name == 'power_off':
-            self.logger.info("Powering off DUT...")
+            self.logger.info("Powering off self.dut...")
             self.at.off("usb3")
             self.at.off("connect")
 
@@ -755,15 +761,15 @@ class ApricornDeviceFSM:
         dest_state = event_data.transition.dest if event_data.transition else "UNKNOWN"
         context = {'fsm_current_state': self.state, 'fsm_destination_state': dest_state}
 
-        self.logger.info("Unlocking DUT with Admin PIN...")
-        self.at.sequence(DUT.admin_pin)
-        if DUT.read_only_enabled and DUT.lock_override:
+        self.logger.info("Unlocking self.dut with Admin PIN...")
+        self.at.sequence(self.dut.admin_pin)
+        if self.dut.read_only_enabled and self.dut.lock_override:
             if not self.at.await_and_confirm_led_pattern(LEDs['ENUM_LOCK_OVERRIDE_READ_ONLY'], timeout=15, replay_extra_context=context):
                 raise TransitionCallbackError("Failed Admin unlock LED pattern.")
-        elif DUT.read_only_enabled:
+        elif self.dut.read_only_enabled:
             if not self.at.await_and_confirm_led_pattern(LEDs['ENUM_READ_ONLY'], timeout=15, replay_extra_context=context):
                 raise TransitionCallbackError("Failed Admin unlock LED pattern.")
-        elif DUT.lock_override:
+        elif self.dut.lock_override:
             if not self.at.await_and_confirm_led_pattern(LEDs['ENUM_LOCK_OVERRIDE'], timeout=15, replay_extra_context=context):
                 raise TransitionCallbackError("Failed Admin unlock LED pattern.")
         else:
@@ -788,15 +794,15 @@ class ApricornDeviceFSM:
         dest_state = event_data.transition.dest if event_data.transition else "UNKNOWN"
         context = {'fsm_current_state': self.state, 'fsm_destination_state': dest_state}
 
-        self.logger.info("Unlocking DUT with Self-Destruct PIN...")
-        self.at.sequence(DUT.admin_pin)
-        if DUT.read_only_enabled and DUT.lock_override:
+        self.logger.info("Unlocking self.dut with Self-Destruct PIN...")
+        self.at.sequence(self.dut.admin_pin)
+        if self.dut.read_only_enabled and self.dut.lock_override:
             if not self.at.await_and_confirm_led_pattern(LEDs['ENUM_LOCK_OVERRIDE_READ_ONLY'], timeout=15, replay_extra_context=context):
                 raise TransitionCallbackError("Failed Self-Destruct unlock LED pattern.")
-        elif DUT.read_only_enabled:
+        elif self.dut.read_only_enabled:
             if not self.at.await_and_confirm_led_pattern(LEDs['ENUM_READ_ONLY'], timeout=15, replay_extra_context=context):
                 raise TransitionCallbackError("Failed Self-Destruct unlock LED pattern.")
-        elif DUT.lock_override:
+        elif self.dut.lock_override:
             if not self.at.await_and_confirm_led_pattern(LEDs['ENUM_LOCK_OVERRIDE'], timeout=15, replay_extra_context=context):
                 raise TransitionCallbackError("Failed Self-Destruct unlock LED pattern.")
         else:
@@ -825,22 +831,22 @@ class ApricornDeviceFSM:
         user_id = event_data.kwargs.get('user_id')
         if not user_id:
             raise TransitionCallbackError("Unlock user requires a 'user_id' to be passed.")
-        if user_id not in DUT.user_pin:
-            raise TransitionCallbackError(f"Unlock failed: User ID {user_id} is not a valid slot for this device. Available slots: {list(DUT.user_pin.keys())}")
+        if user_id not in self.dut.user_pin:
+            raise TransitionCallbackError(f"Unlock failed: User ID {user_id} is not a valid slot for this device. Available slots: {list(self.dut.user_pin.keys())}")
         
-        pin_to_enter = DUT.user_pin.get(user_id)
+        pin_to_enter = self.dut.user_pin.get(user_id)
         if not pin_to_enter:
             raise TransitionCallbackError(f"Unlock failed: No PIN is tracked for logical user {user_id}.")
 
         self.logger.info(f"Attempting to unlock device with PIN from logical user slot {user_id}...")
         self.at.sequence(pin_to_enter)
-        if DUT.read_only_enabled and DUT.lock_override:
+        if self.dut.read_only_enabled and self.dut.lock_override:
             if not self.at.await_and_confirm_led_pattern(LEDs['ENUM_LOCK_OVERRIDE_READ_ONLY'], timeout=15, replay_extra_context=context):
                 raise TransitionCallbackError(f"Failed User {user_id} unlock LED pattern.")
-        elif DUT.read_only_enabled:
+        elif self.dut.read_only_enabled:
             if not self.at.await_and_confirm_led_pattern(LEDs['ENUM_READ_ONLY'], timeout=15, replay_extra_context=context):
                 raise TransitionCallbackError(f"Failed User {user_id} unlock LED pattern.")
-        elif DUT.lock_override:
+        elif self.dut.lock_override:
             if not self.at.await_and_confirm_led_pattern(LEDs['ENUM_LOCK_OVERRIDE'], timeout=15, replay_extra_context=context):
                 raise TransitionCallbackError(f"Failed User {user_id} unlock LED pattern.")
         else:
@@ -870,7 +876,7 @@ class ApricornDeviceFSM:
         self.at.press(['key0', 'unlock'], duration_ms=6000)
         if not self.at.confirm_led_pattern(LEDs['RED_LOGIN'], clear_buffer=True, replay_extra_context=context):
                 raise TransitionCallbackError("Failed Admin Mode Login LED confirmation.")
-        self.at.sequence(DUT.admin_pin)
+        self.at.sequence(self.dut.admin_pin)
 
     def _enter_last_try_pin(self, event_data: EventData) -> None:
         """
@@ -898,7 +904,7 @@ class ApricornDeviceFSM:
 
         This 'before' callback initiates the reset sequence from Admin Mode,
         confirms the key generation LED pattern, and upon success, resets the
-        DUT model's state by clearing all PINs.
+        self.dut model's state by clearing all PINs.
 
         Args:
             event_data: The event data provided by the FSM.
@@ -916,10 +922,10 @@ class ApricornDeviceFSM:
         if not reset_pattern_ok:
             raise TransitionCallbackError("Failed to observe user reset confirmation pattern.")
         
-        self.logger.info("User reset confirmation pattern observed. Resetting DUT model state...")
-        DUT.admin_pin = []
-        DUT.user_pin = {1: None, 2: None, 3: None, 4: None}
-        self.logger.info("DUT model state has been reset.")
+        self.logger.info("User reset confirmation pattern observed. Resetting self.dut model state...")
+        self.dut.admin_pin = []
+        self.dut.user_pin = {1: None, 2: None, 3: None, 4: None}
+        self.logger.info("dut model state has been reset.")
     
 ##########
 ## Miscellaneous
@@ -931,7 +937,7 @@ class ApricornDeviceFSM:
         Args:
             event_data: The event data provided by the FSM.
         """
-        self.logger.info(f"Locking DUT from Unlocked Admin...")
+        self.logger.info(f"Locking self.dut from Unlocked Admin...")
         self.at.press("lock")
 
     def _enter_invalid_pin(self, event_data: EventData) -> bool:
@@ -940,7 +946,7 @@ class ApricornDeviceFSM:
 
         This action is used to decrement the brute force counter. It enters
         a wrong PIN, confirms the device's reject pattern, and decrements the
-        `bruteForceCurrent` counter in the DUT model.
+        `bruteForceCurrent` counter in the self.dut model.
 
         Args:
             event_data: The event data provided by the FSM.
@@ -956,8 +962,8 @@ class ApricornDeviceFSM:
             self.logger.error("Device did not show REJECT pattern after invalid PIN entry.")
             return False
             
-        if DUT.brute_force_counter_current > 0:
-            DUT.brute_force_counter_current -= 1
+        if self.dut.brute_force_counter_current > 0:
+            self.dut.brute_force_counter_current -= 1
         
         self.logger.info("Device correctly showed REJECT pattern.")
         return True
@@ -1011,7 +1017,7 @@ class ApricornDeviceFSM:
         This 'before' callback is triggered after initiating a counter
         enrollment. It enters the `new_counter` value provided in the event's
         kwargs, checks for the appropriate ACCEPT or REJECT pattern, and
-        updates the DUT model on success.
+        updates the self.dut model on success.
 
         Args:
             event_data: Event data containing the trigger name and a
@@ -1055,7 +1061,7 @@ class ApricornDeviceFSM:
             self.at.press(new_counter[0])
             self.at.press(new_counter[1])
 
-            if int(new_counter) < DUT.default_minimum_pin_counter or int(new_counter) > DUT.maximum_pin_counter:
+            if int(new_counter) < self.dut.default_minimum_pin_counter or int(new_counter) > self.dut.maximum_pin_counter:
                 if not self.at.await_and_confirm_led_pattern(LEDs['REJECT_PATTERN'], timeout=5.0, replay_extra_context=context):
                     raise TransitionCallbackError("Did not observe REJECT_PATTERN for invalid Brute Force Counter Enrollment value.")
             else:
@@ -1079,7 +1085,7 @@ class ApricornDeviceFSM:
                 if not self.at.await_and_confirm_led_pattern(LEDs['ACCEPT_PATTERN'], timeout=5.0, replay_extra_context=context):
                     raise TransitionCallbackError("Did not observe ACCEPT_PATTERN for setting Auto-Lock to 0.")
                 else:
-                    DUT.unattended_auto_lock_counter = new_counter
+                    self.dut.unattended_auto_lock_counter = new_counter
                     self.logger.info(f"Unattended Auto-Lock new_counter set to: {new_counter}")
 
     def _timeout_counter_enrollment(self, event_data: EventData) -> None:
@@ -1164,7 +1170,7 @@ class ApricornDeviceFSM:
         Initiates the sequence to enroll a new Self-Destruct PIN.
 
         This callback also checks if the self-destruct feature is enabled in
-        the DUT model; if not, it expects and confirms a REJECT pattern.
+        the self.dut model; if not, it expects and confirms a REJECT pattern.
 
         Args:
             event_data: The event data provided by the FSM.
@@ -1178,7 +1184,7 @@ class ApricornDeviceFSM:
         dest_state = event_data.transition.dest if event_data.transition else "UNKNOWN"
         context = {'fsm_current_state': self.state, 'fsm_destination_state': dest_state}
 
-        if not DUT.self_destruct_enabled:
+        if not self.dut.self_destruct_enabled:
             self.logger.info(f"Attempting Self-Destruct PIN Enrollment without Self-Destruct enabled...")
             self.at.press(['key4', 'key7'])
             if not self.at.await_and_confirm_led_pattern(LEDs['REJECT_PATTERN'], timeout=5.0, replay_extra_context=context):
@@ -1195,7 +1201,7 @@ class ApricornDeviceFSM:
         for all PIN types (Admin, User, Recovery, Self-Destruct). It enters
         the PIN, waits for the confirmation prompt, re-enters the PIN, and
         verifies the final accept/reject signal. On success, it updates the
-        corresponding PIN in the DUT model.
+        corresponding PIN in the self.dut model.
 
         Args:
             event_data: Event data containing the trigger name and a `new_pin`
@@ -1227,16 +1233,16 @@ class ApricornDeviceFSM:
             if not self.at.await_led_state(LEDs['ACCEPT_STATE'], timeout=5.0, replay_extra_context=context):
                 raise TransitionCallbackError("Did not observe ACCEPT_PATTERN after PIN confirmation.")
             else:
-                DUT.admin_pin = new_pin
-                self.logger.info("Admin enrollment sequence completed successfully. Updated DUT model.")
+                self.dut.admin_pin = new_pin
+                self.logger.info("Admin enrollment sequence completed successfully. Updated self.dut model.")
 
         elif trigger_name == 'enroll_recovery':
-            next_available_slot = next((i for i in DUT.recovery_pin.keys() if DUT.recovery_pin.get(i) is None), None)
+            next_available_slot = next((i for i in self.dut.recovery_pin.keys() if self.dut.recovery_pin.get(i) is None), None)
             if next_available_slot is None:
                 self.logger.warning(f"No available recovery slots. This path assumes a REJECT pattern will be shown by the device.")
                 if not self.at.await_and_confirm_led_pattern(LEDs['REJECT'], timeout=5.0, replay_extra_context=context):
                     raise TransitionCallbackError("Did not observe REJECT_PATTERN on Recovery PIN Enrollment attempt when slots are full.")
-                raise TransitionCallbackError(f"Enrollment failed as expected: All {len(DUT.recovery_pin)} recovery slots are full.")
+                raise TransitionCallbackError(f"Enrollment failed as expected: All {len(self.dut.recovery_pin)} recovery slots are full.")
 
             # If the code reaches here, a slot is available.
             self.logger.info(f"Attempting to enroll new recovery PIN into logical slot #{next_available_slot}...")
@@ -1252,16 +1258,16 @@ class ApricornDeviceFSM:
             if not self.at.confirm_led_solid(LEDs["ACCEPT_STATE"], minimum=1, timeout=3, replay_extra_context=context):
                 raise TransitionCallbackError("Did not observe final ACCEPT_PATTERN for recovery PIN confirmation.")
 
-            DUT.recovery_pin[next_available_slot] = new_pin
+            self.dut.recovery_pin[next_available_slot] = new_pin
             self.logger.info(f"Successfully enrolled recovery PIN for logical slot {next_available_slot}.")
 
         elif trigger_name == 'enroll_user':
-            next_available_slot = next((i for i in DUT.user_pin.keys() if DUT.user_pin.get(i) is None), None)
+            next_available_slot = next((i for i in self.dut.user_pin.keys() if self.dut.user_pin.get(i) is None), None)
             self.logger.info(f"Attempting to enroll new user into logical slot #{next_available_slot}...")
             if next_available_slot is None:
                 if not self.at.await_and_confirm_led_pattern(LEDs['REJECT_PATTERN'], timeout=5.0, replay_extra_context=context):
                     raise TransitionCallbackError("Did not observe REJECT_PATTERN on User PIN Enrollment entry.")
-                raise TransitionCallbackError(f"Enrollment failed as expected: All {len(DUT.user_pin)} user slots are full.")
+                raise TransitionCallbackError(f"Enrollment failed as expected: All {len(self.dut.user_pin)} user slots are full.")
             
             self.logger.info(f"Entering new User PIN (first time)...")
             self.at.sequence(new_pin)
@@ -1275,7 +1281,7 @@ class ApricornDeviceFSM:
             if not self.at.confirm_led_solid(LEDs["ACCEPT_STATE"], minimum=1, timeout=3, replay_extra_context=context):
                 raise TransitionCallbackError("Did not observe final ACCEPT_PATTERN for user PIN confirmation.")
             
-            DUT.user_pin[next_available_slot] = new_pin
+            self.dut.user_pin[next_available_slot] = new_pin
             self.logger.info(f"Successfully enrolled PIN for logical user {next_available_slot}.")
 
         elif trigger_name == 'enroll_self_destruct':
@@ -1291,8 +1297,8 @@ class ApricornDeviceFSM:
             if not self.at.await_led_state(LEDs['ACCEPT_STATE'], timeout=5.0, replay_extra_context=context):
                 raise TransitionCallbackError("Did not observe ACCEPT_PATTERN after PIN confirmation.")
                 
-            DUT.self_destruct_pin = new_pin
-            self.logger.info("Self-Destruct enrollment sequence completed successfully. Updated DUT model.")
+            self.dut.self_destruct_pin = new_pin
+            self.logger.info("Self-Destruct enrollment sequence completed successfully. Updated self.dut model.")
 
 ##################
 ## Admin mode Toggles
@@ -1315,8 +1321,8 @@ class ApricornDeviceFSM:
         if not self.at.await_and_confirm_led_pattern(LEDs['ACCEPT_PATTERN'], timeout=5.0, replay_extra_context=context):
             raise TransitionCallbackError("Did not observe ACCEPT_PATTERN for Basic Disk toggle.")
         else:
-            DUT.basic_disk = True
-            self.logger.info(f"Basic Disk mode: {DUT.basic_disk}")
+            self.dut.basic_disk = True
+            self.logger.info(f"Basic Disk mode: {self.dut.basic_disk}")
 
     def _removable_media_toggle(self, event_data: EventData) -> None:
         """
@@ -1336,8 +1342,8 @@ class ApricornDeviceFSM:
         if not self.at.await_and_confirm_led_pattern(LEDs['ACCEPT_PATTERN'], timeout=5.0, replay_extra_context=context):
             raise TransitionCallbackError("Did not observe ACCEPT_PATTERN for Removable Media toggle.")
         else:
-            DUT.basic_disk = True
-            self.logger.info(f"Removable Media mode: {DUT.removable_media}")
+            self.dut.basic_disk = True
+            self.logger.info(f"Removable Media mode: {self.dut.removable_media}")
 
     def _led_flicker_enable(self, event_data: EventData) -> None:
         """
@@ -1357,8 +1363,8 @@ class ApricornDeviceFSM:
         if not self.at.await_and_confirm_led_pattern(LEDs['ACCEPT_PATTERN'], timeout=5.0, replay_extra_context=context):
             raise TransitionCallbackError("Did not observe ACCEPT_PATTERN for LED Flicker toggle.")
         else:
-            DUT.led_flicker = True
-            self.logger.info(f"LED Flicker mode: {DUT.led_flicker}")
+            self.dut.led_flicker = True
+            self.logger.info(f"LED Flicker mode: {self.dut.led_flicker}")
 
     def _led_flicker_disable(self, event_data: EventData) -> None:
         """
@@ -1378,8 +1384,8 @@ class ApricornDeviceFSM:
         if not self.at.await_and_confirm_led_pattern(LEDs['ACCEPT_PATTERN'], timeout=5.0, replay_extra_context=context):
             raise TransitionCallbackError("Did not observe ACCEPT_PATTERN for LED Flicker toggle.")
         else:
-            DUT.led_flicker = False
-            self.logger.info(f"LED Flicker mode: {DUT.led_flicker}")
+            self.dut.led_flicker = False
+            self.logger.info(f"LED Flicker mode: {self.dut.led_flicker}")
 
     def _lock_override_toggle(self, event_data: EventData) -> None:
         """
@@ -1399,8 +1405,8 @@ class ApricornDeviceFSM:
         if not self.at.await_and_confirm_led_pattern(LEDs['ACCEPT_PATTERN'], timeout=5.0, replay_extra_context=context):
             raise TransitionCallbackError("Did not observe ACCEPT_PATTERN for Lock Override toggle.")
         else:
-            DUT.led_flicker = False
-            self.logger.info(f"LED Override mode: {DUT.lock_override}")
+            self.dut.led_flicker = False
+            self.logger.info(f"LED Override mode: {self.dut.lock_override}")
 
     def _provision_lock_toggle(self, event_data: EventData) -> None:
         """
@@ -1418,7 +1424,7 @@ class ApricornDeviceFSM:
         dest_state = event_data.transition.dest if event_data.transition else "UNKNOWN"
         context = {'fsm_current_state': self.state, 'fsm_destination_state': dest_state}
         
-        if DUT.self_destruct_enabled:
+        if self.dut.self_destruct_enabled:
             self.logger.info(f"Toggling Provision Lock with Self-Destruct enabled...")
             self.at.press(['key2', 'key5'])
             if not self.at.await_and_confirm_led_pattern(LEDs['REJECT'], timeout=5.0, replay_extra_context=context):
@@ -1429,8 +1435,8 @@ class ApricornDeviceFSM:
             if not self.at.await_and_confirm_led_pattern(LEDs['ACCEPT_PATTERN'], timeout=5.0, replay_extra_context=context):
                 raise TransitionCallbackError("Did not observe ACCEPT_PATTERN for Provision Lock toggle.")
             else:
-                DUT.provision_lock = not DUT.provision_lock
-                self.logger.info(f"Provision Lock mode: {DUT.provision_lock}")
+                self.dut.provision_lock = not self.dut.provision_lock
+                self.logger.info(f"Provision Lock mode: {self.dut.provision_lock}")
 
     def _read_only_toggle(self, event_data: EventData) -> None:
         """
@@ -1450,8 +1456,8 @@ class ApricornDeviceFSM:
         if not self.at.await_and_confirm_led_pattern(LEDs['ACCEPT_PATTERN'], timeout=5.0, replay_extra_context=context):
             raise TransitionCallbackError("Did not observe ACCEPT_PATTERN for Read-Only toggle.")
         else:
-            DUT.read_only_enabled = True
-            self.logger.info(f"Read-Only mode: {DUT.read_only_enabled}")
+            self.dut.read_only_enabled = True
+            self.logger.info(f"Read-Only mode: {self.dut.read_only_enabled}")
 
     def _read_write_toggle(self, event_data: EventData) -> None:
         """
@@ -1471,8 +1477,8 @@ class ApricornDeviceFSM:
         if not self.at.await_and_confirm_led_pattern(LEDs['ACCEPT_PATTERN'], timeout=5.0, replay_extra_context=context):
             raise TransitionCallbackError("Did not observe ACCEPT_PATTERN for Read-Write toggle.")
         else:
-            DUT.read_only_enabled = False
-            self.logger.info(f"Read-Write mode: {DUT.read_only_enabled}")
+            self.dut.read_only_enabled = False
+            self.logger.info(f"Read-Write mode: {self.dut.read_only_enabled}")
 
     def _self_destruct_toggle(self, event_data: EventData) -> None:
         """
@@ -1490,7 +1496,7 @@ class ApricornDeviceFSM:
         dest_state = event_data.transition.dest if event_data.transition else "UNKNOWN"
         context = {'fsm_current_state': self.state, 'fsm_destination_state': dest_state}
 
-        if DUT.provision_lock:
+        if self.dut.provision_lock:
             self.logger.info(f"Toggling Self-Destruct PIN with Provision Lock enabled...")
             self.at.press(['key4', 'key7'])
             if not self.at.await_and_confirm_led_pattern(LEDs['REJECT_PATTERN'], timeout=5.0, replay_extra_context=context):
@@ -1501,7 +1507,7 @@ class ApricornDeviceFSM:
             if not self.at.await_and_confirm_led_pattern(LEDs['ACCEPT_PATTERN'], timeout=5.0, replay_extra_context=context):
                 raise TransitionCallbackError("Did not observe ACCEPT_PATTERN for Self-Destruct toggle.")
             else:
-                DUT.self_destruct_enabled = True
+                self.dut.self_destruct_enabled = True
 
     def _user_forced_enrollment_toggle(self, event_data: EventData) -> None:
         """
@@ -1519,14 +1525,14 @@ class ApricornDeviceFSM:
         dest_state = event_data.transition.dest if event_data.transition else "UNKNOWN"
         context = {'fsm_current_state': self.state, 'fsm_destination_state': dest_state}
         
-        if not DUT.user_forced_enrollment:
+        if not self.dut.user_forced_enrollment:
             self.logger.info(f"Toggling User-Forced Enrollment...")
             self.at.press(['key0', 'key1'])
             if not self.at.await_and_confirm_led_pattern(LEDs['ACCEPT_PATTERN'], timeout=5.0, replay_extra_context=context):
                 raise TransitionCallbackError("Did not observe ACCEPT_PATTERN for User-Forced Enrollment toggle.")
             else:
-                DUT.user_forced_enrollment = True
-                self.logger.info(f"User-Forced Enrollment toggled. New state: {DUT.user_forced_enrollment}")
+                self.dut.user_forced_enrollment = True
+                self.logger.info(f"User-Forced Enrollment toggled. New state: {self.dut.user_forced_enrollment}")
         else:
             self.logger.info(f"Toggling User-Forced Enrollment with User-Forced Enrollment enabled...")
             self.at.press(['key0', 'key1'])
@@ -1548,7 +1554,7 @@ class ApricornDeviceFSM:
         dest_state = event_data.transition.dest if event_data.transition else "UNKNOWN"
         context = {'fsm_current_state': self.state, 'fsm_destination_state': dest_state}
         
-        if not DUT.user_forced_enrollment:
+        if not self.dut.user_forced_enrollment:
             self.logger.info(f"Toggling Delete PINs...")
             self.at.press(['key7', 'key8'], duration_ms=6000)
             if not self.at.await_and_confirm_led_pattern(LEDs['ACCEPT_PATTERN'], timeout=5.0, replay_extra_context=context):
@@ -1561,7 +1567,7 @@ class ApricornDeviceFSM:
                     if not self.at.confirm_led_solid(LEDs["ACCEPT_STATE"], minimum=1, timeout=3, replay_extra_context=context):
                         raise TransitionCallbackError("Did not observe final ACCEPT_PATTERN for recovery PIN confirmation.")
                     else:
-                        DUT._delete_pins()
+                        self.dut._delete_pins()
                         self.logger.info(f"Delete PINs toggled. PINs deleted...")
 
 #################
