@@ -9,6 +9,7 @@ import sys
 import os
 import time 
 from typing import Optional, List, Dict, Any, Union
+import threading
 from pprint import pprint
 import subprocess
 
@@ -27,6 +28,7 @@ try:
         DEFAULT_DURATION_TOLERANCE_SEC as CAMERA_DEFAULT_TOLERANCE,
         DEFAULT_REPLAY_POST_FAIL_DURATION_SEC as CAMERA_DEFAULT_REPLAY_DURATION, 
     )
+    from hardware.barcode_scanner import BarcodeScanner
     from Phidget22.PhidgetException import PhidgetException
     from camera.led_dictionaries import LEDs
     from usb_tool import find_apricorn_device
@@ -39,6 +41,7 @@ except ImportError as e_import:
 class UnifiedController:
     _phidget_controller: Optional[PhidgetController]
     _camera_checker: Optional[LogitechLedChecker]
+    _barcode_scanner: Optional[BarcodeScanner]
     logger: logging.Logger
     phidget_config_to_use: Dict[str, Any]
     effective_led_duration_tolerance: float
@@ -58,6 +61,7 @@ class UnifiedController:
         self.phidget_config_to_use = script_map_config if script_map_config is not None else DEFAULT_SCRIPT_CHANNEL_MAP_CONFIG
         phidget_ctrl_logger = self.logger.getChild("Phidget")
         camera_ctrl_logger = self.logger.getChild("Camera")
+        self.scanned_serial_number: str|None
 
         # --- Initialize Phidget --- #
         self._phidget_controller = None
@@ -82,6 +86,12 @@ class UnifiedController:
                 self.logger.error(f"LogitechLedChecker FAILED to initialize camera {camera_id}.")
         except Exception as e_camera_init:
             self.logger.error(f"Failed to initialize LogitechLedChecker for camera {camera_id}: {e_camera_init}", exc_info=True)
+
+        self._barcode_scanner = BarcodeScanner(phidget_press_callback=self.press)
+        self.scanned_serial_number = self._barcode_scanner.await_scan()
+        if not self.scanned_serial_number:
+            self.logger.error("Initialization scan failed. No serial number captured!")
+            sys.exit(1)
 
     # --- PhidgetController Method Delegation ---
     def on(self, channel_name: str):

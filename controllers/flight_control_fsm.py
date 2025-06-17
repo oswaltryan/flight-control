@@ -95,7 +95,7 @@ class DeviceUnderTest:
     mounted: bool = False
     serial_number: str = ""
     dev_keypad_serial_number: str = ""
-    scanned_serial_number: str = ""
+    scanned_serial_number: str|None
 
     model_id_1: int = DEVICE_PROPERTIES[device_name]['model_id_digit_1']
     model_id_2: int = DEVICE_PROPERTIES[device_name]['model_id_digit_2']
@@ -286,6 +286,8 @@ class ApricornDeviceFSM:
         """
         self.logger = logging.getLogger("DeviceFSM.Simplified")
         self.at = at_controller
+
+        DUT.scanned_serial_number = self.at.scanned_serial_number
 
         # Define all transitions in a single list of dictionaries, including lambdas.
         transitions = [
@@ -712,6 +714,8 @@ class ApricornDeviceFSM:
         trigger_name = event_data.event.name
         usb2 = event_data.kwargs.get('usb2')
 
+        if usb2 == None:
+            usb2 = False
         if type(usb2) != bool:
             raise TransitionCallbackError("usb2 argument requires a boolean.")
 
