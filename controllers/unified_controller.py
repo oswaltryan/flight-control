@@ -94,12 +94,14 @@ class UnifiedController:
             sys.exit(1)
 
     # --- PhidgetController Method Delegation ---
-    def on(self, channel_name: str):
-        if not self._phidget_controller: self.logger.error("Phidget not init for 'on'."); return
-        self._phidget_controller.on(channel_name)
-    def off(self, channel_name: str):
-        if not self._phidget_controller: self.logger.error("Phidget not init for 'off'."); return
-        self._phidget_controller.off(channel_name)
+    def on(self, *channel_names: str):
+        if not self._phidget_controller: self.logger.error("Phidget not initialized for 'on' command."); return
+        for channel_name in channel_names:
+            self._phidget_controller.on(channel_name)
+    def off(self, *channel_names: str):
+        if not self._phidget_controller: self.logger.error("Phidget not initialized for 'off' command."); return
+        for channel_name in channel_names:
+            self._phidget_controller.off(channel_name)
     def hold(self, channel_name: str, duration_ms: float = 200):
         if not self._phidget_controller: self.logger.error("Phidget not init for 'hold'."); return
         self._phidget_controller.hold(channel_name, duration_ms)
