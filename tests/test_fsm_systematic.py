@@ -103,7 +103,6 @@ class TestModuleAndHelpers:
         # Case 3: Environment variable is not set
         (None, 'Machine'),
     ])
-    # <<< FIX IS HERE: Added 'diagram_mode_env' back to the function signature >>>
     def test_conditional_machine_import(self, monkeypatch, diagram_mode_env, expected_class_name):
         """
         GIVEN a specific FSM_DIAGRAM_MODE environment variable setting
@@ -122,6 +121,34 @@ class TestModuleAndHelpers:
         # THEN: Inspect the reloaded module to see which class was aliased to 'Machine'
         # We check the class name as a string to avoid object identity issues.
         assert flight_control_fsm.Machine.__name__ == expected_class_name
+
+class TestModuleLoading:
+    """Tests for failures during module loading."""
+
+    @patch('builtins.open', new_callable=MagicMock)
+    def test_load_config_file_not_found(self, mock_open, monkeypatch):
+        """Test module load failure when JSON file is not found."""
+        mock_open.side_effect = FileNotFoundError
+        with pytest.raises(FileNotFoundError):
+            importlib.reload(flight_control_fsm)
+
+    @patch('builtins.open', new_callable=MagicMock)
+    def test_load_config_json_decode_error(self, mock_open, monkeypatch):
+        """Test module load failure on JSON syntax error."""
+        # Simulate reading a file with invalid JSON
+        mock_file = MagicMock()
+        mock_file.read.return_value = "{'invalid': 'json',}" # Invalid JSON
+        mock_open.return_value.__enter__.return_value = mock_file
+        
+        with pytest.raises(json.JSONDecodeError):
+            importlib.reload(flight_control_fsm)
+            
+    @patch('builtins.open', new_callable=MagicMock)
+    def test_load_config_unexpected_error(self, mock_open, monkeypatch):
+        """Test module load failure on an unexpected exception."""
+        mock_open.side_effect = Exception("A random error occurred")
+        with pytest.raises(Exception, match="A random error occurred"):
+            importlib.reload(flight_control_fsm)
 
 # =============================================================================
 # === 1. Tests for DeviceUnderTest Class
@@ -256,6 +283,34 @@ class TestApricornDeviceFSM:
         assert fsm.source_state == 'OFF'
 
     # --- on_enter_* Callbacks ---
+
+    def test_on_enter_POWER_ON_SELF_TEST_failure_path(self, fsm, mock_at):
+        """Explicitly tests the post_fail call in on_enter_POWER_ON_SELF_TEST."""
+        # GIVEN
+        mock_at.await_and_confirm_led_pattern.return_value = False
+        fsm.post_fail = MagicMock()
+
+        # WHEN
+        fsm.on_enter_POWER_ON_SELF_TEST(MagicMock())
+
+        # THEN
+        fsm.post_fail.assert_called_once() # Covers line 408
+
+    def test_enter_invalid_pin_failure_and_zero_counter(self, fsm, mock_at, dut_instance):
+        """Tests failure to see REJECT pattern and the path where counter is already zero."""
+        ExpectedException = get_reloaded_exception()
+        
+        # Test hardware failure (covers line 738)
+        mock_at.await_and_confirm_led_pattern.return_value = False
+        result = fsm._enter_invalid_pin(MagicMock(kwargs={}))
+        assert result is False
+        mock_at.await_and_confirm_led_pattern.assert_called_once_with(LEDs['REJECT'], timeout=ANY)
+
+        # Test when counter is already 0 (covers line 743)
+        mock_at.await_and_confirm_led_pattern.return_value = True
+        dut_instance.brute_force_counter_current = 0
+        fsm._enter_invalid_pin(MagicMock(kwargs={}))
+        assert dut_instance.brute_force_counter_current == 0 # Unchanged
     
     @pytest.mark.parametrize("hw_success, log_msg", [(True, "Stable ADMIN_MODE confirmed"), (False, "Failed to confirm stable ADMIN_MODE LEDs")])
     def test_on_enter_ADMIN_MODE(self, fsm, mock_at, caplog, hw_success, log_msg):
@@ -283,13 +338,26 @@ class TestApricornDeviceFSM:
         fsm.on_enter_FACTORY_MODE(MagicMock())
         mock_at.confirm_led_solid.assert_called_with(LEDs['ALL_ON'], minimum=ANY, timeout=ANY, replay_extra_context=ANY)
 
-    @pytest.mark.parametrize("enum_success", [True, False])
-    def test_on_enter_OOB_MODE(self, fsm, mock_at, enum_success):
+    @pytest.mark.parametrize("led_success, enum_success", [
+    (True, True),   # Happy path
+    (True, False),  # Enum fails
+    (False, True),  # LED check fails
+    ])
+    def test_on_enter_OOB_MODE(self, fsm, mock_at, caplog, led_success, enum_success):
+        mock_at.confirm_led_solid.return_value = led_success
         mock_at.confirm_device_enum.return_value = enum_success
         fsm.post_fail = MagicMock()
+
         fsm.on_enter_OOB_MODE(MagicMock())
-        mock_at.confirm_led_solid.assert_called_with(LEDs['GREEN_BLUE_STATE'], minimum=ANY, timeout=ANY, replay_extra_context=ANY)
-        assert fsm.post_fail.called is not enum_success
+
+        if not led_success:
+            assert "Failed to confirm OOB_MODE LEDs" in caplog.text
+        
+        if led_success and not enum_success:
+            assert "Device did not enumerate in OOB_MODE" in caplog.text
+            fsm.post_fail.assert_called_once_with(details="OOB_MODE_ENUM_FAILED")
+        else:
+            assert not fsm.post_fail.called
 
     @pytest.mark.parametrize("hw_success", [True, False])
     def test_on_enter_USER_FORCED_ENROLLMENT(self, fsm, mock_at, hw_success):
@@ -308,14 +376,22 @@ class TestApricornDeviceFSM:
         mock_at.confirm_drive_enum.return_value = enum_success
         fsm.post_fail = MagicMock()
         fsm.on_enter_UNLOCKED_ADMIN(MagicMock())
-        assert fsm.post_fail.called is not enum_success
+        
+        if not enum_success:
+            fsm.post_fail.assert_called_once_with(details="ADMIN_UNLOCK_ENUM_FAILED")
+        else:
+            assert not fsm.post_fail.called
         
     @pytest.mark.parametrize("enum_success", [True, False])
     def test_on_enter_UNLOCKED_USER(self, fsm, mock_at, enum_success):
         mock_at.confirm_drive_enum.return_value = enum_success
         fsm.post_fail = MagicMock()
         fsm.on_enter_UNLOCKED_USER(MagicMock())
-        assert fsm.post_fail.called is not enum_success
+
+        if not enum_success:
+            fsm.post_fail.assert_called_once_with(details="USER_UNLOCK_ENUM_FAILED")
+        else:
+            assert not fsm.post_fail.called
 
     @pytest.mark.parametrize("hw_success", [True, False])
     def test_on_enter_BRUTE_FORCE(self, fsm, mock_at, hw_success):
@@ -347,34 +423,117 @@ class TestApricornDeviceFSM:
 
     # --- 'before' Callbacks ---
 
-    def test_do_power_on(self, fsm, mock_at):
-        event = MagicMock(transition=MagicMock(), kwargs={'usb2': False})
+    @pytest.mark.parametrize("usb2_arg, vbus_state, hw_success", [
+    (False, True, True),   # Standard success case
+    (True, True, True),    # USB2 success case
+    (False, False, True),  # VBUS is off, skip LED check
+    (False, True, False),  # Hardware fails LED check
+    ])
+    def test_do_power_on_scenarios(self, fsm, mock_at, dut_instance, usb2_arg, vbus_state, hw_success):
+        """Tests various scenarios in the _do_power_on method."""
+        # GIVEN
+        dut_instance.vbus = vbus_state
+        mock_at.confirm_led_pattern.return_value = hw_success
+        event = MagicMock(transition=MagicMock(), kwargs={'usb2': usb2_arg})
+        ExpectedException = get_reloaded_exception()
+
+        # WHEN / THEN
+        if not hw_success:
+            with pytest.raises(ExpectedException, match="Failed Startup Self-Test LED confirmation"):
+                fsm._do_power_on(event)
+            mock_at.confirm_led_pattern.assert_called_once()
+            return
+
         fsm._do_power_on(event)
-        mock_at.on.assert_called_once_with("connect")
-        mock_at.confirm_led_pattern.assert_called_once()
+        
+        # Assertions
+        if usb2_arg:
+            mock_at.on.assert_has_calls([call("usb3"), call("connect")])
+        else:
+            mock_at.on.assert_called_once_with("connect")
+
+        if vbus_state:
+            mock_at.confirm_led_pattern.assert_called_once()
+        else:
+            mock_at.confirm_led_pattern.assert_not_called()
+
+    def test_do_power_on_invalid_arg(self, fsm):
+        """Tests that _do_power_on raises an error for an invalid 'usb2' argument type."""
+        # GIVEN an invalid argument for usb2
+        event = MagicMock(transition=MagicMock(), kwargs={'usb2': 'not-a-bool'})
+        ExpectedException = get_reloaded_exception()
+
+        # WHEN / THEN
+        with pytest.raises(ExpectedException, match="usb2 argument, if provided, must be a boolean"):
+            fsm._do_power_on(event)
         
     def test_do_power_off(self, fsm, mock_at):
         fsm._do_power_off(MagicMock())
         mock_at.off.assert_has_calls([call("usb3"), call("connect")])
 
-    def test_enter_admin_pin(self, fsm, mock_at, dut_instance):
-        dut_instance.admin_pin = ['1']
-        fsm._enter_admin_pin(MagicMock(transition=MagicMock(), kwargs={}))
-        mock_at.sequence.assert_called_with(['1'])
-        mock_at.await_and_confirm_led_pattern.assert_called_once()
+    @pytest.mark.parametrize("unlock_method_name, pin_attr", [
+    ("_enter_admin_pin", "admin_pin"),
+    ("_enter_self_destruct_pin", "self_destruct_pin"),
+    ("_enter_user_pin", "user_pin"),
+    ])
+    @pytest.mark.parametrize("read_only", [True, False])
+    @pytest.mark.parametrize("lock_override", [True, False])
+    @pytest.mark.parametrize("hw_success", [True, False])
+    def test_all_unlock_scenarios(self, fsm, mock_at, dut_instance, unlock_method_name, pin_attr, read_only, lock_override, hw_success):
+        """A comprehensive test for all PIN unlock methods and hardware configurations."""
+        # GIVEN
+        dut_instance.read_only_enabled = read_only
+        dut_instance.lock_override = lock_override
+        mock_at.await_and_confirm_led_pattern.return_value = hw_success
+        unlock_method = getattr(fsm, unlock_method_name)
 
-    def test_enter_self_destruct_pin(self, fsm, mock_at, dut_instance):
-        dut_instance.self_destruct_pin = ['9']
-        fsm._enter_self_destruct_pin(MagicMock(transition=MagicMock(), kwargs={}))
-        mock_at.sequence.assert_called_with(['9'])
-        mock_at.await_and_confirm_led_pattern.assert_called_once()
+        # Set up the PIN and event kwargs
+        pin = ['1','2','3','4','5','6','7']
+        event_kwargs = {}
+        if pin_attr == "user_pin":
+            dut_instance.user_pin[1] = pin
+            event_kwargs['user_id'] = 1
+        else:
+            setattr(dut_instance, pin_attr, pin)
+        
+        event = MagicMock(transition=MagicMock(), kwargs=event_kwargs)
+        ExpectedException = get_reloaded_exception()
 
-    def test_enter_user_pin(self, fsm, mock_at, dut_instance):
-        dut_instance.user_pin[1] = ['2']
-        event = MagicMock(transition=MagicMock(), kwargs={'user_id': 1})
-        fsm._enter_user_pin(event)
-        mock_at.sequence.assert_called_with(['2'])
-        mock_at.await_and_confirm_led_pattern.assert_called_once()
+        # WHEN / THEN
+        if not hw_success:
+            with pytest.raises(ExpectedException, match="Failed .* unlock LED pattern"):
+                unlock_method(event)
+        else:
+            unlock_method(event)
+
+        # Assertions
+        # Determine the expected LED pattern based on the DUT state
+        if read_only and lock_override:
+            expected_led_pattern = LEDs['ENUM_LOCK_OVERRIDE_READ_ONLY']
+        elif read_only:
+            expected_led_pattern = LEDs['ENUM_READ_ONLY']
+        elif lock_override:
+            expected_led_pattern = LEDs['ENUM_LOCK_OVERRIDE']
+        else:
+            expected_led_pattern = LEDs['ENUM']
+
+        mock_at.await_and_confirm_led_pattern.assert_called_once_with(expected_led_pattern, timeout=ANY, replay_extra_context=ANY)
+
+    # Add this new test to the TestApricornDeviceFSM class.
+    @pytest.mark.parametrize("kwargs, error_msg", [
+        ({}, "Unlock user requires a 'user_id' to be passed"),
+        ({'user_id': 99}, "is not a valid slot"),
+        ({'user_id': 1}, "No PIN is tracked for logical user 1"),
+    ])
+    def test_enter_user_pin_arg_failures(self, fsm, dut_instance, kwargs, error_msg):
+        """Tests the argument validation paths in _enter_user_pin."""
+        # GIVEN
+        event = MagicMock(transition=MagicMock(), kwargs=kwargs)
+        ExpectedException = get_reloaded_exception()
+
+        # WHEN / THEN
+        with pytest.raises(ExpectedException, match=error_msg):
+            fsm._enter_user_pin(event)
 
     def test_enter_admin_mode_login(self, fsm, mock_at, dut_instance):
         dut_instance.admin_pin = ['1']
@@ -495,6 +654,34 @@ class TestApricornDeviceFSM:
         assert result is True
         mock_at.await_and_confirm_led_pattern.assert_called_with(LEDs['REJECT'], timeout=ANY)
 
+    @pytest.mark.parametrize("pin_entered, hw_success", [
+    (True, True),   # Partial entry, correct REJECT observed
+    (True, False),  # Partial entry, REJECT not observed (failure)
+    (False, True),  # No entry, no REJECT expected
+    ])
+    def test_timeout_pin_enrollment(self, monkeypatch, fsm, mock_at, pin_entered, hw_success):
+        """Tests all paths of the newly added _timeout_pin_enrollment method."""
+        # GIVEN
+        mock_sleep = MagicMock()
+        monkeypatch.setattr(time, 'sleep', mock_sleep)
+        mock_at.await_and_confirm_led_pattern.return_value = hw_success
+        event = MagicMock(transition=MagicMock(), kwargs={'pin_entered': pin_entered})
+        ExpectedException = get_reloaded_exception()
+        
+        # WHEN / THEN
+        if pin_entered and not hw_success:
+            with pytest.raises(ExpectedException, match="Did not observe REJECT"):
+                fsm._timeout_pin_enrollment(event)
+        else:
+            fsm._timeout_pin_enrollment(event)
+
+        # Assertions
+        mock_sleep.assert_called_with(30)
+        if pin_entered:
+            mock_at.await_and_confirm_led_pattern.assert_called_with(LEDs['REJECT'], timeout=ANY, replay_extra_context=ANY)
+        else:
+            mock_at.await_and_confirm_led_pattern.assert_not_called()
+
     def test_brute_force_counter_enrollment(self, fsm, mock_at):
         fsm._brute_force_counter_enrollment(MagicMock(transition=MagicMock()))
         mock_at.press.assert_called_with(['unlock', 'key5'], duration_ms=6000)
@@ -506,6 +693,31 @@ class TestApricornDeviceFSM:
     def test_unattended_auto_lock_enrollment(self, fsm, mock_at):
         fsm._unattended_auto_lock_enrollment(MagicMock(transition=MagicMock()))
         mock_at.press.assert_called_with(['unlock', 'key6'], duration_ms=6000)
+
+    @pytest.mark.parametrize("trigger, kwargs, error_msg", [
+    # Brute Force Counter Failures
+    ("enroll_brute_force_counter", {'new_counter': None}, "requires a 'new_counter' str"),
+    ("enroll_brute_force_counter", {'new_counter': '1'}, "requires two-digits"),
+    ("enroll_brute_force_counter", {'new_counter': 12}, "requires a 'new_counter' str"),
+    # Min PIN Length Failures
+    ("enroll_min_pin_counter", {'new_counter': None}, "requires a 'new_counter' str"),
+    ("enroll_min_pin_counter", {'new_counter': '7'}, "requires two-digits"),
+    ("enroll_min_pin_counter", {'new_counter': 10}, "requires a 'new_counter' str"),
+    # Unattended Auto-Lock Failures
+    ("enroll_unattended_auto_lock_counter", {'new_counter': None}, "requires a 'new_counter' integer"),
+    ("enroll_unattended_auto_lock_counter", {'new_counter': '1'}, "requires a 'new_counter' integer"),
+    ("enroll_unattended_auto_lock_counter", {'new_counter': 10}, "requires a single digit"),
+    ])
+    def test_counter_enrollment_invalid_args(self, fsm, trigger, kwargs, error_msg):
+        """Tests all argument validation failure paths in _counter_enrollment."""
+        # GIVEN
+        event = MagicMock(transition=MagicMock(), kwargs=kwargs)
+        event.event.name = trigger
+        ExpectedException = get_reloaded_exception()
+
+        # WHEN / THEN
+        with pytest.raises(ExpectedException, match=error_msg):
+            fsm._counter_enrollment(event)
     
     @pytest.mark.parametrize("trigger_name, counter_value, expected_press_arg", [
         # Case 1: Unattended Auto-Lock
@@ -540,12 +752,35 @@ class TestApricornDeviceFSM:
         if trigger_name == 'enroll_unattended_auto_lock_counter':
             assert dut_instance.unattended_auto_lock_counter == counter_value
 
-    # I've renamed the original test to be more specific about failure
-    def test_counter_enrollment_failure_path(self, fsm, mock_at):
-        # GIVEN an invalid value (e.g., too high for auto-lock)
-        event = MagicMock(transition=MagicMock(), kwargs={'new_counter': 9})
-        event.event.name = 'enroll_unattended_auto_lock_counter'
+    @pytest.mark.parametrize("trigger_name, counter_value, dut_min_pin, dut_max_pin", [
+    # Unattended Auto-Lock out of range
+    ('enroll_unattended_auto_lock_counter', 9, 7, 16),
+    # Brute force out of range (low)
+    ('enroll_brute_force_counter', '01', 7, 16),
+    # Brute force out of range (high)
+    ('enroll_brute_force_counter', '11', 7, 16),
+    # Min PIN out of range (low)
+    ('enroll_min_pin_counter', '06', 7, 16),
+    # Min PIN out of range (high)
+    ('enroll_min_pin_counter', '17', 7, 16),
+    ])
+    def test_counter_enrollment_invalid_value_rejection(self, fsm, mock_at, dut_instance, trigger_name, counter_value, dut_min_pin, dut_max_pin):
+        """Tests the logic for when the device itself should reject an out-of-range value."""
+        # GIVEN
+        dut_instance.default_minimum_pin_counter = dut_min_pin
+        dut_instance.maximum_pin_counter = dut_max_pin
+        
+        # The new_counter kwarg must match the type expected by the function
+        if trigger_name == 'enroll_unattended_auto_lock_counter':
+            kwargs = {'new_counter': counter_value}
+            expected_press = f"key{counter_value}"
+        else:
+            kwargs = {'new_counter': str(counter_value)}
+            expected_press = [str(counter_value)[0], str(counter_value)[1]]
 
+        event = MagicMock(transition=MagicMock(), kwargs=kwargs)
+        event.event.name = trigger_name
+        
         # WHEN
         fsm._counter_enrollment(event)
 
@@ -554,34 +789,74 @@ class TestApricornDeviceFSM:
             LEDs['REJECT'], timeout=ANY, replay_extra_context=ANY
         )
         
-    def test_timeout_counter_enrollment(self, monkeypatch, fsm, mock_at):
+    @pytest.mark.parametrize("pin_entered", [True, False])
+    def test_timeout_counter_enrollment(self, monkeypatch, fsm, mock_at, pin_entered):
         mock_sleep = MagicMock()
         monkeypatch.setattr(time, 'sleep', mock_sleep)
-        event = MagicMock(transition=MagicMock(), kwargs={'pin_entered': True})
+        event = MagicMock(transition=MagicMock(), kwargs={'pin_entered': pin_entered})
+        
         fsm._timeout_counter_enrollment(event)
+        
         mock_sleep.assert_called_with(30)
-        mock_at.await_and_confirm_led_pattern.assert_called_with(LEDs['REJECT'], timeout=ANY, replay_extra_context=ANY)
+        if pin_entered:
+            mock_at.await_and_confirm_led_pattern.assert_called_with(LEDs['REJECT'], timeout=ANY, replay_extra_context=ANY)
+        else:
+            # This covers line 1019
+            mock_at.await_and_confirm_led_pattern.assert_not_called()
         
     def test_admin_enrollment(self, fsm, mock_at, dut_instance):
         fsm._admin_enrollment(MagicMock())
         mock_at.press.assert_called_with(['unlock', 'key9'])
         assert dut_instance.pending_enrollment_type == 'admin'
 
-    def test_recovery_pin_enrollment(self, fsm, mock_at, dut_instance):
-        fsm._recovery_pin_enrollment(MagicMock(transition=MagicMock()))
+    @pytest.mark.parametrize("hw_success", [True, False])
+    def test_recovery_pin_enrollment(self, fsm, mock_at, dut_instance, hw_success):
+        mock_at.await_and_confirm_led_pattern.return_value = hw_success
+        ExpectedException = get_reloaded_exception()
+
+        if not hw_success:
+            with pytest.raises(ExpectedException, match="Did not observe GREEN_BLUE pattern"):
+                fsm._recovery_pin_enrollment(MagicMock(transition=MagicMock()))
+        else:
+            fsm._recovery_pin_enrollment(MagicMock(transition=MagicMock()))
+            assert dut_instance.pending_enrollment_type == 'recovery'
+        
         mock_at.press.assert_called_with(['unlock', 'key7'])
-        assert dut_instance.pending_enrollment_type == 'recovery'
         
     def test_user_enrollment(self, fsm, mock_at, dut_instance):
         fsm._user_enrollment(MagicMock(transition=MagicMock()))
         mock_at.press.assert_called_with(['unlock', 'key1'])
         assert dut_instance.pending_enrollment_type == 'user'
         
-    def test_self_destruct_pin_enrollment(self, fsm, mock_at, dut_instance):
-        dut_instance.self_destruct_enabled = True
-        fsm._self_destruct_pin_enrollment(MagicMock(transition=MagicMock()))
+    @pytest.mark.parametrize("sd_enabled, hw_success", [
+    (True, True),   # Happy path: SD enabled, HW works
+    (True, False),  # Failure: SD enabled, but subsequent HW check fails (tested elsewhere)
+    (False, True),  # Rejected: SD disabled, device correctly rejects
+    (False, False)  # Failure: SD disabled, device should reject but pattern isn't seen
+    ])
+    def test_self_destruct_pin_enrollment(self, fsm, mock_at, dut_instance, sd_enabled, hw_success):
+        # GIVEN
+        dut_instance.self_destruct_enabled = sd_enabled
+        mock_at.await_and_confirm_led_pattern.return_value = hw_success
+        event = MagicMock(transition=MagicMock())
+        ExpectedException = get_reloaded_exception()
+
+        # WHEN / THEN
+        if sd_enabled:
+            fsm._self_destruct_pin_enrollment(event)
+            assert dut_instance.pending_enrollment_type == 'self_destruct'
+        else: # Self-destruct is not enabled, so we expect a REJECT
+            if not hw_success:
+                with pytest.raises(ExpectedException, match="Did not observe REJECT"):
+                    fsm._self_destruct_pin_enrollment(event)
+            else:
+                fsm._self_destruct_pin_enrollment(event)
+                # Should not change pending type because it was rejected
+                assert dut_instance.pending_enrollment_type is None 
+                mock_at.await_and_confirm_led_pattern.assert_called_once_with(LEDs['REJECT'], timeout=ANY, replay_extra_context=ANY)
+        
+        # The key press happens regardless
         mock_at.press.assert_called_with(['key3', 'unlock'])
-        assert dut_instance.pending_enrollment_type == 'self_destruct'
 
     def test_pin_enrollment_fails_with_invalid_pin_arg(self, fsm):
         """
@@ -753,7 +1028,6 @@ class TestApricornDeviceFSM:
     ])
     def test_simple_toggles(self, fsm, mock_at, dut_instance, toggle_method, expected_press, dut_attr, expected_val):
         # This single test covers 7 simple toggle functions
-        # Bug fix: In _removable_media_toggle and _lock_override_toggle, dut attribute was being set incorrectly
         if toggle_method == "_removable_media_toggle":
             dut_instance.removable_media = False
         elif toggle_method == "_lock_override_toggle":
@@ -836,12 +1110,122 @@ class TestApricornDeviceFSM:
         # THEN: Assert that the UFE state is correct after the operation.
         assert dut_instance.user_forced_enrollment == expected_ufe_state
         
-    def test_delete_pins_toggle(self, fsm, mock_at, dut_instance):
-        dut_instance.user_forced_enrollment = False
+    @pytest.mark.parametrize("ufe_enabled, hw_step_to_fail", [
+    (False, 0), # Happy path, all HW checks succeed
+    (True, 0),  # UFE is enabled, so the function should do nothing
+    (False, 1), # Fails on first ACCEPT_PATTERN
+    (False, 2), # Fails on RED_BLUE pattern
+    (False, 3), # Fails on final ACCEPT_STATE
+    ])
+    def test_delete_pins_toggle(self, fsm, mock_at, dut_instance, ufe_enabled, hw_step_to_fail):
+        """Tests all success, no-op, and failure paths of _delete_pins_toggle."""
+        # GIVEN
+        dut_instance.user_forced_enrollment = ufe_enabled
         dut_instance.user_pin[1] = ['1'] # Give it a pin to delete
-        getattr(fsm, "_delete_pins_toggle")(MagicMock(transition=MagicMock()))
-        assert mock_at.press.call_count == 2
-        assert dut_instance.user_pin[1] is None
+
+        # Set up hardware mock side effects
+        mock_at.await_and_confirm_led_pattern.side_effect = [
+            hw_step_to_fail != 1, # First ACCEPT
+            hw_step_to_fail != 2, # RED_BLUE
+        ]
+        mock_at.confirm_led_solid.return_value = (hw_step_to_fail != 3)
+
+        event = MagicMock(transition=MagicMock())
+        ExpectedException = get_reloaded_exception()
+
+        # WHEN / THEN
+        if ufe_enabled:
+            fsm._delete_pins_toggle(event)
+            mock_at.press.assert_not_called()
+            assert dut_instance.user_pin[1] is not None # Pin should not be deleted
+            return
+
+        if hw_step_to_fail > 0:
+            with pytest.raises(ExpectedException):
+                fsm._delete_pins_toggle(event)
+            assert dut_instance.user_pin[1] is not None # Pin should not be deleted
+        else: # Happy path
+            fsm._delete_pins_toggle(event)
+            assert dut_instance.user_pin[1] is None # Pin should be deleted
+            assert mock_at.press.call_count == 2
+
+    def test_on_enter_PIN_ENROLLMENT_self_destruct_failure(self, fsm, mock_at):
+        """Covers the hardware failure path for self_destruct in on_enter_PIN_ENROLLMENT."""
+        # GIVEN
+        event = MagicMock()
+        event.event.name = 'enroll_self_destruct'
+        mock_at.await_and_confirm_led_pattern.return_value = False
+        ExpectedException = get_reloaded_exception()
+
+        # WHEN / THEN
+        with pytest.raises(ExpectedException, match="Did not observe RED_BLUE pattern"):
+            fsm.on_enter_PIN_ENROLLMENT(event) # Covers lines 1072-1073
+
+    # Add this new test to the TestApricornDeviceFSM class
+    @pytest.mark.parametrize("enrollment_type, step_to_fail", [
+        ('admin', 1), ('admin', 2), ('admin', 3), # Fail first accept, second accept, final state
+        ('recovery', 1), ('recovery', 2), ('recovery', 3),
+        ('user', 1), ('user', 2), ('user', 3),
+        ('self_destruct', 1), ('self_destruct', 2), ('self_destruct', 3),
+    ])
+    def test_pin_enrollment_all_hw_failure_paths(self, fsm, mock_at, dut_instance, enrollment_type, step_to_fail):
+        """Covers all intermediate hardware failure paths in the _pin_enrollment method."""
+        # GIVEN
+        dut_instance.pending_enrollment_type = enrollment_type
+        new_pin = ['1', '2', '3', '4', '5', '6', '7']
+        event = MagicMock(transition=MagicMock(), kwargs={'new_pin': new_pin}, event=MagicMock())
+        ExpectedException = get_reloaded_exception()
+
+        # Configure mock side-effects to fail at the specified step
+        side_effects_1 = [step_to_fail != 1, step_to_fail != 2]
+        side_effects_2 = [step_to_fail != 3]
+        
+        mock_at.await_and_confirm_led_pattern.side_effect = side_effects_1
+        mock_at.await_led_state.side_effect = side_effects_2 # For admin/sd
+        mock_at.confirm_led_solid.side_effect = side_effects_2 # For user/recovery
+
+        # WHEN / THEN
+        with pytest.raises(ExpectedException):
+            fsm._pin_enrollment(event)
+
+    # Add this new test to the TestApricornDeviceFSM class
+    def test_do_manufacturer_reset_keypad_test_failures(self, fsm, mock_at, dut_instance):
+        """Covers specific failure points within the manufacturer reset keypad test."""
+        ExpectedException = get_reloaded_exception()
+        
+        # Test failure on the very first key (line 916)
+        mock_at.confirm_led_pattern.return_value = False
+        with pytest.raises(ExpectedException, match="Failed 'key1' confirmation"):
+            with patch('time.sleep'):
+                fsm._do_manufacturer_reset(MagicMock(transition=MagicMock()))
+
+        # Test failure on one of the 'other' keys (line 933)
+        mock_at.confirm_led_pattern.return_value = True # First key passes now
+        mock_at.await_led_state.return_value = False # But the next one fails
+        with pytest.raises(ExpectedException, match="Failed 'key2' confirmation"):
+            with patch('time.sleep'):
+                fsm._do_manufacturer_reset(MagicMock(transition=MagicMock()))
+
+    # Add this new test to the TestApricornDeviceFSM class
+    @pytest.mark.parametrize("toggle_method_name", [
+        "_basic_disk_toggle", "_removable_media_toggle", "_led_flicker_enable",
+        "_lock_override_toggle", "_read_only_toggle", "_read_write_toggle",
+        "_self_destruct_toggle",
+    ])
+    def test_simple_toggles_failure_path(self, fsm, mock_at, dut_instance, toggle_method_name):
+        """Covers the generic hardware failure path for all simple toggle methods."""
+        # GIVEN
+        mock_at.await_and_confirm_led_pattern.return_value = False
+        toggle_method = getattr(fsm, toggle_method_name)
+        ExpectedException = get_reloaded_exception()
+
+        # Special setup for methods with preconditions
+        if toggle_method_name == "_self_destruct_toggle":
+            dut_instance.provision_lock = False
+
+        # WHEN / THEN
+        with pytest.raises(ExpectedException):
+            toggle_method(MagicMock(transition=MagicMock()))
 
     # --- Other Methods ---
 

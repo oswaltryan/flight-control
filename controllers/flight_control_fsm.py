@@ -1079,6 +1079,35 @@ class ApricornDeviceFSM:
         self.logger.info("Device correctly showed REJECT pattern.")
         return True
     
+    def _timeout_pin_enrollment(self, event_data: EventData) -> None:
+        """
+        Handles the timeout case for PIN enrollment.
+
+        This callback simulates waiting for the 30-second enrollment window to
+        expire. It then checks for a REJECT pattern if a partial PIN was
+        entered before the timeout.
+
+        Args:
+            event_data: Event data containing an optional boolean `pin_entered` kwarg.
+
+        Raises:
+            TransitionCallbackError: If the REJECT pattern is not observed
+                                     after a timeout with a partial entry.
+        """
+        pin_entered = event_data.kwargs.get('pin_entered', False)
+        dest_state = event_data.transition.dest if event_data.transition else "UNKNOWN"
+        context = {'fsm_current_state': self.state, 'fsm_destination_state': dest_state}
+        
+        self.logger.info("Simulating 30-second PIN enrollment timeout...")
+        time.sleep(30) # Simulate the timeout
+
+        if pin_entered:
+            self.logger.info("Partial PIN was entered before timeout, expecting REJECT pattern.")
+            if not self.at.await_and_confirm_led_pattern(LEDs['REJECT'], timeout=5.0, replay_extra_context=context):
+                raise TransitionCallbackError("Did not observe REJECT for PIN enrollment timeout with partial entry")
+        else:
+            self.logger.info("No PIN was entered before timeout, no REJECT pattern expected.")
+
 ##########
 ## Admin mode Counter Enrollments
 
