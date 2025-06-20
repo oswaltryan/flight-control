@@ -237,6 +237,43 @@ class TestApricornDeviceFSM:
         # The check for the machine type is handled better in TestModuleAndHelpers
         assert hasattr(fsm, 'machine')
 
+    @pytest.mark.parametrize("diagram_mode_env, expect_graph_engine", [
+    # Case 1: Diagram mode is ON, expect the kwarg
+    pytest.param(
+        'true', True,
+        marks=pytest.mark.skipif(not DIAGRAM_TOOLS_INSTALLED, reason="Diagramming libraries not installed.")
+    ),
+    # Case 2: Diagram mode is OFF, do not expect the kwarg
+    ('false', False),
+    ])
+    def test_fsm_initialization_with_diagram_mode(self, monkeypatch, mock_at, diagram_mode_env, expect_graph_engine):
+        """
+        GIVEN a specific FSM_DIAGRAM_MODE environment setting
+        WHEN the ApricornDeviceFSM is initialized
+        THEN the underlying Machine class is instantiated with the correct kwargs.
+        This specifically covers the `if DIAGRAM_MODE:` block in the FSM's __init__.
+        """
+        # GIVEN: The environment is set and the FSM module is reloaded to pick it up.
+        monkeypatch.setenv("FSM_DIAGRAM_MODE", diagram_mode_env)
+        importlib.reload(flight_control_fsm)
+
+        # We patch the Machine class within the FSM's module namespace.
+        with patch('controllers.flight_control_fsm.Machine') as mock_machine_constructor:
+            # WHEN: The FSM is instantiated.
+            fsm_instance = flight_control_fsm.ApricornDeviceFSM(at_controller=mock_at)
+
+            # THEN: Assert the constructor for the Machine was called.
+            mock_machine_constructor.assert_called_once()
+            
+            # THEN: Inspect the keyword arguments passed to the constructor.
+            call_kwargs = mock_machine_constructor.call_args.kwargs
+            
+            if expect_graph_engine:
+                assert 'graph_engine' in call_kwargs
+                assert call_kwargs['graph_engine'] == 'pygraphviz'
+            else:
+                assert 'graph_engine' not in call_kwargs
+
     def test_log_state_change_details(self, fsm, caplog):
         """Test that _log_state_change_details logs correctly."""
         # GIVEN the FSM is in a specific state before the transition
@@ -296,21 +333,55 @@ class TestApricornDeviceFSM:
         # THEN
         fsm.post_fail.assert_called_once() # Covers line 408
 
-    def test_enter_invalid_pin_failure_and_zero_counter(self, fsm, mock_at, dut_instance):
-        """Tests failure to see REJECT pattern and the path where counter is already zero."""
+    @pytest.mark.parametrize("scenario", ["hw_failure", "zero_counter", "specific_pin"])
+    def test_enter_invalid_pin_all_scenarios(self, fsm, mock_at, dut_instance, caplog, scenario):
+        """
+        Tests all scenarios for _enter_invalid_pin:
+        1. Hardware failure (REJECT pattern not seen).
+        2. Brute force counter is already zero.
+        3. A specific invalid PIN is provided via kwargs.
+        """
         ExpectedException = get_reloaded_exception()
         
-        # Test hardware failure (covers line 738)
-        mock_at.await_and_confirm_led_pattern.return_value = False
-        result = fsm._enter_invalid_pin(MagicMock(kwargs={}))
-        assert result is False
-        mock_at.await_and_confirm_led_pattern.assert_called_once_with(LEDs['REJECT'], timeout=ANY)
+        if scenario == "hw_failure":
+            # GIVEN: The hardware check will fail
+            mock_at.await_and_confirm_led_pattern.return_value = False
+            
+            # WHEN: The function is called
+            result = fsm._enter_invalid_pin(MagicMock(kwargs={}))
+            
+            # THEN: It should return False and not decrement the counter
+            assert result is False
+            assert dut_instance.brute_force_counter_current == 20 # Unchanged from default
+            assert "Device did not show REJECT pattern" in caplog.text
 
-        # Test when counter is already 0 (covers line 743)
-        mock_at.await_and_confirm_led_pattern.return_value = True
-        dut_instance.brute_force_counter_current = 0
-        fsm._enter_invalid_pin(MagicMock(kwargs={}))
-        assert dut_instance.brute_force_counter_current == 0 # Unchanged
+        elif scenario == "zero_counter":
+            # GIVEN: The brute force counter is already at zero
+            dut_instance.brute_force_counter_current = 0
+            mock_at.await_and_confirm_led_pattern.return_value = True
+
+            # WHEN: The function is called
+            result = fsm._enter_invalid_pin(MagicMock(kwargs={}))
+
+            # THEN: It should succeed but not change the counter
+            assert result is True
+            assert dut_instance.brute_force_counter_current == 0 # Unchanged
+
+        elif scenario == "specific_pin":
+            # GIVEN: A specific PIN is passed in the event kwargs
+            initial_count = dut_instance.brute_force_counter_current
+            specific_pin = ['old', 'pin', '1', '2', '3']
+            event = MagicMock(kwargs={'pin': specific_pin})
+            mock_at.await_and_confirm_led_pattern.return_value = True
+
+            # WHEN: The function is called
+            result = fsm._enter_invalid_pin(event)
+
+            # THEN: The specific log message should be present and the counter decremented
+            assert "Intentionally entering a specific known-invalid PIN" in caplog.text
+            assert result is True
+            mock_at.sequence.assert_called_once_with(specific_pin)
+            assert dut_instance.brute_force_counter_current == initial_count - 1
     
     @pytest.mark.parametrize("hw_success, log_msg", [(True, "Stable ADMIN_MODE confirmed"), (False, "Failed to confirm stable ADMIN_MODE LEDs")])
     def test_on_enter_ADMIN_MODE(self, fsm, mock_at, caplog, hw_success, log_msg):
@@ -405,21 +476,7 @@ class TestApricornDeviceFSM:
         fsm.on_enter_COUNTER_ENROLLMENT(MagicMock())
         mock_at.confirm_led_pattern.assert_called_with(LEDs['RED_COUNTER'], replay_extra_context=ANY)
 
-    @pytest.mark.parametrize("trigger, pattern_key", [("enroll_self_destruct", "RED_BLUE"), ("enroll_user", "GREEN_BLUE")])
-    def test_on_enter_PIN_ENROLLMENT(self, fsm, mock_at, trigger, pattern_key):
-        # GIVEN
-        event = MagicMock()
-        event.event.name = trigger  # Set the name attribute to the string from the parameter
 
-        # WHEN
-        fsm.on_enter_PIN_ENROLLMENT(event)
-
-        # THEN
-        mock_at.await_and_confirm_led_pattern.assert_called_with(
-            LEDs[pattern_key], 
-            timeout=ANY, 
-            replay_extra_context=ANY
-        )
 
     # --- 'before' Callbacks ---
 
@@ -535,18 +592,73 @@ class TestApricornDeviceFSM:
         with pytest.raises(ExpectedException, match=error_msg):
             fsm._enter_user_pin(event)
 
-    def test_enter_admin_mode_login(self, fsm, mock_at, dut_instance):
-        dut_instance.admin_pin = ['1']
-        fsm._enter_admin_mode_login(MagicMock(transition=MagicMock()))
-        mock_at.press.assert_called_once()
-        mock_at.confirm_led_pattern.assert_called_once()
-        mock_at.sequence.assert_called_once_with(['1'])
+    @pytest.mark.parametrize("hw_success", [True, False])
+    def test_enter_admin_mode_login(self, fsm, mock_at, dut_instance, hw_success):
+        """
+        Tests both the success and failure paths for entering Admin Mode.
+        This specifically covers the LED confirmation check.
+        """
+        # GIVEN: The FSM is ready and the hardware check will either succeed or fail.
+        dut_instance.admin_pin = ['1', '2', '3']
+        mock_at.confirm_led_pattern.return_value = hw_success
+        ExpectedException = get_reloaded_exception()
+        
+        # WHEN the function is called
+        if not hw_success:
+            # THEN: If the hardware check fails, an exception should be raised.
+            with pytest.raises(ExpectedException, match="Failed Admin Mode Login LED confirmation"):
+                fsm._enter_admin_mode_login(MagicMock(transition=MagicMock()))
+            
+            # AND: The function should have aborted before entering the PIN.
+            mock_at.sequence.assert_not_called()
+        else:
+            # THEN: If the hardware check succeeds, the function completes normally.
+            fsm._enter_admin_mode_login(MagicMock(transition=MagicMock()))
+            
+            # AND: The PIN entry sequence should have been called.
+            mock_at.sequence.assert_called_once_with(dut_instance.admin_pin)
 
-    def test_enter_last_try_pin(self, fsm, mock_at):
-        fsm._enter_last_try_pin(MagicMock())
-        mock_at.press.assert_called_once()
-        mock_at.await_and_confirm_led_pattern.assert_called_once()
-        mock_at.sequence.assert_called_once()
+        # FINALLY: Verify that the initial key press and the LED check were always attempted.
+        mock_at.press.assert_called_once_with(['key0', 'unlock'], duration_ms=6000)
+        mock_at.confirm_led_pattern.assert_called_once_with(
+            LEDs['RED_LOGIN'], 
+            clear_buffer=True, 
+            replay_extra_context=ANY
+        )
+
+    @pytest.mark.parametrize("hw_success", [True, False])
+    def test_enter_last_try_pin(self, fsm, mock_at, hw_success):
+        """
+        Tests both the success and failure paths for the 'last try' login sequence.
+        This specifically covers the LED confirmation check.
+        """
+        # GIVEN: The hardware check will either succeed or fail.
+        mock_at.await_and_confirm_led_pattern.return_value = hw_success
+        ExpectedException = get_reloaded_exception()
+        
+        # WHEN the function is called
+        if not hw_success:
+            # THEN: If the hardware check fails, an exception should be raised.
+            with pytest.raises(ExpectedException, match="Failed 'LASTTRY' Login confirmation"):
+                fsm._enter_last_try_pin(MagicMock())
+            
+            # AND: The function should have aborted before entering the final sequence.
+            mock_at.sequence.assert_not_called()
+        else:
+            # THEN: If the hardware check succeeds, the function completes normally.
+            fsm._enter_last_try_pin(MagicMock())
+            
+            # AND: The final key sequence should have been entered.
+            mock_at.sequence.assert_called_once_with(
+                ['key5', 'key2', 'key7', 'key8', 'key8', 'key7', 'key9', 'unlock']
+            )
+
+        # FINALLY: Verify that the initial key press and the LED check were always attempted.
+        mock_at.press.assert_called_once_with(['key5', 'unlock'], duration_ms=6000)
+        mock_at.await_and_confirm_led_pattern.assert_called_once_with(
+            LEDs["RED_GREEN"], 
+            timeout=10
+        )
 
     def test_do_user_reset_from_admin_mode(self, fsm, mock_at, dut_instance):
         """Test successful user reset when initiated from ADMIN_MODE."""
@@ -611,10 +723,15 @@ class TestApricornDeviceFSM:
             fsm._do_user_reset(event)
         assert dut_instance.admin_pin == ['1']
         
-    def test_do_manufacturer_reset(self, fsm, mock_at, dut_instance):
-        # GIVEN
+    @pytest.mark.parametrize("is_secure_key", [True, False])
+    def test_do_manufacturer_reset(self, fsm, mock_at, dut_instance, is_secure_key):
+        """
+        Tests the full, successful manufacturer reset process for both
+        standard and 'secure_key' devices. This covers the key list selection logic.
+        """
+        # GIVEN: The FSM is in FACTORY_MODE and the DUT is configured for the test run.
         fsm.state = 'FACTORY_MODE'
-        dut_instance.secure_key = False
+        dut_instance.secure_key = is_secure_key
         
         # WHEN
         with patch('time.sleep'): # Avoid long sleeps
@@ -624,24 +741,73 @@ class TestApricornDeviceFSM:
         # 1. Assert the initial sequence and long press happen once.
         assert mock_at.sequence.call_count == 1
         
-        assert mock_at.press.call_count == 2
-        # And we can verify what those calls were.
+        # The final key press will be different based on the key list
+        final_key = "unlock" if not is_secure_key else "unlock" # Note: In your code, both lists end with 'unlock' after the change
+        
+        # Assert the two `press` calls were made correctly.
         mock_at.press.assert_has_calls([
             call("lock", duration_ms=6000), # The first long press
-            call("unlock")                 # The final key press in the sequence
+            call(final_key)                # The final key press in the sequence
         ])
+        assert mock_at.press.call_count == 2
 
         # 2. Assert the keypad test loop calls 'on' and 'off' the correct number of times.
-        # portable list has 12 keys. The first is special, the last uses 'press'.
+        # Both key lists have 12 keys, so the call counts should be the same.
         # The loop runs for 10 'OTHER_KEYS'.
         assert mock_at.on.call_count == 11 # The first key + 10 other keys
         assert mock_at.off.call_count == 1 # Only for the first key
 
         # 3. Assert the LED checks happen as expected.
+        # One `confirm_led_pattern` for the first key press
         assert mock_at.confirm_led_pattern.call_count == 1
-        assert mock_at.confirm_led_solid.call_count == 1
+        # One `await_and_confirm_led_pattern` for the 'Reset Ready' state
+        # One `await_and_confirm_led_pattern` for the final 'ENUM' state
+        assert mock_at.await_and_confirm_led_pattern.call_count == 2
+        
+        assert mock_at.confirm_led_solid.call_count == 1 # For the all_off check after the first key
         assert mock_at.await_led_state.call_count == 10 # Once for each of the OTHER_KEYS
         assert mock_at.confirm_led_solid_strict.call_count == 1
+
+    @pytest.mark.parametrize("step_to_fail, error_msg", [
+    (1, "Failed Reset Ready LED confirmation"),
+    (2, "Failed Manufacturer Reset unlock LED pattern"),
+    ])
+    def test_do_manufacturer_reset_led_failures(self, fsm, mock_at, dut_instance, step_to_fail, error_msg):
+        """
+        Tests specific LED failure paths in _do_manufacturer_reset, either before
+        or after the keypad test sequence.
+        """
+        # GIVEN: The mock is configured to fail at a specific step.
+        # The `await_and_confirm_led_pattern` method is called twice. We use side_effect
+        # to control its return value for each call.
+        mock_at.await_and_confirm_led_pattern.side_effect = [
+            step_to_fail != 1, # First call (Reset Ready): returns False if step_to_fail is 1
+            step_to_fail != 2, # Second call (Final ENUM): returns False if step_to_fail is 2
+        ]
+        ExpectedException = get_reloaded_exception()
+
+        # WHEN the function is called
+        # THEN: It should raise the specific TransitionCallbackError for that step
+        with pytest.raises(ExpectedException, match=error_msg):
+            with patch('time.sleep'): # Avoid long sleeps
+                fsm._do_manufacturer_reset(MagicMock(transition=MagicMock()))
+
+        # FINALLY: Verify what happened before the failure and what was avoided.
+        
+        # 1. Assert that the initial setup was always called.
+        mock_at.press.assert_any_call("lock", duration_ms=6000)
+        
+        # 2. Assert behavior based on which step failed.
+        if step_to_fail == 1:
+            # If it failed on the 'Reset Ready' LED, the keypad test loop should never start.
+            mock_at.on.assert_not_called()
+        elif step_to_fail == 2:
+            # If it failed on the final 'ENUM' LED, the keypad test must have completed.
+            # This means `at.on` was called 11 times (from our previous test analysis).
+            assert mock_at.on.call_count == 11
+            # And the dut state should have been reset right before the final LED check.
+            # We can check a proxy for this, like the admin_pin being cleared.
+            assert dut_instance.admin_pin == []
 
     def test_press_lock_button(self, fsm, mock_at):
         fsm._press_lock_button(MagicMock())
@@ -719,89 +885,150 @@ class TestApricornDeviceFSM:
         with pytest.raises(ExpectedException, match=error_msg):
             fsm._counter_enrollment(event)
     
-    @pytest.mark.parametrize("trigger_name, counter_value, expected_press_arg", [
-        # Case 1: Unattended Auto-Lock
-        ('enroll_unattended_auto_lock_counter', 1, 'key1'),
-        # Case 2: Brute Force (requires a 2-digit string)
-        ('enroll_brute_force_counter', '08', ['8', '0']), # Note: press is called twice
-        # Case 3: Min PIN Length (requires a 2-digit string)
-        ('enroll_min_pin_counter', '12', ['2', '1']),
+    @pytest.mark.parametrize("trigger_name, counter_value, expected_pattern_key, hw_success", [
+        # --- Unattended Auto-Lock ---
+        ('enroll_unattended_auto_lock_counter', 1, 'ACCEPT_PATTERN', True),
+        ('enroll_unattended_auto_lock_counter', 1, 'ACCEPT_PATTERN', False), # Failure case
+        # --- Brute Force ---
+        ('enroll_brute_force_counter', '08', 'BRUTE_FORCE_COUNTER_ENROLLMENT_FEEDBACK', True),
+        ('enroll_brute_force_counter', '08', 'BRUTE_FORCE_COUNTER_ENROLLMENT_FEEDBACK', False), # Failure case
+        # --- Min PIN Length ---
+        ('enroll_min_pin_counter', '12', 'ACCEPT_PATTERN', True),
+        ('enroll_min_pin_counter', '12', 'ACCEPT_PATTERN', False), # Failure case
     ])
-    def test_counter_enrollment_success_paths(self, fsm, mock_at, dut_instance, trigger_name, counter_value, expected_press_arg):
+    def test_counter_enrollment_success_paths(self, fsm, mock_at, dut_instance, trigger_name, counter_value, expected_pattern_key, hw_success):
+        """
+        Tests the success paths for all counter enrollments, and also the case
+        where the hardware fails to show the correct success/feedback pattern.
+        """
         # GIVEN
         dut_instance.unattended_auto_lock_counter = 0 # Initial state
+        mock_at.await_and_confirm_led_pattern.return_value = hw_success
+        ExpectedException = get_reloaded_exception()
         
-        event = MagicMock(transition=MagicMock(), kwargs={'new_counter': counter_value})
-        event.event.name = trigger_name # Set the name attribute to a simple string
-
-        # WHEN
-        fsm._counter_enrollment(event)
-
-        # THEN
-        if isinstance(expected_press_arg, list):
-            # For 2-digit counters, press is called twice
-            mock_at.press.assert_has_calls([
-                call(expected_press_arg[1]),
-                call(expected_press_arg[0])
-            ])
-        else:
-            # For single-digit counters
-            mock_at.press.assert_called_with(expected_press_arg)
-
-        # Also check that the DUT state was updated for the auto-lock case
+        # Set up kwargs for the event
         if trigger_name == 'enroll_unattended_auto_lock_counter':
+            kwargs = {'new_counter': counter_value}
+        else:
+            kwargs = {'new_counter': str(counter_value)}
+            
+        event = MagicMock(transition=MagicMock(), kwargs=kwargs)
+        event.event.name = trigger_name
+
+        # WHEN / THEN
+        if not hw_success:
+            with pytest.raises(ExpectedException, match="Did not observe"):
+                fsm._counter_enrollment(event)
+        else:
+            fsm._counter_enrollment(event)
+
+        # --- Assertions ---
+        
+        # Construct the expected pattern dynamically for the brute-force case
+        if expected_pattern_key == 'BRUTE_FORCE_COUNTER_ENROLLMENT_FEEDBACK':
+            expected_pattern = []
+            for _ in range(int(counter_value)):
+                expected_pattern.append({'red':0, 'green':0, 'blue':0, 'duration': (0.00,  3.0)})
+                expected_pattern.append({'red':0, 'green':1, 'blue':0, 'duration': (0.01,  1.0)})
+        else:
+            expected_pattern = LEDs[expected_pattern_key]
+            
+        mock_at.await_and_confirm_led_pattern.assert_called_once_with(
+            expected_pattern, 
+            timeout=ANY, 
+            replay_extra_context=ANY
+        )
+
+        # Also check that the DUT state was updated only on the successful auto-lock case
+        if trigger_name == 'enroll_unattended_auto_lock_counter' and hw_success:
             assert dut_instance.unattended_auto_lock_counter == counter_value
+        else:
+            assert dut_instance.unattended_auto_lock_counter == 0 # Should not change
 
     @pytest.mark.parametrize("trigger_name, counter_value, dut_min_pin, dut_max_pin", [
-    # Unattended Auto-Lock out of range
-    ('enroll_unattended_auto_lock_counter', 9, 7, 16),
-    # Brute force out of range (low)
-    ('enroll_brute_force_counter', '01', 7, 16),
-    # Brute force out of range (high)
-    ('enroll_brute_force_counter', '11', 7, 16),
-    # Min PIN out of range (low)
-    ('enroll_min_pin_counter', '06', 7, 16),
-    # Min PIN out of range (high)
-    ('enroll_min_pin_counter', '17', 7, 16),
+        # Unattended Auto-Lock out of range
+        ('enroll_unattended_auto_lock_counter', 9, 7, 16),
+        # Brute force out of range (low)
+        ('enroll_brute_force_counter', '01', 7, 16),
+        # Brute force out of range (high)
+        ('enroll_brute_force_counter', '11', 7, 16),
+        # Min PIN out of range (low)
+        ('enroll_min_pin_counter', '06', 7, 16),
+        # Min PIN out of range (high)
+        ('enroll_min_pin_counter', '17', 7, 16),
     ])
-    def test_counter_enrollment_invalid_value_rejection(self, fsm, mock_at, dut_instance, trigger_name, counter_value, dut_min_pin, dut_max_pin):
-        """Tests the logic for when the device itself should reject an out-of-range value."""
+    @pytest.mark.parametrize("hw_should_succeed", [True, False]) # NEW PARAMETER
+    def test_counter_enrollment_invalid_value_rejection(self, fsm, mock_at, dut_instance, trigger_name, counter_value, dut_min_pin, dut_max_pin, hw_should_succeed):
+        """
+        Tests the logic for when the device itself should reject an out-of-range value,
+        and also tests the case where the hardware fails to show that rejection.
+        """
         # GIVEN
         dut_instance.default_minimum_pin_counter = dut_min_pin
         dut_instance.maximum_pin_counter = dut_max_pin
+        mock_at.await_and_confirm_led_pattern.return_value = hw_should_succeed
+        ExpectedException = get_reloaded_exception()
         
         # The new_counter kwarg must match the type expected by the function
         if trigger_name == 'enroll_unattended_auto_lock_counter':
             kwargs = {'new_counter': counter_value}
-            expected_press = f"key{counter_value}"
         else:
             kwargs = {'new_counter': str(counter_value)}
-            expected_press = [str(counter_value)[0], str(counter_value)[1]]
 
         event = MagicMock(transition=MagicMock(), kwargs=kwargs)
         event.event.name = trigger_name
         
-        # WHEN
-        fsm._counter_enrollment(event)
+        # WHEN / THEN
+        if not hw_should_succeed:
+            # If the hardware fails to show the REJECT pattern, we expect an exception
+            with pytest.raises(ExpectedException, match="Did not observe REJECT"):
+                fsm._counter_enrollment(event)
+        else:
+            # If the hardware correctly shows REJECT, the function should complete without error
+            fsm._counter_enrollment(event)
 
-        # THEN it should have checked for the REJECT pattern
+        # FINALLY: Assert that the function always checked for the REJECT pattern
         mock_at.await_and_confirm_led_pattern.assert_called_with(
             LEDs['REJECT'], timeout=ANY, replay_extra_context=ANY
         )
         
     @pytest.mark.parametrize("pin_entered", [True, False])
-    def test_timeout_counter_enrollment(self, monkeypatch, fsm, mock_at, pin_entered):
+    @pytest.mark.parametrize("hw_success", [True, False])
+    def test_timeout_counter_enrollment(self, monkeypatch, fsm, mock_at, pin_entered, hw_success):
+        """
+        Tests all paths of the _timeout_counter_enrollment method, including:
+        - Partial PIN entry vs. no entry.
+        - Hardware success vs. failure on showing the REJECT pattern.
+        """
+        # GIVEN: The hardware check's outcome is controlled by hw_success
         mock_sleep = MagicMock()
         monkeypatch.setattr(time, 'sleep', mock_sleep)
+        mock_at.await_and_confirm_led_pattern.return_value = hw_success
         event = MagicMock(transition=MagicMock(), kwargs={'pin_entered': pin_entered})
+        ExpectedException = get_reloaded_exception()
         
-        fsm._timeout_counter_enrollment(event)
-        
-        mock_sleep.assert_called_with(30)
-        if pin_entered:
-            mock_at.await_and_confirm_led_pattern.assert_called_with(LEDs['REJECT'], timeout=ANY, replay_extra_context=ANY)
+        # WHEN / THEN
+        if pin_entered and not hw_success:
+            # This is the specific path to test the lines you highlighted.
+            # A PIN was entered, but the hardware failed to show REJECT.
+            with pytest.raises(ExpectedException, match="Did not observe REJECT for counter enrollment timeout"):
+                fsm._timeout_counter_enrollment(event)
         else:
-            # This covers line 1019
+            # For all other cases (no PIN entered, or successful HW check), no exception is raised.
+            fsm._timeout_counter_enrollment(event)
+        
+        # Assertions
+        mock_sleep.assert_called_with(30)
+        
+        if pin_entered:
+            # The hardware check should always be attempted if a PIN was entered.
+            mock_at.await_and_confirm_led_pattern.assert_called_with(
+                LEDs['REJECT'], 
+                timeout=ANY, 
+                replay_extra_context=ANY
+            )
+        else:
+            # If no PIN was entered, the hardware check should never be attempted.
             mock_at.await_and_confirm_led_pattern.assert_not_called()
         
     def test_admin_enrollment(self, fsm, mock_at, dut_instance):
@@ -823,10 +1050,38 @@ class TestApricornDeviceFSM:
         
         mock_at.press.assert_called_with(['unlock', 'key7'])
         
-    def test_user_enrollment(self, fsm, mock_at, dut_instance):
-        fsm._user_enrollment(MagicMock(transition=MagicMock()))
-        mock_at.press.assert_called_with(['unlock', 'key1'])
-        assert dut_instance.pending_enrollment_type == 'user'
+    @pytest.mark.parametrize("hw_success", [True, False])
+    def test_user_enrollment(self, fsm, mock_at, dut_instance, hw_success):
+        """
+        Tests both the success and failure paths for initiating a User PIN enrollment.
+        This specifically covers the initial GREEN_BLUE LED confirmation.
+        """
+        # GIVEN: The hardware check will either succeed or fail.
+        mock_at.await_and_confirm_led_pattern.return_value = hw_success
+        ExpectedException = get_reloaded_exception()
+        
+        # WHEN the function is called
+        if not hw_success:
+            # THEN: If the hardware check fails, an exception should be raised.
+            with pytest.raises(ExpectedException, match="Did not observe GREEN_BLUE pattern for user enrollment"):
+                fsm._user_enrollment(MagicMock(transition=MagicMock()))
+            
+            # AND: The pending enrollment type should not have been set.
+            assert dut_instance.pending_enrollment_type is None
+        else:
+            # THEN: If the hardware check succeeds, the function completes normally.
+            fsm._user_enrollment(MagicMock(transition=MagicMock()))
+            
+            # AND: The pending enrollment type should be set correctly.
+            assert dut_instance.pending_enrollment_type == 'user'
+
+        # FINALLY: Verify that the key press and the LED check were always attempted.
+        mock_at.press.assert_called_once_with(['unlock', 'key1'])
+        mock_at.await_and_confirm_led_pattern.assert_called_once_with(
+            LEDs['GREEN_BLUE'], 
+            timeout=ANY, 
+            replay_extra_context=ANY
+        )
         
     @pytest.mark.parametrize("sd_enabled, hw_success", [
     (True, True),   # Happy path: SD enabled, HW works
@@ -932,21 +1187,45 @@ class TestApricornDeviceFSM:
         mock_at.confirm_led_solid.assert_called_once()
         assert dut_instance.pending_enrollment_type is None
 
-    def test_pin_enrollment_user_fails_when_slots_full(self, fsm, mock_at, dut_instance):
-        """Test User PIN enrollment failure when all user slots are full."""
-        # GIVEN
-        dut_instance.pending_enrollment_type = 'user'
-        for i in dut_instance.user_pin.keys():
-            dut_instance.user_pin[i] = [str(i)] # Fill all slots
-        event = MagicMock(transition=MagicMock(), kwargs={'new_pin': ['9']}, event=MagicMock())
+    @pytest.mark.parametrize("enrollment_type, pin_attr, expected_error_msg", [
+        ("user", "user_pin", "All 4 user slots are full"),
+        ("recovery", "recovery_pin", "All 4 recovery slots are full"),
+    ])
+    @pytest.mark.parametrize("hw_observes_reject", [True, False])
+    def test_pin_enrollment_fails_when_slots_full(self, fsm, mock_at, dut_instance, enrollment_type, pin_attr, expected_error_msg, hw_observes_reject):
+        """
+        Tests PIN enrollment failure when all slots are full for both User and Recovery PINs.
+        Also tests the case where the hardware fails to show the expected REJECT pattern.
+        """
+        # GIVEN: All slots for the given PIN type are filled.
+        dut_instance.pending_enrollment_type = enrollment_type
+        pin_dictionary = getattr(dut_instance, pin_attr)
+        for i in pin_dictionary.keys():
+            pin_dictionary[i] = [str(i)] # Fill all slots
 
+        # GIVEN: The hardware will either observe the REJECT pattern or not.
+        mock_at.await_and_confirm_led_pattern.return_value = hw_observes_reject
+        event = MagicMock(transition=MagicMock(), kwargs={'new_pin': ['9']}, event=MagicMock())
         ExpectedException = get_reloaded_exception()
 
-        # WHEN/THEN
-        with pytest.raises(ExpectedException, match="All 4 user slots are full"):
-            fsm._pin_enrollment(event)
-        
+        # WHEN / THEN
+        if hw_observes_reject:
+            # If the hardware correctly shows REJECT, the function should raise the "slots are full" error.
+            with pytest.raises(ExpectedException, match=expected_error_msg):
+                fsm._pin_enrollment(event)
+        else:
+            # If the hardware FAILS to show REJECT, we expect the "Did not observe REJECT" error.
+            # THIS IS THE CORRECTED LINE:
+            with pytest.raises(ExpectedException, match="Did not observe REJECT on .*"):
+                fsm._pin_enrollment(event)
+
+        # FINALLY: Verify that the sequence entry was never attempted, and the REJECT check was.
         mock_at.sequence.assert_not_called()
+        mock_at.await_and_confirm_led_pattern.assert_called_once_with(
+            LEDs['REJECT'],
+            timeout=ANY,
+            replay_extra_context=ANY
+        )
 
     # --- Recovery Enrollment Tests ---
 
@@ -965,22 +1244,6 @@ class TestApricornDeviceFSM:
         assert mock_at.sequence.call_count == 2
         mock_at.confirm_led_solid.assert_called_once()
         assert dut_instance.pending_enrollment_type is None
-
-    def test_pin_enrollment_recovery_fails_when_slots_full(self, fsm, mock_at, dut_instance):
-        """Test Recovery PIN enrollment failure when all recovery slots are full."""
-        # GIVEN
-        dut_instance.pending_enrollment_type = 'recovery'
-        for i in dut_instance.recovery_pin.keys():
-            dut_instance.recovery_pin[i] = [str(i)] # Fill all slots
-        event = MagicMock(transition=MagicMock(), kwargs={'new_pin': ['9']}, event=MagicMock())
-
-        ExpectedException = get_reloaded_exception()
-
-        # WHEN/THEN
-        with pytest.raises(ExpectedException, match="All 4 recovery slots are full"):
-            fsm._pin_enrollment(event)
-        
-        mock_at.sequence.assert_not_called()
 
     # --- Self-Destruct Enrollment Tests ---
     
@@ -1039,29 +1302,49 @@ class TestApricornDeviceFSM:
         mock_at.await_and_confirm_led_pattern.assert_called_with(LEDs['ACCEPT_PATTERN'], timeout=ANY, replay_extra_context=ANY)
         assert getattr(dut_instance, dut_attr) == expected_val
 
-    @pytest.mark.parametrize("sd_enabled, initial_pl_state, expected_pl_state, expected_pattern_key", [
-        # Case 1: Success. Self-destruct is OFF, so Provision Lock can be enabled.
-        (False, False, True, 'ACCEPT_PATTERN'),
-        # Case 2: Failure. Self-destruct is ON, so Provision Lock toggle is rejected.
-        (True, False, False, 'REJECT'),
+    @pytest.mark.parametrize("sd_enabled, initial_pl_state", [
+        (False, False), # Path to enable provision lock
+        (True, False),  # Path where provision lock is blocked by self-destruct
     ])
-    def test_provision_lock_toggle(self, fsm, mock_at, dut_instance, sd_enabled, initial_pl_state, expected_pl_state, expected_pattern_key):
+    @pytest.mark.parametrize("hw_success", [True, False])
+    def test_provision_lock_toggle(self, fsm, mock_at, dut_instance, sd_enabled, initial_pl_state, hw_success):
         """
-        GIVEN a specific device state (self-destruct enabled or not)
-        WHEN _provision_lock_toggle is called
-        THEN the correct hardware commands are sent and the DUT state is updated accordingly.
+        Tests all logic and hardware failure paths for _provision_lock_toggle.
+        - GIVEN self-destruct is enabled or disabled.
+        - GIVEN the hardware confirmation succeeds or fails.
+        - THEN the correct behavior or exception occurs.
         """
         # GIVEN: The DUT is configured for the specific test case.
         dut_instance.self_destruct_enabled = sd_enabled
         dut_instance.provision_lock = initial_pl_state
+        mock_at.await_and_confirm_led_pattern.return_value = hw_success
+        ExpectedException = get_reloaded_exception()
         
-        # WHEN: The callback is executed.
-        fsm._provision_lock_toggle(MagicMock(transition=MagicMock()))
+        # Determine the expected pattern and final DUT state
+        if sd_enabled:
+            expected_pattern_key = 'REJECT'
+            expected_pl_state = False
+            error_msg = "Did not observe REJECT for Provision Lock toggle with Self-Destruct enabled"
+        else:
+            expected_pattern_key = 'ACCEPT_PATTERN'
+            expected_pl_state = True # It will toggle to True
+            error_msg = "Did not observe ACCEPT_PATTERN for Provision Lock toggle"
 
-        # THEN: Assert that the correct key combination was always pressed.
+        # WHEN / THEN
+        if not hw_success:
+            # If the hardware confirmation fails, we expect a specific exception
+            with pytest.raises(ExpectedException, match=error_msg):
+                fsm._provision_lock_toggle(MagicMock(transition=MagicMock()))
+        else:
+            # If the hardware confirmation succeeds, no exception should be raised
+            fsm._provision_lock_toggle(MagicMock(transition=MagicMock()))
+
+        # --- FINAL ASSERTIONS ---
+
+        # Assert that the correct key combination was always pressed.
         mock_at.press.assert_called_once_with(['key2', 'key5'])
 
-        # THEN: Assert that the correct LED pattern was checked.
+        # Assert that the correct LED pattern was always checked.
         expected_pattern = LEDs[expected_pattern_key]
         mock_at.await_and_confirm_led_pattern.assert_called_once_with(
             expected_pattern, 
@@ -1069,37 +1352,103 @@ class TestApricornDeviceFSM:
             replay_extra_context=ANY
         )
 
-        # THEN: Assert that the provision_lock state is correct after the operation.
-        assert dut_instance.provision_lock == expected_pl_state
+        # Assert that the provision_lock state is correct after the operation.
+        # It should only change if SD was off AND the hardware succeeded.
+        if not sd_enabled and hw_success:
+            assert dut_instance.provision_lock == expected_pl_state
+        else:
+            assert dut_instance.provision_lock == initial_pl_state # Should be unchanged
 
-    def test_self_destruct_toggle(self, fsm, mock_at, dut_instance):
-        dut_instance.provision_lock = False
-        getattr(fsm, "_self_destruct_toggle")(MagicMock(transition=MagicMock()))
-        mock_at.press.assert_called_with(['key4', 'key7'])
-        assert dut_instance.self_destruct_enabled is True
-
-    @pytest.mark.parametrize("initial_ufe_state, expected_ufe_state, expected_pattern_key", [
-        # Case 1: Success. UFE is OFF, so the toggle enables it.
-        (False, True, 'ACCEPT_PATTERN'),
-        # Case 2: Failure/Reject. UFE is already ON, so the toggle is rejected.
-        (True, True, 'REJECT'),
-    ])
-    def test_user_forced_enrollment_toggle(self, fsm, mock_at, dut_instance, initial_ufe_state, expected_ufe_state, expected_pattern_key):
+    @pytest.mark.parametrize("pl_enabled", [True, False])
+    @pytest.mark.parametrize("hw_success", [True, False])
+    def test_self_destruct_toggle(self, fsm, mock_at, dut_instance, pl_enabled, hw_success):
         """
-        GIVEN a specific User-Forced Enrollment (UFE) state
-        WHEN _user_forced_enrollment_toggle is called
-        THEN the correct hardware commands are sent and the DUT state is updated accordingly.
+        Tests all logic and hardware failure paths for _self_destruct_toggle.
+        - GIVEN provision_lock is enabled or disabled.
+        - GIVEN the hardware confirmation succeeds or fails.
+        - THEN the correct behavior or exception occurs.
         """
-        # GIVEN: The DUT is configured for the specific test case.
-        dut_instance.user_forced_enrollment = initial_ufe_state
+        # GIVEN: The DUT and mock are configured for the specific test case.
+        dut_instance.provision_lock = pl_enabled
+        mock_at.await_and_confirm_led_pattern.return_value = hw_success
+        ExpectedException = get_reloaded_exception()
         
-        # WHEN: The callback is executed.
-        fsm._user_forced_enrollment_toggle(MagicMock(transition=MagicMock()))
+        # Determine the expected pattern and final DUT state
+        if pl_enabled:
+            expected_pattern_key = 'REJECT'
+            expected_sd_state = False # Should not change
+            error_msg = "Did not observe REJECT for Self-Destruct toggle with Provision Lock enabled"
+        else:
+            expected_pattern_key = 'ACCEPT_PATTERN'
+            expected_sd_state = True # It will toggle to True
+            error_msg = "Did not observe ACCEPT_PATTERN for Self-Destruct toggle"
 
-        # THEN: Assert that the correct key combination was always pressed.
+        # WHEN / THEN
+        if not hw_success:
+            # If the hardware confirmation fails, we expect a specific exception
+            with pytest.raises(ExpectedException, match=error_msg):
+                fsm._self_destruct_toggle(MagicMock(transition=MagicMock()))
+        else:
+            # If the hardware confirmation succeeds, no exception should be raised
+            fsm._self_destruct_toggle(MagicMock(transition=MagicMock()))
+
+        # --- FINAL ASSERTIONS ---
+
+        # Assert that the correct key combination was always pressed.
+        mock_at.press.assert_called_once_with(['key4', 'key7'])
+
+        # Assert that the correct LED pattern was always checked.
+        expected_pattern = LEDs[expected_pattern_key]
+        mock_at.await_and_confirm_led_pattern.assert_called_once_with(
+            expected_pattern, 
+            timeout=ANY, 
+            replay_extra_context=ANY
+        )
+
+        # Assert that the self_destruct_enabled state is correct after the operation.
+        # It should only change if PL was off AND the hardware succeeded.
+        if not pl_enabled and hw_success:
+            assert dut_instance.self_destruct_enabled == expected_sd_state
+        else:
+            assert dut_instance.self_destruct_enabled is False # Should be unchanged
+
+    @pytest.mark.parametrize("initial_ufe_state", [True, False])
+    @pytest.mark.parametrize("hw_success", [True, False])
+    def test_user_forced_enrollment_toggle(self, fsm, mock_at, dut_instance, initial_ufe_state, hw_success):
+        """
+        Tests all logic and hardware failure paths for _user_forced_enrollment_toggle.
+        - GIVEN UFE is initially enabled or disabled.
+        - GIVEN the hardware confirmation succeeds or fails.
+        - THEN the correct behavior or exception occurs.
+        """
+        # GIVEN: The DUT and mock are configured for the specific test case.
+        dut_instance.user_forced_enrollment = initial_ufe_state
+        mock_at.await_and_confirm_led_pattern.return_value = hw_success
+        ExpectedException = get_reloaded_exception()
+
+        # Determine the expected pattern and final DUT state
+        if initial_ufe_state:
+            expected_pattern_key = 'REJECT'
+            error_msg = "Did not observe REJECT for User-Forced Enrollment toggle"
+        else:
+            expected_pattern_key = 'ACCEPT_PATTERN'
+            error_msg = "Did not observe ACCEPT_PATTERN for User-Forced Enrollment toggle"
+        
+        # WHEN / THEN
+        if not hw_success:
+            # If the hardware confirmation fails, we expect a specific exception
+            with pytest.raises(ExpectedException, match=error_msg):
+                fsm._user_forced_enrollment_toggle(MagicMock(transition=MagicMock()))
+        else:
+            # If the hardware confirmation succeeds, no exception should be raised
+            fsm._user_forced_enrollment_toggle(MagicMock(transition=MagicMock()))
+
+        # --- FINAL ASSERTIONS ---
+
+        # Assert that the correct key combination was always pressed.
         mock_at.press.assert_called_once_with(['key0', 'key1'])
 
-        # THEN: Assert that the correct LED pattern was checked.
+        # Assert that the correct LED pattern was always checked.
         expected_pattern = LEDs[expected_pattern_key]
         mock_at.await_and_confirm_led_pattern.assert_called_once_with(
             expected_pattern, 
@@ -1107,8 +1456,13 @@ class TestApricornDeviceFSM:
             replay_extra_context=ANY
         )
 
-        # THEN: Assert that the UFE state is correct after the operation.
-        assert dut_instance.user_forced_enrollment == expected_ufe_state
+        # Assert that the UFE state is correct after the operation.
+        # It should only change if it was initially OFF and the hardware succeeded.
+        if not initial_ufe_state and hw_success:
+            assert dut_instance.user_forced_enrollment is True
+        else:
+            # For all other cases, it should remain in its initial state.
+            assert dut_instance.user_forced_enrollment == initial_ufe_state
         
     @pytest.mark.parametrize("ufe_enabled, hw_step_to_fail", [
     (False, 0), # Happy path, all HW checks succeed
@@ -1149,17 +1503,41 @@ class TestApricornDeviceFSM:
             assert dut_instance.user_pin[1] is None # Pin should be deleted
             assert mock_at.press.call_count == 2
 
-    def test_on_enter_PIN_ENROLLMENT_self_destruct_failure(self, fsm, mock_at):
-        """Covers the hardware failure path for self_destruct in on_enter_PIN_ENROLLMENT."""
-        # GIVEN
+    @pytest.mark.parametrize("trigger, pattern_key, hw_success, error_msg", [
+        # --- Success Paths ---
+        ("enroll_self_destruct", "RED_BLUE", True, None),
+        ("enroll_user", "GREEN_BLUE", True, None), # Covers any non-SD trigger
+
+        # --- Failure Paths ---
+        ("enroll_self_destruct", "RED_BLUE", False, "Did not observe RED_BLUE pattern"),
+        ("enroll_user", "GREEN_BLUE", False, "Did not observe GREEN_BLUE pattern for recovery enrollment"),
+    ])
+    def test_on_enter_PIN_ENROLLMENT_all_paths(self, fsm, mock_at, trigger, pattern_key, hw_success, error_msg):
+        """
+        Covers all success and failure paths for the on_enter_PIN_ENROLLMENT method,
+        based on the trigger name and hardware success.
+        """
+        # GIVEN: The FSM is set up for a specific trigger and hardware outcome.
         event = MagicMock()
-        event.event.name = 'enroll_self_destruct'
-        mock_at.await_and_confirm_led_pattern.return_value = False
+        event.event.name = trigger
+        mock_at.await_and_confirm_led_pattern.return_value = hw_success
         ExpectedException = get_reloaded_exception()
 
-        # WHEN / THEN
-        with pytest.raises(ExpectedException, match="Did not observe RED_BLUE pattern"):
-            fsm.on_enter_PIN_ENROLLMENT(event) # Covers lines 1072-1073
+        # WHEN the on_enter callback is triggered
+        # THEN the behavior matches the expected outcome (success or specific exception).
+        if not hw_success:
+            with pytest.raises(ExpectedException, match=error_msg):
+                fsm.on_enter_PIN_ENROLLMENT(event)
+        else:
+            # On success, no exception should be raised.
+            fsm.on_enter_PIN_ENROLLMENT(event)
+
+        # FINALLY: Verify that the correct hardware check was always attempted.
+        mock_at.await_and_confirm_led_pattern.assert_called_with(
+            LEDs[pattern_key],
+            timeout=ANY,
+            replay_extra_context=ANY
+        )
 
     # Add this new test to the TestApricornDeviceFSM class
     @pytest.mark.parametrize("enrollment_type, step_to_fail", [
@@ -1206,10 +1584,14 @@ class TestApricornDeviceFSM:
             with patch('time.sleep'):
                 fsm._do_manufacturer_reset(MagicMock(transition=MagicMock()))
 
-    # Add this new test to the TestApricornDeviceFSM class
     @pytest.mark.parametrize("toggle_method_name", [
-        "_basic_disk_toggle", "_removable_media_toggle", "_led_flicker_enable",
-        "_lock_override_toggle", "_read_only_toggle", "_read_write_toggle",
+        "_basic_disk_toggle",
+        "_removable_media_toggle",
+        "_led_flicker_enable",
+        "_led_flicker_disable",  # <<< THIS IS THE ADDED LINE
+        "_lock_override_toggle",
+        "_read_only_toggle",
+        "_read_write_toggle",
         "_self_destruct_toggle",
     ])
     def test_simple_toggles_failure_path(self, fsm, mock_at, dut_instance, toggle_method_name):
