@@ -35,7 +35,8 @@ global_at_logger = logging.getLogger("GlobalATController")
 # --- IMPORT CONTROLLERS AND FSM ---
 try:
     from controllers.unified_controller import UnifiedController
-    from controllers.flight_control_fsm import DeviceUnderTest, ApricornDeviceFSM
+    from controllers.flight_control_fsm import DeviceUnderTest, ApricornDeviceFSM, TestSession
+    from utils.pin_generator import PINGenerator
 except ImportError as e_uc_import:
     global_at_logger.critical(f"Import Error for UnifiedController or FSM: {e_uc_import}. Ensure paths are correct.", exc_info=True)
     raise
@@ -64,11 +65,12 @@ def get_at_controller():
 
 # --- Instantiate the Global DUT ---
 dut = None
-try:
-    dut = DeviceUnderTest()
-    global_at_logger.info(f"Global DUT initialized.")
-except Exception as e_dut_create:
-    global_at_logger.critical(f"Failed to create global 'dut' instance: {e_dut_create}", exc_info=True)
+if at: # Only initialize DUT if 'at' was successful
+    try:
+        dut = DeviceUnderTest(at_controller=at)
+        global_at_logger.info(f"Global DUT initialized.")
+    except Exception as e_dut_create:
+        global_at_logger.critical(f"Failed to create global 'dut' instance: {e_dut_create}", exc_info=True)
 
 
 def get_dut():
@@ -76,13 +78,28 @@ def get_dut():
         raise RuntimeError("Global 'dut' was not successfully initialized.")
     return dut
 
+# --- Instantiate the Test Session ---
+session = None
+if at:
+    try:
+        session = TestSession(at_controller=at)
+        global_at_logger.info(f"Test Session initialized.")
+    except Exception as e_session_create:
+        global_at_logger.critical(f"Failed to create 'session' instance: {e_session_create}", exc_info=True)
+        # session remains None
+
+    def get_session():
+        if session is None:
+            raise RuntimeError("Global 'session' was not successfully initialized.")
+        return session
+
 # --- Instantiate the Global FSM ---
 # The FSM needs the 'at' controller.
 # It's crucial 'at' is initialized before the FSM if the FSM's __init__ uses 'at'.
 fsm = None
-if at: # Only initialize FSM if 'at' was successful
+if at and session: # Only initialize FSM if 'at' was successful
     try:
-        fsm = ApricornDeviceFSM(at_controller=at)
+        fsm = ApricornDeviceFSM(at_controller=at, session_instance=session) # <<< MODIFY T)
         global_at_logger.info(f"Global FSM initialized. Initial state: {fsm.state}")
     except Exception as e_fsm_create:
         global_at_logger.critical(f"Failed to create global 'fsm' instance: {e_fsm_create}", exc_info=True)
@@ -96,6 +113,22 @@ def get_fsm():
         raise RuntimeError("Global 'fsm' was not successfully initialized or 'at' controller failed.")
     return fsm
 
+# --- Instantiate the Global PIN Generator ---
+pin_gen = None
+if dut: # Only create it if the DUT was successful
+    try:
+        pin_gen = PINGenerator(dut_model=dut)
+        global_at_logger.info(f"Global PIN Generator initialized.")
+    except Exception as e_pin_gen_create:
+        global_at_logger.critical(f"Failed to create global 'pin_gen' instance: {e_pin_gen_create}", exc_info=True)
+else:
+    global_at_logger.error("'dut' model is None. Cannot initialize global PIN Generator.")
+
+def get_pin_generator():
+    """Returns the singleton instance of the PIN Generator."""
+    if pin_gen is None:
+        raise RuntimeError("Global 'pin_gen' was not successfully initialized.")
+    return pin_gen
 
 # --- Optional: Resource cleanup ---
 def _cleanup_global_at():

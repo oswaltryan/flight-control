@@ -251,20 +251,6 @@ LEDs = {
         {'red':1, 'green':0, 'blue':0, 'duration': (2.00, 30.0)},
         {'red':0, 'green':0, 'blue':0, 'duration': (0.05, 30.0)}],
 
-    ## pattern match:  11 seconds
-    'STARTUP':  [
-        # {'red':0, 'green':0, 'blue':0, 'duration': (0.00,  4.0)},
-        {'red':1, 'green':0, 'blue':0, 'duration': (0.50,  5.0)},
-        {'red':0, 'green':1, 'blue':0, 'duration': (0.50,  3.0)},
-        {'red':0, 'green':0, 'blue':1, 'duration': (0.50,  4.0)},
-        {'red':0, 'green':0, 'blue':0, 'duration': (0.10,  5.0)},
-        {'red':0, 'green':1, 'blue':0, 'duration': (0.10,  1.5)},
-        {'red':0, 'green':0, 'blue':0, 'duration': (0.10,  1.5)},
-        {'red':0, 'green':1, 'blue':0, 'duration': (0.10,  1.5)},
-        {'red':0, 'green':0, 'blue':0, 'duration': (0.10,  1.5)},
-        {'red':0, 'green':1, 'blue':0, 'duration': (0.10,  1.5)},
-        {'red':0, 'green':0, 'blue':0, 'duration': (0.10,  1.5)}],
-
     ## pattern match:  05 seconds
     ## This pattern is used for enrollmentSelfDestruct, enrollmentUnattendedAutoLock, and userResetWarning
     'USER_RESET_KEY':  [

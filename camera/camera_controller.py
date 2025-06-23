@@ -60,15 +60,15 @@ PRIMARY_LED_CONFIGURATIONS = {
         "roi": (302, 165, 40, 40),
         "hsv_lower": (40, 10, 100),
         "hsv_upper": (85, 255, 255),
-        "min_match_percentage": 0.15,
+        "min_match_percentage": 0.25,
         "display_color_bgr": (0,255,0)
     },
     "blue":  {
         "name": "Blue LED",
         "roi": (417, 165, 40, 40),
-        "hsv_lower": (75,    0, 100),
+        "hsv_lower": (0,    0, 100),
         "hsv_upper": (130, 255, 255),
-        "min_match_percentage": 0.15,
+        "min_match_percentage": 0.75,
         "display_color_bgr": (255,0,0)
     }
 }
