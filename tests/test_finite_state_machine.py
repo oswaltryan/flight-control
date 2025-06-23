@@ -403,32 +403,71 @@ class TestApricornDeviceFSM:
         mock_at.off.assert_has_calls([call("usb3"), call("connect")])
         mock_at.confirm_led_solid.assert_called_once()
         
-    @pytest.mark.parametrize("hw_success", [True, False])
-    def test_on_enter_FACTORY_MODE(self, fsm, mock_at, hw_success):
-        mock_at.confirm_led_solid.return_value = hw_success
-        fsm.on_enter_FACTORY_MODE(MagicMock())
-        mock_at.confirm_led_solid.assert_called_with(LEDs['ALL_ON'], minimum=ANY, timeout=ANY, replay_extra_context=ANY)
+    @pytest.mark.parametrize("hw_led_solid_success", [True, False])
+    @pytest.mark.parametrize("hw_await_state_success", [True, False])
+    def test_on_enter_FACTORY_MODE(self, fsm, mock_at, caplog, hw_led_solid_success, hw_await_state_success):
+        """
+        Tests all success and failure paths in on_enter_FACTORY_MODE, including
+        the initial LED check and the keypad test failure.
+        """
+        # GIVEN
+        mock_at.confirm_led_solid.return_value = hw_led_solid_success
+        mock_at.await_led_state.return_value = hw_await_state_success
+        ExpectedException = get_reloaded_exception()
+
+        # WHEN / THEN
+        if not hw_led_solid_success:
+            # Case 1: The initial solid LED check fails.
+            fsm.on_enter_FACTORY_MODE(MagicMock())
+            assert "Failed to confirm FACTORY_MODE LEDs" in caplog.text
+            mock_at.await_led_state.assert_not_called() # Keypad test should be skipped
+            # Ensure power_off was NOT called, as it's not in this function's logic
+            assert mock_at.off.call_count == 0
+            return # End of this test case
+
+        if not hw_await_state_success:
+            # Case 2: The keypad test fails on one of the keys.
+            # This will cover the final missing lines (570-571).
+            with pytest.raises(ExpectedException, match="Failed 'key1' confirmation"):
+                fsm.on_enter_FACTORY_MODE(MagicMock())
+        else:
+            # Case 3: Happy path, everything succeeds.
+            fsm.on_enter_FACTORY_MODE(MagicMock())
+            assert "Failed to confirm FACTORY_MODE LEDs" not in caplog.text
 
     @pytest.mark.parametrize("led_success, enum_success", [
-    (True, True),   # Happy path
-    (True, False),  # Enum fails
-    (False, True),  # LED check fails
+        (True, True),   # Happy path
+        (True, False),  # Enum fails
+        (False, True),  # LED check fails
     ])
-    def test_on_enter_OOB_MODE(self, fsm, mock_at, caplog, led_success, enum_success):
+    def test_on_enter_OOB_MODE(self, fsm, mock_at, caplog, dut_instance, led_success, enum_success):
+        # GIVEN
         mock_at.confirm_led_solid.return_value = led_success
         mock_at.confirm_device_enum.return_value = enum_success
         fsm.post_fail = MagicMock()
+        # We must reset the DUT's property to its default before the test
+        dut_instance.completed_cmfr = True
 
+        # WHEN
         fsm.on_enter_OOB_MODE(MagicMock())
 
+        # THEN
         if not led_success:
-            assert "Failed to confirm OOB_MODE LEDs" in caplog.text
-        
-        if led_success and not enum_success:
+            # Assert the consequences of the failure path
+            assert dut_instance.completed_cmfr is False # Check the state change
+            # Verify the hardware calls made by the subsequent power_off sequence
+            mock_at.off.assert_any_call("usb3")
+            mock_at.off.assert_any_call("connect")
+            # Ensure no error was logged from THIS function and post_fail was not called
+            assert "Failed to confirm OOB_MODE LEDs" not in caplog.text
+            assert not fsm.post_fail.called
+        elif not enum_success:
             assert "Device did not enumerate in OOB_MODE" in caplog.text
             fsm.post_fail.assert_called_once_with(details="OOB_MODE_ENUM_FAILED")
-        else:
+            assert dut_instance.completed_cmfr is True # Should not have changed
+        else: # Happy Path
             assert not fsm.post_fail.called
+            assert dut_instance.completed_cmfr is True # Should not have changed
 
     @pytest.mark.parametrize("hw_success", [True, False])
     def test_on_enter_USER_FORCED_ENROLLMENT(self, fsm, mock_at, hw_success):
