@@ -112,6 +112,7 @@ class DeviceUnderTest:
         self.hardware_id_2: int = DEVICE_PROPERTIES[self.device_name]['hardware_minor']
         self.scb_part_number: str = DEVICE_PROPERTIES[self.device_name]['scb_part_number']
         self.single_code_base: bool = self.scb_part_number is None
+        self.completed_cmfr: bool = True
 
         self.basic_disk: bool = True
         self.removable_media: bool = False
@@ -282,7 +283,7 @@ class ApricornDeviceFSM:
     STATES: List[str] = ['OFF', 'POWER_ON_SELF_TEST', 'ERROR_MODE', 'BRUTE_FORCE', 'BRICKED', 'OOB_MODE', 'STANDBY_MODE', 'USER_FORCED_ENROLLMENT', 'FACTORY_MODE',
                          'UNLOCKED_ADMIN', 'UNLOCKED_USER', 'RESET_UNLOCK',
                          'ADMIN_MODE', 'PIN_ENROLLMENT', 'COUNTER_ENROLLMENT',
-                         'DIAGNOSTIC_MODE'
+                         'DIAGNOSTIC_MODE',
     ]
 
     logger: logging.Logger
@@ -305,11 +306,11 @@ class ApricornDeviceFSM:
         transitions = [
             # --- Power On/Off Transitions ---
             {'trigger': 'power_on', 'source': 'OFF', 'dest': 'POWER_ON_SELF_TEST', 'before': '_do_power_on'},
-            {'trigger': 'post_fail', 'source': 'POWER_ON_SELF_TEST', 'dest': 'ERROR_MODE'},
             {'trigger': 'power_off', 'source': '*', 'dest': 'OFF', 'before': '_do_power_off'},
+            # {'trigger': 'collect_error_number', 'source': '*', 'dest': 'ERROR_MODE'},
 
             # --- 'Idle' Mode Transitions (from POST) ---
-            # {'trigger': 'post_pass', 'source': 'POWER_ON_SELF_TEST', 'dest': 'FACTORY_MODE', 'conditions': [CallableCondition(lambda _: not self.dut.admin_pin, "Not sure how to handle this yet...")]},
+            {'trigger': 'post_pass', 'source': 'POWER_ON_SELF_TEST', 'dest': 'FACTORY_MODE', 'conditions': [CallableCondition(lambda _: not self.dut.completed_cmfr, "dut.completed_cmfr == False")]},
             {'trigger': 'post_pass', 'source': 'POWER_ON_SELF_TEST', 'dest': 'BRUTE_FORCE', 'conditions': [CallableCondition(lambda _: self.dut.brute_force_counter_current == 0, "dut.brute_force_counter_current == 0")]},
             {'trigger': 'post_pass', 'source': 'POWER_ON_SELF_TEST', 'dest': 'USER_FORCED_ENROLLMENT', 'conditions': [CallableCondition(lambda _: bool(self.dut.user_forced_enrollment), "dut.user_forced_enrollment == True")]},
             {'trigger': 'post_pass', 'source': 'POWER_ON_SELF_TEST', 'dest': 'OOB_MODE', 'conditions': [CallableCondition(lambda _: not self.dut.admin_pin, "dut.admiPIN not enrolled")]},
@@ -559,10 +560,15 @@ class ApricornDeviceFSM:
             'fsm_current_state': self.source_state,
             'fsm_destination_state': self.state
         }
-        if self.at.confirm_led_solid(LEDs['ALL_ON'], minimum=3.0, timeout=10.0, replay_extra_context=context):
-            self.logger.info("Stable FACTORY_MODE confirmed.")
-        else:
+        if not self.at.confirm_led_solid(LEDs['ALL_ON'], minimum=3.0, timeout=10.0, replay_extra_context=context):
             self.logger.error("Failed to confirm FACTORY_MODE LEDs.")
+        else:
+            keypad_test = ["key1", "key2", "key3", "key4", "key5", "key6", "key7", "key8", "key9", "lock", "key0", "unlock"]
+            for key in keypad_test:
+                self.at.on(key)
+                if not self.at.await_led_state(LEDs['ACCEPT_STATE'], timeout=1, clear_buffer=False, replay_extra_context=context):
+                    self.at.off(key)
+                    raise TransitionCallbackError(f"Failed '{key}' confirmation")
 
     def on_enter_OOB_MODE(self, event_data: EventData) -> None:
         """
@@ -584,7 +590,8 @@ class ApricornDeviceFSM:
         if self.at.confirm_led_solid(LEDs['GREEN_BLUE_STATE'], minimum=3.0, timeout=10.0, replay_extra_context=context):
             self.logger.info("Stable OOB_MODE confirmed.")
         else:
-            self.logger.error("Failed to confirm OOB_MODE LEDs.")
+            self.dut.completed_cmfr = False
+            self.power_off()
 
         if not self.at.confirm_device_enum():
             self.logger.error("Device did not enumerate in OOB_MODE.")

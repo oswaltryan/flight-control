@@ -77,8 +77,8 @@ PRIMARY_LED_CONFIGURATIONS = {
 
 # --- FALLBACK LED CONFIGURATIONS (Generic Placeholders) ---
 _FALLBACK_LED_DEFINITIONS = {
-    "fallback_led1": {
-        "name": "Fallback Generic LED 1",
+    "fallback_red": {
+        "name": "Fallback Generic Red LED",
         "roi": (50, 50, 20, 20),
         "hsv_lower": (0, 100, 100), "hsv_upper": (10, 255, 255),
         "min_match_percentage": 0.1,
