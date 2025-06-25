@@ -230,7 +230,7 @@ LEDs = {
 #       {'red':0, 'green':0, 'blue':1, 'duration': (0.00,  2.0)},
         {'red':1, 'green':0, 'blue':0, 'duration': (0.00,  4.0)},
         {'red':0, 'green':1, 'blue':0, 'duration': (0.50,  2.3)},
-        {'red':0, 'green':0, 'blue':1, 'duration': (0.01,  2.3)}],
+        {'red':0, 'green':0, 'blue':1, 'duration': (0.50,  2.3)}],
 #       {'red':1, 'green':0, 'blue':0, 'duration': (0.05,  2.0)},
 #       {'red':0, 'green':1, 'blue':0, 'duration': (1.00,  2.0)}],
 

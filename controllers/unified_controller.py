@@ -8,7 +8,7 @@ import logging
 import sys
 import os
 import time 
-from typing import Optional, List, Dict, Any, Union
+from typing import Optional, List, Dict, Any, Union, Tuple
 import threading
 from pprint import pprint
 import subprocess
@@ -45,6 +45,7 @@ class UnifiedController:
     logger: logging.Logger
     phidget_config_to_use: Dict[str, Any]
     effective_led_duration_tolerance: float
+    scanned_serial_number: Optional[str]
 
     def __init__(self,
                  script_map_config: Optional[Dict[str, Any]] = None,
@@ -61,7 +62,6 @@ class UnifiedController:
         self.phidget_config_to_use = script_map_config if script_map_config is not None else DEFAULT_SCRIPT_CHANNEL_MAP_CONFIG
         phidget_ctrl_logger = self.logger.getChild("Phidget")
         camera_ctrl_logger = self.logger.getChild("Camera")
-        self.scanned_serial_number: str|None
 
         # --- Initialize Phidget --- #
         self._phidget_controller = None
@@ -181,17 +181,37 @@ class UnifiedController:
     def __enter__(self): return self
     def __exit__(self, exc_type, exc_val, exc_tb): self.close()
 
-    def confirm_device_enum(self, stable_min: float = 5, timeout: float = 15) -> bool:
-        self.logger.info(f"Confirming Drive enumeration (stable: {stable_min}s, overall_timeout: {timeout}s)...")
-        overall_start_time = time.time()
-        DUT_ping_1 = find_apricorn_device()[0]
-        if not DUT_ping_1: self.logger.warning("No device found on initial enum check."); return False
+    def confirm_device_enum(self, serial_number: str, stable_min: float = 5, timeout: float = 15) -> Tuple[bool, Optional[Any]]:
+        """
+        Confirms a device is enumerated and stable in OOB/Standby mode (no data partition).
         
-        # Assuming one device or interested in the first one. This might need adjustment for multi-device scenarios.
+        Returns:
+            A tuple containing:
+            - bool: True if the device was found and stable, False otherwise.
+            - Optional[ApricornDevice]: The device object if successful, else None.
+        """
+        self.logger.info(f"Confirming Device enumeration (stable: {stable_min}s, overall_timeout: {timeout}s)...")
+        overall_start_time = time.time()
+        
+        # Use find_apricorn_device and handle the case where it returns an empty list
+        devices = find_apricorn_device()
+        if not devices:
+            self.logger.warning("No device found on initial enum check.")
+            return False, None
+        
+        DUT_ping_1 = None
+        for device in devices:
+            if device.iSerial == serial_number:
+                DUT_ping_1 = device
+
+        if DUT_ping_1 == None:
+            self.logger.error(f"Could not match devices on bus with Serial Number...")
+            return False, None
+        
         first_device_serial = DUT_ping_1.iSerial
         if DUT_ping_1.driveSizeGB != "N/A (OOB Mode)":
-            self.logger.warning(f"Device volume is exposed!")
-            return False
+            self.logger.warning(f"Device volume is exposed! Expected OOB/Standby mode.")
+            return False, None
         else:
             self.logger.info(f"Initial device found with iSerial: {first_device_serial}. Verifying stability...")
         
@@ -199,37 +219,67 @@ class UnifiedController:
         while time.time() - stability_wait_start < stable_min:
             if time.time() - overall_start_time > timeout:
                 self.logger.warning(f"Overall timeout ({timeout}s) reached while waiting for stability for device {first_device_serial}.")
-                return False
-            time.sleep(0.2) # Poll less aggressively during stability wait
+                return False, None
+            time.sleep(0.2)
 
-        DUT_ping_2 = find_apricorn_device()[0]
-        if not DUT_ping_2:
+        devices_after_wait = find_apricorn_device()
+        if not devices_after_wait:
             self.logger.warning(f"Device with iSerial {first_device_serial} disappeared after {time.time() - stability_wait_start:.2f}s stability wait.")
-            return False
+            return False, None
+        
+        DUT_ping_2 = None
+        for device in devices_after_wait:
+            if device.iSerial == serial_number:
+                DUT_ping_2 = device
+
+        if DUT_ping_2 == None:
+            self.logger.error(f"Device is not stable on the bus...")
+            return False, None
+
         if DUT_ping_2.driveSizeGB != "N/A (OOB Mode)":
-            self.logger.warning(f"Device volume is exposed!")
-            return False
+            self.logger.warning(f"Device volume became exposed during stability wait!")
+            pprint(DUT_ping_2)
+            return False, None
 
         if DUT_ping_2.iSerial == first_device_serial:
-            self.logger.info(f"Drive with iSerial {first_device_serial} confirmed stable for at least {stable_min}s:")
+            self.logger.info(f"Device with iSerial {first_device_serial} confirmed stable for at least {stable_min}s:")
             self.logger.info(f"  VID:PID  [Firm] @USB iSerial      iProduct")
             self.logger.info(f"  {DUT_ping_2.idVendor}:{DUT_ping_2.idProduct} [{DUT_ping_2.bcdDevice}] @{DUT_ping_2.bcdUSB} {DUT_ping_2.iSerial} {DUT_ping_2.iProduct}")
-            return True
+            return True, DUT_ping_2
         
         self.logger.warning(f"Device with iSerial {first_device_serial} did not remain stable or was not found after stability wait.")
-        return False
+        return False, None
     
-    def confirm_drive_enum(self, stable_min: float = 5, timeout: float = 15) -> bool:
+    def confirm_drive_enum(self, serial_number: str, stable_min: float = 5, timeout: float = 15) -> Tuple[bool, Optional[Any]]:
+        """
+        Confirms a device's data partition is enumerated and stable.
+        
+        Returns:
+            A tuple containing:
+            - bool: True if the drive was found and stable, False otherwise.
+            - Optional[ApricornDevice]: The device object if successful, else None.
+        """
         self.logger.info(f"Confirming Drive enumeration (stable: {stable_min}s, overall_timeout: {timeout}s)...")
         overall_start_time = time.time()
-        DUT_ping_1 = find_apricorn_device()[0]
-        if not DUT_ping_1: self.logger.warning("No device found on initial enum check."); return False
         
-        # Assuming one device or interested in the first one. This might need adjustment for multi-device scenarios.
+        devices = find_apricorn_device()
+        if not devices:
+            self.logger.warning("No device found on initial enum check.")
+            return False, None
+        
+        DUT_ping_1 = None
+        for device in devices:
+            if device.iSerial == serial_number:
+                DUT_ping_1 = device
+
+        if DUT_ping_1 == None:
+            self.logger.error(f"Could not match devices on bus with Serial Number...")
+            return False, None
+
         first_device_serial = DUT_ping_1.iSerial
         if DUT_ping_1.driveSizeGB == "N/A (OOB Mode)":
             self.logger.warning(f"Device volume is not exposed!")
-            return False
+            return False, None
         else:
             self.logger.info(f"Initial device found with iSerial: {first_device_serial}. Verifying stability...")
         
@@ -237,25 +287,35 @@ class UnifiedController:
         while time.time() - stability_wait_start < stable_min:
             if time.time() - overall_start_time > timeout:
                 self.logger.warning(f"Overall timeout ({timeout}s) reached while waiting for stability for device {first_device_serial}.")
-                return False
-            time.sleep(0.2) # Poll less aggressively during stability wait
+                return False, None
+            time.sleep(0.2)
 
-        DUT_ping_2 = find_apricorn_device()[0]
-        if not DUT_ping_2:
+        devices_after_wait = find_apricorn_device()
+        if not devices_after_wait:
             self.logger.warning(f"Device with iSerial {first_device_serial} disappeared after {time.time() - stability_wait_start:.2f}s stability wait.")
-            return False
+            return False, None
+        
+        DUT_ping_2 = None
+        for device in devices_after_wait:
+            if device.iSerial == serial_number:
+                DUT_ping_2 = device
+
+        if DUT_ping_2 == None:
+            self.logger.error(f"Device is not stable on the bus...")
+            return False, None
+        
         if DUT_ping_2.driveSizeGB == "N/A (OOB Mode)":
-            self.logger.warning(f"Device volume is not exposed!")
-            return False
+            self.logger.warning(f"Device volume disappeared during stability wait!")
+            return False, None
 
         if DUT_ping_2.iSerial == first_device_serial:
             self.logger.info(f"Drive with iSerial {first_device_serial} confirmed stable for at least {stable_min}s:")
             self.logger.info(f"  VID:PID  [Firm] @USB iSerial      iProduct")
             self.logger.info(f"  {DUT_ping_2.idVendor}:{DUT_ping_2.idProduct} [{DUT_ping_2.bcdDevice}] @{DUT_ping_2.bcdUSB} {DUT_ping_2.iSerial} {DUT_ping_2.iProduct}")
-            return True
+            return True, DUT_ping_2
         
         self.logger.warning(f"Device with iSerial {first_device_serial} did not remain stable or was not found after stability wait.")
-        return False
+        return False, None
     
     def _get_fio_path(self) -> str:
         """
@@ -268,7 +328,8 @@ class UnifiedController:
             FileNotFoundError: If the FIO binary for the current OS is not found.
             NotImplementedError: If the current OS is not supported.
         """
-        binaries_dir = os.path.join(PROJECT_ROOT, 'tools', 'binaries')
+        # Assumes PROJECT_ROOT is defined at the top of the file
+        binaries_dir = os.path.join(PROJECT_ROOT, 'utils', 'fio')
         fio_path = None
 
         if sys.platform == 'darwin':
@@ -276,7 +337,7 @@ class UnifiedController:
         elif sys.platform.startswith('linux'):
             fio_path = os.path.join(binaries_dir, 'fio-linux')
         elif sys.platform == 'win32':
-            fio_path = os.path.join(binaries_dir, 'fio.exe')
+            fio_path = os.path.join(binaries_dir, 'fio-windows.exe')
         else:
             raise NotImplementedError(f"FIO automation is not supported on this OS: {sys.platform}")
 
@@ -288,7 +349,7 @@ class UnifiedController:
             self.logger.warning(f"FIO binary at {fio_path} is not executable. Attempting to run it anyway, but it may fail.")
 
         return fio_path
-    
+
     def run_fio_tests(self, disk_path: str, duration: int = 10, tests_to_run: Optional[List[Dict[str, Any]]] = None) -> bool:
         """
         Runs a series of specified FIO speed tests on the connected device.
@@ -324,17 +385,35 @@ class UnifiedController:
             fio_path = self._get_fio_path()
         except (FileNotFoundError, NotImplementedError) as e:
             self.logger.error(f"Cannot run FIO tests: {e}")
-            raise
+            raise # Re-raise the exception to fail the test clearly
         
             
-        fio_target_file = os.path.join(disk_path, 'fio_speed_test.tmp')
-        self.logger.info(f"Target path for FIO test file: {fio_target_file}")
+        # On Windows, FIO needs the target to be a file on a mounted drive.
+        # On Linux, we can write directly to the block device.
+        if sys.platform == 'win32':
+            # You would need to ensure the drive is mounted and has a letter.
+            # For now, we'll assume the path is like "E:\" and create a temp file.
+            fio_target_file = os.path.join(disk_path, 'fio_speed_test.tmp')
+            self.logger.info(f"Target path for FIO test file: {fio_target_file}")
+        else:
+            fio_target_file = disk_path # e.g., /dev/sdb
 
         for test_params in tests_to_run:
             self.logger.info(f"--- Preparing FIO test: {test_params.get('name', 'Unnamed')} ---")
             
-            base_command = [
-                fio_path,
+            # Start building the command dynamically
+            base_command = [fio_path]
+
+            # Add OS-specific engine parameters
+            if sys.platform.startswith('linux'):
+                base_command.extend(["--ioengine=libaio"])
+            elif sys.platform == 'win32':
+                # For raw disk access on Windows, the engine is 'windowsaio'
+                # and --thread is often needed.
+                base_command.extend(["--ioengine=windowsaio", "--thread"])
+            
+            # Add the rest of the common parameters
+            base_command.extend([
                 "--direct=1",
                 "--output-format=json",
                 "--random_generator=tausworthe64",
@@ -344,18 +423,20 @@ class UnifiedController:
                 f"--rw={test_params.get('rw')}",
                 f"--bs={test_params.get('bs')}",
                 f"--iodepth={test_params.get('iodepth')}",
-                "--group_reporting"
-            ]
+                "--group_reporting" # This combines reports for multi-job files
+            ])
             
             try:
                 self.logger.info(f"Executing command: {' '.join(base_command)}")
                 result = subprocess.run(base_command, check=True, capture_output=True, text=True)
                 
+                # Log the JSON output for debugging
                 self.logger.info(f"--- FIO Test '{test_params.get('name')}' Output ---")
                 try:
                     json_output = json.loads(result.stdout)
                     self.logger.info(json.dumps(json_output, indent=2))
                 except json.JSONDecodeError:
+                    # If output isn't JSON, just print it raw
                     for line in result.stdout.splitlines():
                         self.logger.info(f"  {line}")
 
@@ -369,17 +450,19 @@ class UnifiedController:
                 self.logger.error(f"FIO test '{test_params.get('name')}' failed with exit code {e.returncode}.")
                 self.logger.error(f"  Stdout: {e.stdout}")
                 self.logger.error(f"  Stderr: {e.stderr}")
-                return False
+                return False # One failed test fails the whole sequence
             except Exception as e:
                 self.logger.error(f"An unexpected error occurred during FIO test: {e}", exc_info=True)
                 return False
 
-        try:
-            self.logger.info(f"All tests passed. Cleaning up test file: {fio_target_file}")
-            if os.path.exists(fio_target_file):
-                os.remove(fio_target_file)
-        except Exception as e:
-            self.logger.warning(f"Could not clean up test file {fio_target_file}: {e}")
+        # Clean up the test file on Windows
+        if sys.platform == 'win32':
+            try:
+                self.logger.info(f"All tests passed. Cleaning up test file: {fio_target_file}")
+                if os.path.exists(fio_target_file):
+                    os.remove(fio_target_file)
+            except Exception as e:
+                self.logger.warning(f"Could not clean up test file {fio_target_file}: {e}")
 
         self.logger.info("FIO test sequence completed successfully.")
         return True

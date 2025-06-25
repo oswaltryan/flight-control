@@ -105,7 +105,7 @@ class DeviceUnderTest:
         self.mounted: bool = False
         self.serial_number: str = ""
         self.dev_keypad_serial_number: str = ""
-        self.scanned_serial_number: str|None = self.at.scanned_serial_number
+        self.scanned_serial_number: Optional[str] = self.at.scanned_serial_number
 
         self.model_id_1: int = DEVICE_PROPERTIES[self.device_name]['model_id_digit_1']
         self.model_id_2: int = DEVICE_PROPERTIES[self.device_name]['model_id_digit_2']
@@ -252,7 +252,7 @@ class TestSession:
         self.script_title: str = "N/A"
 
         # Test Block Management
-        self.current_test_block: int = 0
+        self.current_test_block: int = -1
         self.test_blocks: list = []
         self.block_failure_count: dict = {}
         self.block_warning_count: dict = {}
@@ -282,9 +282,9 @@ class TestSession:
         self.speed_test_results: list = []
         self.usb3_fail_count: int = 0
 
-    def start_new_block(self, block_name: str):
+    def start_new_block(self, block_name: str, current_test_block: int):
         """Resets counters and timers for the start of a new test block."""
-        self.current_test_block += 1
+        self.current_test_block = current_test_block
         self.test_blocks.append(block_name)
         self.block_start_time = time.time()
         
@@ -326,14 +326,14 @@ class TestSession:
 
     def log_failure(self, block_name: str, failure_summary: str, failure_details: str = ""):
         """Logs a failure for a specific test block."""
-        if block_name not in self.block_failure_count: self.start_new_block(block_name)
+        # if block_name not in self.block_failure_count: self.start_new_block(block_name)
         self.block_failure_count[block_name] += 1
         self.failure_block[block_name].append(failure_summary)
         self.failure_description_block[block_name].append(failure_details)
         
     def log_warning(self, block_name: str, warning_summary: str, warning_details: str = ""):
         """Logs a warning for a specific test block."""
-        if block_name not in self.block_warning_count: self.start_new_block(block_name)
+        # if block_name not in self.block_warning_count: self.start_new_block(block_name)
         self.block_warning_count[block_name] += 1
         self.warning_block[block_name].append(warning_summary)
         self.warning_description_block[block_name].append(warning_details)
@@ -740,7 +740,9 @@ class ApricornDeviceFSM:
         self.fail_unlock: Callable
         self.last_try_login: Callable
         self.lock_admin: Callable
+        self.lock_reset: Callable
         self.lock_user: Callable
+        self.manufacturer_reset: Callable
         self.post_fail: Callable
         self.post_pass: Callable
         self.power_off: Callable
@@ -915,7 +917,6 @@ class ApricornDeviceFSM:
             event_data: The event data provided by the FSM.
         """
         self.logger.info(f"Confirming OOB Mode (solid Green/Blue)...")
-        # This callback uses the safe `on_enter` pattern, no change needed.
         context = {
             'fsm_current_state': self.source_state,
             'fsm_destination_state': self.state
@@ -926,10 +927,26 @@ class ApricornDeviceFSM:
         else:
             self.dut.completed_cmfr = False
             self.power_off()
+            return # Exit early if the LED check fails
 
-        if not self.at.confirm_device_enum():
-            self.logger.error("Device did not enumerate in OOB_MODE.")
+        serial_to_check = self.dut.scanned_serial_number
+        if serial_to_check is None:
+            self.logger.error("Cannot confirm device enumeration: No serial number was scanned at startup.")
+            self.post_fail(details="OOB_ENUM_FAILED_NO_SERIAL")
+            return
+        
+        is_stable, device_info = self.at.confirm_device_enum(serial_number=serial_to_check)
+        if not is_stable:
+            self.logger.error(f"Device with serial {serial_to_check} did not enumerate correctly in OOB_MODE.")
             self.post_fail(details="OOB_MODE_ENUM_FAILED")
+        else:
+            # Optional: You can now use the returned device_info object if needed.
+            # For example, to update the DUT model with the most current info.
+            if device_info:
+                self._increment_enumeration_count('oob')
+                self.dut.serial_number = device_info.iSerial
+                # You could update other properties here as well if they can change
+                self.logger.info(f"Successfully confirmed enumeration for S/N: {self.dut.serial_number}")
 
     def on_enter_USER_FORCED_ENROLLMENT(self,event_data: EventData) -> None:
         """
@@ -984,13 +1001,24 @@ class ApricornDeviceFSM:
         Args:
             event_data: The event data provided by the FSM.
         """
-        self.logger.info("Confirming device enumeration post-unlock...")
-        if not self.at.confirm_drive_enum():
-             self.logger.error("Device did not enumerate after admin unlock.")
-             self.post_fail(details="ADMIN_UNLOCK_ENUM_FAILED")
+        serial_to_check = self.dut.scanned_serial_number
+        if serial_to_check is None:
+            self.logger.error("Cannot confirm device enumeration: No serial number was scanned at startup.")
+            self.post_fail(details="ADMIN_ENUM_FAILED_NO_SERIAL")
+            return
+        
+        is_stable, device_info = self.at.confirm_drive_enum(serial_number=serial_to_check)
+        if not is_stable:
+            self.logger.error(f"Device with serial {serial_to_check} did not enumerate correctly in UNLOCKED_ADMIN.")
+            self.post_fail(details="UNLOCKED_ADMIN_ENUM_FAILED")
         else:
-             self.logger.info("Admin unlock successful, device enumerated.")
-             self._increment_enumeration_count('pin')
+            # Optional: You can now use the returned device_info object if needed.
+            # For example, to update the DUT model with the most current info.
+            if device_info:
+                self._increment_enumeration_count('pin')
+                self.dut.serial_number = device_info.iSerial
+                # You could update other properties here as well if they can change
+                self.logger.info(f"Successfully confirmed enumeration for S/N: {self.dut.serial_number}")
 
     def on_enter_UNLOCKED_USER(self, event_data: EventData) -> None:
         """
@@ -1003,13 +1031,24 @@ class ApricornDeviceFSM:
         Args:
             event_data: The event data provided by the FSM.
         """
-        self.logger.info("Confirming device enumeration post-user-unlock...")
-        if not self.at.confirm_drive_enum():
-             self.logger.error("Device did not enumerate after user unlock.")
-             self.post_fail(details="USER_UNLOCK_ENUM_FAILED")
+        serial_to_check = self.dut.scanned_serial_number
+        if serial_to_check is None:
+            self.logger.error("Cannot confirm device enumeration: No serial number was scanned at startup.")
+            self.post_fail(details="USER_ENUM_FAILED_NO_SERIAL")
+            return
+        
+        is_stable, device_info = self.at.confirm_drive_enum(serial_number=serial_to_check)
+        if not is_stable:
+            self.logger.error(f"Device with serial {serial_to_check} did not enumerate correctly in UNLOCKED_USER.")
+            self.post_fail(details="UNLOCKED_USER_ENUM_FAILED")
         else:
-             self.logger.info("User unlock successful, device enumerated.")
-             self._increment_enumeration_count('pin')
+            # Optional: You can now use the returned device_info object if needed.
+            # For example, to update the DUT model with the most current info.
+            if device_info:
+                self._increment_enumeration_count('pin')
+                self.dut.serial_number = device_info.iSerial
+                # You could update other properties here as well if they can change
+                self.logger.info(f"Successfully confirmed enumeration for S/N: {self.dut.serial_number}")
 
     def on_enter_UNLOCKED_RESET(self, event_data: EventData) -> None:
         """
@@ -1022,13 +1061,27 @@ class ApricornDeviceFSM:
         Args:
             event_data: The event data provided by the FSM.
         """
-        self.logger.info("Confirming device enumeration post-reset...")
-        if not self.at.confirm_drive_enum():
-             self.logger.error("Device did not enumerate after manufacturer reset.")
-             self.post_fail(details="RESET_UNLOCK_ENUM_FAILED")
+        if not self.at.await_and_confirm_led_pattern(LEDs['ENUM'], timeout=15):
+                raise TransitionCallbackError("Failed Manufacturer Reset unlock LED pattern")
+        
+        serial_to_check = self.dut.scanned_serial_number
+        if serial_to_check is None:
+            self.logger.error("Cannot confirm device enumeration: No serial number was scanned at startup.")
+            self.post_fail(details="RESET_ENUM_FAILED_NO_SERIAL")
+            return
+        
+        is_stable, device_info = self.at.confirm_drive_enum(serial_number=serial_to_check)
+        if not is_stable:
+            self.logger.error(f"Device with serial {serial_to_check} did not enumerate correctly in UNLOCKED_RESET.")
+            self.post_fail(details="UNLOCKED_RESET_ENUM_FAILED")
         else:
-             self.logger.info("Manufacturer Reset unlock successful, device enumerated.")
-             self._increment_enumeration_count('reset')
+            # Optional: You can now use the returned device_info object if needed.
+            # For example, to update the DUT model with the most current info.
+            if device_info:
+                self._increment_enumeration_count('reset')
+                self.dut.serial_number = device_info.iSerial
+                # You could update other properties here as well if they can change
+                self.logger.info(f"Successfully confirmed enumeration for S/N: {self.dut.serial_number}")
 
     def on_enter_BRUTE_FORCE(self, event_data: EventData) -> None:
         """
@@ -1344,14 +1397,15 @@ class ApricornDeviceFSM:
             self._press("lock", duration_ms=6000)
         else:
             self.logger.info("Initiating Manufacturer Reset...")
-            self._sequence([["lock", "key2"], "key3", "key8"], pause_duration_ms=100)
-            self._press("lock", duration_ms=6000)
+            self._sequence([["unlock", "key2"], "key3", "key8"], pause_duration_ms=200)
+            time.sleep(.2)
+            self._press("unlock", duration_ms=6000)
 
         if not self.at.await_and_confirm_led_pattern(LEDs['RED_GREEN_BLUE'], timeout=7, clear_buffer=True, replay_extra_context=context):
             raise TransitionCallbackError("Failed Reset Ready LED confirmation")
         
-        portable = ["key1", "key2", "key3", "key4", "key5", "key6", "key7", "key8", "key9", "key0", "lock", "unlock"]
-        secure_key = ["key1", "key2", "key3", "key4", "key5", "key6", "key7", "key8", "key9", "lock", "key0", "unlock"]
+        portable = ["key1", "key2", "key3", "key4", "key5", "key6", "key7", "key8", "key9", "lock", "key0", "unlock"]
+        secure_key = ["key1", "key2", "key3", "key4", "key5", "key6", "key7", "key8", "key9", "key0", "lock", "unlock"]
         if self.dut.secure_key:
                 FIRST_KEY, LAST_KEY = secure_key[0], secure_key[-1]
                 OTHER_KEYS = secure_key[1:-1]
@@ -1368,14 +1422,17 @@ class ApricornDeviceFSM:
         self.at.confirm_led_solid(LEDs["ALL_OFF"], minimum=.15, timeout=1, clear_buffer=False, replay_extra_context=context)
 
         for key in OTHER_KEYS:
+            self.logger.info(f"Testing key: {key}")
             self.at.on(key)
             if not self.at.await_led_state(LEDs['ACCEPT_STATE'], timeout=1, clear_buffer=False, replay_extra_context=context):
                 self.at.off(key)
                 raise TransitionCallbackError(f"Failed '{key}' confirmation")
+            self.at.off(key)
+            self.at.confirm_led_solid(LEDs["ALL_OFF"], minimum=.15, timeout=1, clear_buffer=False, replay_extra_context=context)
 
         self.logger.info(f"Testing key: {LAST_KEY}")
         self._press(LAST_KEY)
-        self.at.confirm_led_solid_strict(LEDs['KEY_GENERATION'], minimum=10, replay_extra_context=context)
+        self.at.confirm_led_solid(LEDs['KEY_GENERATION'], minimum=10, timeout=15, replay_extra_context=context)
         self.dut._reset()
 
 
@@ -2155,10 +2212,8 @@ class ApricornDeviceFSM:
 
 #################
 ## Speed Test
-    def speed_test(self, target: str, event_data: EventData) -> None:
-        dest_state = event_data.transition.dest if event_data.transition else "UNKNOWN"
-        context = {'fsm_current_state': self.state, 'fsm_destination_state': dest_state}
-        
-        self.at.run_fio_tests(disk_path=target)
+    def speed_test(self) -> None:
+        self.logger.info(f"Performing FIO Speed Test...")        
+        self.at.run_fio_tests(disk_path=self.dut.disk_path)
 
 
