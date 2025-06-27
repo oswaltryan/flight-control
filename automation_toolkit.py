@@ -10,8 +10,13 @@ import datetime # Make sure datetime is imported
 
 # --- Path Setup & Run Context ---
 PROJECT_ROOT_FOR_GLOBAL = os.path.dirname(os.path.abspath(__file__))
-if PROJECT_ROOT_FOR_GLOBAL not in sys.path:
-    sys.path.insert(0, PROJECT_ROOT_FOR_GLOBAL)
+def _setup_sys_path():
+    """Ensures the project root is in sys.path."""
+    # This is the exact logic from before, just inside a function.
+    if PROJECT_ROOT_FOR_GLOBAL not in sys.path:
+        sys.path.insert(0, PROJECT_ROOT_FOR_GLOBAL)
+
+_setup_sys_path()
 
 # Format: YYYY-MM-DD_HH-MM-SS
 RUN_TIMESTAMP = datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
@@ -80,18 +85,18 @@ def get_dut():
 
 # --- Instantiate the Test Session ---
 session = None
-if at:
+if at and dut:
     try:
-        session = TestSession(at_controller=at)
+        session = TestSession(at_controller=at, dut_instance=dut)
         global_at_logger.info(f"Test Session initialized.")
     except Exception as e_session_create:
         global_at_logger.critical(f"Failed to create 'session' instance: {e_session_create}", exc_info=True)
         # session remains None
 
-    def get_session():
-        if session is None:
-            raise RuntimeError("Global 'session' was not successfully initialized.")
-        return session
+def get_session():
+    if session is None:
+        raise RuntimeError("Global 'session' was not successfully initialized.")
+    return session
 
 # --- Instantiate the Global FSM ---
 # The FSM needs the 'at' controller.
@@ -156,7 +161,7 @@ global_at_logger.info("____"*10)
 global_at_logger.info("")
 
 # To test this file directly (optional, mainly for checking imports and initializations)
-if __name__ == "__main__":
+if __name__ == "__main__": # pragma: no cover
     global_at_logger.info("Testing automation_toolkit.py directly...")
     if at:
         global_at_logger.info(f"Global 'at' instance available. Camera ready: {at.is_camera_ready}")

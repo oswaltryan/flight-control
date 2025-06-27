@@ -22,7 +22,7 @@ if PROJECT_ROOT not in sys.path:
 module_logger = logging.getLogger(__name__)
 
 try:
-    from hardware.phidget_io_controller import PhidgetController, DEFAULT_SCRIPT_CHANNEL_MAP_CONFIG
+    from hardware.phidget_controller import PhidgetController, DEFAULT_SCRIPT_CHANNEL_MAP_CONFIG
     from camera.camera_controller import (
         LogitechLedChecker, 
         DEFAULT_DURATION_TOLERANCE_SEC as CAMERA_DEFAULT_TOLERANCE,
@@ -241,14 +241,10 @@ class UnifiedController:
             pprint(DUT_ping_2)
             return False, None
 
-        if DUT_ping_2.iSerial == first_device_serial:
-            self.logger.info(f"Device with iSerial {first_device_serial} confirmed stable for at least {stable_min}s:")
-            self.logger.info(f"  VID:PID  [Firm] @USB iSerial      iProduct")
-            self.logger.info(f"  {DUT_ping_2.idVendor}:{DUT_ping_2.idProduct} [{DUT_ping_2.bcdDevice}] @{DUT_ping_2.bcdUSB} {DUT_ping_2.iSerial} {DUT_ping_2.iProduct}")
-            return True, DUT_ping_2
-        
-        self.logger.warning(f"Device with iSerial {first_device_serial} did not remain stable or was not found after stability wait.")
-        return False, None
+        self.logger.info(f"Device with iSerial {first_device_serial} confirmed stable for at least {stable_min}s:")
+        self.logger.info(f"  VID:PID  [Firm] @USB iSerial      iProduct")
+        self.logger.info(f"  {DUT_ping_2.idVendor}:{DUT_ping_2.idProduct} [{DUT_ping_2.bcdDevice}] @{DUT_ping_2.bcdUSB} {DUT_ping_2.iSerial} {DUT_ping_2.iProduct}")
+        return True, DUT_ping_2
     
     def confirm_drive_enum(self, serial_number: str, stable_min: float = 5, timeout: float = 15) -> Tuple[bool, Optional[Any]]:
         """
@@ -308,14 +304,10 @@ class UnifiedController:
             self.logger.warning(f"Device volume disappeared during stability wait!")
             return False, None
 
-        if DUT_ping_2.iSerial == first_device_serial:
-            self.logger.info(f"Drive with iSerial {first_device_serial} confirmed stable for at least {stable_min}s:")
-            self.logger.info(f"  VID:PID  [Firm] @USB iSerial      iProduct")
-            self.logger.info(f"  {DUT_ping_2.idVendor}:{DUT_ping_2.idProduct} [{DUT_ping_2.bcdDevice}] @{DUT_ping_2.bcdUSB} {DUT_ping_2.iSerial} {DUT_ping_2.iProduct}")
-            return True, DUT_ping_2
-        
-        self.logger.warning(f"Device with iSerial {first_device_serial} did not remain stable or was not found after stability wait.")
-        return False, None
+        self.logger.info(f"Drive with iSerial {first_device_serial} confirmed stable for at least {stable_min}s:")
+        self.logger.info(f"  VID:PID  [Firm] @USB iSerial      iProduct")
+        self.logger.info(f"  {DUT_ping_2.idVendor}:{DUT_ping_2.idProduct} [{DUT_ping_2.bcdDevice}] @{DUT_ping_2.bcdUSB} {DUT_ping_2.iSerial} {DUT_ping_2.iProduct}")
+        return True, DUT_ping_2
     
     def _get_fio_path(self) -> str:
         """
@@ -349,21 +341,61 @@ class UnifiedController:
             self.logger.warning(f"FIO binary at {fio_path} is not executable. Attempting to run it anyway, but it may fail.")
 
         return fio_path
-
-    def run_fio_tests(self, disk_path: str, duration: int = 10, tests_to_run: Optional[List[Dict[str, Any]]] = None) -> bool:
+    
+    def _parse_fio_json_output(self, json_output: str) -> Optional[Dict[str, float]]:
         """
-        Runs a series of specified FIO speed tests on the connected device.
-        If no tests are provided, runs a default sequential read/write test.
+        Parses the JSON output from FIO to extract read and write bandwidth.
 
         Args:
+            json_output: The string containing the FIO JSON data.
+
+        Returns:
+            A dictionary with 'read' and/or 'write' keys and their speeds in MB/s,
+            or None if parsing fails.
+        """
+        try:
+            data = json.loads(json_output)
+            results = {}
+            # FIO output contains a list of jobs, we are interested in the first one.
+            if 'jobs' in data and data['jobs']:
+                job_result = data['jobs'][0]
+                
+                # Check for read results
+                if 'read' in job_result and job_result['read']['io_bytes'] > 0:
+                    bw_bytes = job_result['read']['bw_bytes']
+                    # Convert Bytes/sec to Megabytes/sec (1 MB = 1,000,000 bytes)
+                    results['read'] = round(bw_bytes / 1000**2, 2)
+
+                # Check for write results
+                if 'write' in job_result and job_result['write']['io_bytes'] > 0:
+                    bw_bytes = job_result['write']['bw_bytes']
+                    results['write'] = round(bw_bytes / 1000**2, 2)
+                
+                return results if results else None
+            else:
+                self.logger.warning("FIO JSON output is missing 'jobs' array.")
+                return None
+        except (json.JSONDecodeError, KeyError, IndexError) as e:
+            self.logger.error(f"Failed to parse FIO JSON output: {e}", exc_info=True)
+            return None
+
+    def run_fio_tests(self, disk_path: str, duration: int = 10, tests_to_run: Optional[List[Dict[str, Any]]] = None) -> Optional[Dict[str, float]]:
+        """
+        Runs a series of specified FIO speed tests directly on the block device.
+
+        Args:
+            disk_path (str): The device path.
+                             On Linux: e.g., '/dev/sdb'
+                             On Windows: e.g., 'PhysicalDrive1'
             duration (int): The runtime in seconds for each test.
             tests_to_run (Optional[List[Dict]]): A list of dictionaries defining
                 custom tests. If None, default tests are used.
+        
         Returns:
-            True if all tests complete successfully, False otherwise.
+            A single dictionary containing all results, or None if the sequence failed.
         """
         if tests_to_run is None:
-            self.logger.info("No specific tests provided, using default sequential R/W tests.")
+            self.logger.debug("No specific tests provided, using default sequential R/W tests.")
             tests_to_run = [
                 {
                     "name": "W-SEQ-1M-Q32",
@@ -379,93 +411,89 @@ class UnifiedController:
                 }
             ]
 
-        self.logger.info(f"Starting FIO speed test sequence for {duration}s each.")
+        self.logger.debug(f"Starting FIO speed test sequence for {duration}s each.")
         
         try:
             fio_path = self._get_fio_path()
         except (FileNotFoundError, NotImplementedError) as e:
             self.logger.error(f"Cannot run FIO tests: {e}")
-            raise # Re-raise the exception to fail the test clearly
+            raise
         
-            
-        # On Windows, FIO needs the target to be a file on a mounted drive.
-        # On Linux, we can write directly to the block device.
         if sys.platform == 'win32':
-            # You would need to ensure the drive is mounted and has a letter.
-            # For now, we'll assume the path is like "E:\" and create a temp file.
-            fio_target_file = os.path.join(disk_path, 'fio_speed_test.tmp')
-            self.logger.info(f"Target path for FIO test file: {fio_target_file}")
+            disk_path_str = str(disk_path)
+            # Check if the path is just a number (e.g., "3"). If so, prepend "PhysicalDrive".
+            if disk_path_str.isdigit():
+                win_path = f"PhysicalDrive{disk_path_str}"
+            else:
+                win_path = disk_path_str # Assume it's already correctly named "PhysicalDriveX"
+
+            # For raw device access on Windows, the format is \\.\PhysicalDriveN
+            fio_target_device = f"\\\\.\\{win_path}"
+            self.logger.debug(f"Targeting raw Windows device: {fio_target_device}")
         else:
-            fio_target_file = disk_path # e.g., /dev/sdb
+            # On Linux, the path is already in the correct format (e.g., /dev/sdb)
+            fio_target_device = disk_path
+            self.logger.debug(f"Targeting raw Linux device: {fio_target_device}")
+
+        combined_results = {}
 
         for test_params in tests_to_run:
-            self.logger.info(f"--- Preparing FIO test: {test_params.get('name', 'Unnamed')} ---")
+            self.logger.debug(f"--- Preparing FIO test: {test_params.get('name', 'Unnamed')} ---")
             
-            # Start building the command dynamically
             base_command = [fio_path]
 
-            # Add OS-specific engine parameters
             if sys.platform.startswith('linux'):
                 base_command.extend(["--ioengine=libaio"])
             elif sys.platform == 'win32':
-                # For raw disk access on Windows, the engine is 'windowsaio'
-                # and --thread is often needed.
                 base_command.extend(["--ioengine=windowsaio", "--thread"])
             
-            # Add the rest of the common parameters
             base_command.extend([
                 "--direct=1",
                 "--output-format=json",
                 "--random_generator=tausworthe64",
-                f"--filename={fio_target_file}",
+                f"--filename={fio_target_device}", # Use the correctly formatted device path
                 f"--runtime={duration}",
                 f"--name={test_params.get('name')}",
                 f"--rw={test_params.get('rw')}",
                 f"--bs={test_params.get('bs')}",
                 f"--iodepth={test_params.get('iodepth')}",
-                "--group_reporting" # This combines reports for multi-job files
+                "--group_reporting"
             ])
             
             try:
-                self.logger.info(f"Executing command: {' '.join(base_command)}")
+                self.logger.debug(f"Executing command: {' '.join(base_command)}")
+                # IMPORTANT: FIO may require administrator/root privileges for raw device access.
+                # The calling script should be run with sudo/as Administrator.
                 result = subprocess.run(base_command, check=True, capture_output=True, text=True)
                 
-                # Log the JSON output for debugging
-                self.logger.info(f"--- FIO Test '{test_params.get('name')}' Output ---")
-                try:
-                    json_output = json.loads(result.stdout)
-                    self.logger.info(json.dumps(json_output, indent=2))
-                except json.JSONDecodeError:
-                    # If output isn't JSON, just print it raw
-                    for line in result.stdout.splitlines():
-                        self.logger.info(f"  {line}")
+                parsed_result = self._parse_fio_json_output(result.stdout)
+                if parsed_result:
+                    self.logger.debug(f"--- FIO Test '{test_params.get('name')}' Result: {parsed_result} MB/s")
+                    combined_results.update(parsed_result)
+                else:
+                    self.logger.error(f"Failed to parse results for FIO test '{test_params.get('name')}'.")
+                    return None
 
                 if result.stderr:
                     self.logger.warning(f"FIO Stderr: {result.stderr}")
 
             except FileNotFoundError:
-                self.logger.error(f"FIO command not found at '{fio_path}'. This should not happen if _get_fio_path succeeded.")
+                self.logger.error(f"FIO command not found at '{fio_path}'.")
                 raise
             except subprocess.CalledProcessError as e:
                 self.logger.error(f"FIO test '{test_params.get('name')}' failed with exit code {e.returncode}.")
+                self.logger.error(f"  This can happen if the script is not run with administrator/root privileges.")
                 self.logger.error(f"  Stdout: {e.stdout}")
                 self.logger.error(f"  Stderr: {e.stderr}")
-                return False # One failed test fails the whole sequence
+                return None
             except Exception as e:
                 self.logger.error(f"An unexpected error occurred during FIO test: {e}", exc_info=True)
-                return False
-
-        # Clean up the test file on Windows
-        if sys.platform == 'win32':
-            try:
-                self.logger.info(f"All tests passed. Cleaning up test file: {fio_target_file}")
-                if os.path.exists(fio_target_file):
-                    os.remove(fio_target_file)
-            except Exception as e:
-                self.logger.warning(f"Could not clean up test file {fio_target_file}: {e}")
-
+                return None
+        
+        self.logger.info(f"Read: {combined_results['read']}")
+        self.logger.info(f"Write: {combined_results['write']}")
         self.logger.info("FIO test sequence completed successfully.")
-        return True
+        return combined_results
 
     # --- FSM Event Handling Callbacks (High-Level) ---
     def handle_post_failure(self, event_data: Any) -> None: 
@@ -477,7 +505,7 @@ class UnifiedController:
         self.logger.critical(f"UnifiedController: Handling CRITICAL error. Details from FSM: {details}")
 
 # --- For direct testing ---
-if __name__ == '__main__':
+if __name__ == '__main__': # pragma: no cover
     try:
         from utils.logging_config import setup_logging
         setup_logging(default_log_level=logging.DEBUG) 

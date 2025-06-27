@@ -6,7 +6,6 @@ import time
 import threading
 import logging
 from pynput import keyboard
-# --- MODIFICATION: Import Dict and Optional for type hinting ---
 from typing import Optional, Callable, Dict
 
 # Import platform-specific modules for flushing input
@@ -14,7 +13,7 @@ if sys.platform == "win32":
     import msvcrt
 else:
     # termios works on both Linux and macOS
-    import termios
+    import termios # pragma: no cover
 
 logger = logging.getLogger(__name__)
 

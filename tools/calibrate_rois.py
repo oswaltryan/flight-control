@@ -29,7 +29,7 @@ if PROJECT_ROOT not in sys.path:
 
 # --- Minimal Imports from the Project ---
 try:
-    from hardware.phidget_io_controller import PhidgetController
+    from hardware.phidget_controller import PhidgetController
     from camera.camera_controller import LogitechLedChecker
 except ImportError as e:
     print(f"ERROR: Could not import necessary modules. Make sure you are running this from a project with the correct structure.", file=sys.stderr)

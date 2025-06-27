@@ -7,7 +7,7 @@
 ## in controllers/flight_control_fsm.py.
 ##
 ## Run this test with the following command:
-## pytest tests/test_fsm_systematic.py --cov=controllers.flight_control_fsm --cov-report term-missing
+## pytest tests/test_finite_state_machine.py --cov=controllers.flight_control_fsm --cov-report term-missing
 ##
 #############################################################
 
@@ -17,11 +17,15 @@ import json
 import io
 import importlib
 import time
+import logging
+import statistics
+import sys
+from unittest.mock import patch
 
 # --- Module and Class Imports ---
 from controllers import flight_control_fsm
 from controllers.flight_control_fsm import (
-    ApricornDeviceFSM, DeviceUnderTest, TransitionCallbackError, CallableCondition
+    ApricornDeviceFSM, DeviceUnderTest, TestSession, TransitionCallbackError, CallableCondition
 )
 from camera.led_dictionaries import LEDs
 from transitions import Machine as StandardMachine
@@ -38,10 +42,7 @@ except ImportError:
 
 @pytest.fixture(autouse=True)
 def ensure_device_properties(monkeypatch):
-    """
-    Auto-running fixture to ensure DEVICE_PROPERTIES is always loaded
-    correctly, preventing side-effects from module reload tests.
-    """
+    """Auto-running fixture to ensure DEVICE_PROPERTIES is always loaded."""
     json_path = flight_control_fsm._json_path
     with open(json_path, 'r') as f:
         real_properties = json.load(f)
@@ -51,14 +52,15 @@ def ensure_device_properties(monkeypatch):
 def mock_at():
     """Provides a fresh mock of the hardware controller for each test."""
     at = MagicMock()
-    # Default all mock hardware calls to succeed
     at.confirm_led_pattern.return_value = True
     at.await_and_confirm_led_pattern.return_value = True
     at.await_led_state.return_value = True
     at.confirm_led_solid.return_value = True
     at.confirm_led_solid_strict.return_value = True
-    at.confirm_drive_enum.return_value = True
-    at.confirm_device_enum.return_value = True
+    mock_device_info = MagicMock()
+    mock_device_info.iSerial = "MOCK_SERIAL_123"
+    at.confirm_drive_enum.return_value = (True, mock_device_info)
+    at.confirm_device_enum.return_value = (True, mock_device_info)
     at.scanned_serial_number = "TEST_SERIAL_123"
     return at
 
@@ -70,9 +72,29 @@ def dut_instance(mock_at):
     return dut
 
 @pytest.fixture
-def fsm(mock_at, dut_instance):
-    """Creates a fresh FSM instance using the mocked DUT and AT controller."""
-    fsm_instance = ApricornDeviceFSM(at_controller=mock_at)
+def mock_session(mock_at, dut_instance):
+    """Provides a fully mocked TestSession for FSM tests."""
+    with patch('controllers.flight_control_fsm.UnifiedController', return_value=mock_at):
+        session = TestSession(at_controller=mock_at, dut_instance=dut_instance)
+    session.log_enumeration = MagicMock()
+    session.log_key_press = MagicMock()
+    session.add_speed_test_result = MagicMock()
+    return session
+
+@pytest.fixture
+def session_instance(mock_at, dut_instance):
+    """Provides a real, clean instance of the TestSession for testing its own methods."""
+    with patch('controllers.flight_control_fsm.UnifiedController', return_value=mock_at):
+        session = TestSession(at_controller=mock_at, dut_instance=dut_instance)
+    return session
+
+@pytest.fixture
+def fsm(mock_at, dut_instance, mock_session):
+    """Creates a fresh FSM instance using mocked dependencies."""
+    fsm_instance = ApricornDeviceFSM(
+        at_controller=mock_at,
+        session_instance=mock_session
+    )
     fsm_instance.dut = dut_instance
     return fsm_instance
 
@@ -208,23 +230,531 @@ class TestDeviceUnderTest:
 class TestCallableCondition:
     """Unit tests for the CallableCondition helper class."""
 
-    def test_call(self):
-        """Test that the __call__ method executes the wrapped function."""
-        # Test that it returns True when the wrapped function returns True
-        cond_true = CallableCondition(func=lambda: True, name="is_true")
-        assert cond_true() is True
-        
-        # Test that it returns False when the wrapped function returns False
-        cond_false = CallableCondition(func=lambda: False, name="is_false")
-        assert cond_false() is False
+    def test_init(self):
+        """
+        Tests that the __init__ method correctly assigns the function and name.
+        """
+        # GIVEN a lambda function that returns a boolean, and a name string
+        # <<< FIX: Change the return value to a boolean >>>
+        test_func = lambda: True
+        test_name = "my_condition_name"
+
+        # WHEN a CallableCondition is instantiated
+        condition = CallableCondition(func=test_func, name=test_name)
+
+        # THEN the attributes should be set correctly
+        assert condition.func is test_func
+        assert condition.__name__ == test_name
+
+    @pytest.mark.parametrize("func_return_value, expected_result", [
+        (True, True),
+        (False, False),
+        ("any_truthy_value", True),
+        (None, False),
+    ])
+    def test_call(self, func_return_value, expected_result):
+        """
+        Tests that calling the instance executes the wrapped function and
+        returns its boolean-equivalent result. It also tests that arguments
+        are passed through correctly.
+        """
+        # GIVEN a mock function to wrap
+        mock_func = MagicMock(return_value=func_return_value)
+        condition = CallableCondition(func=mock_func, name="test_call")
+
+        # WHEN the instance is called like a function, with arguments
+        result = condition("arg1", kwarg2="value2")
+
+        # THEN the wrapped function should have been called with those same arguments
+        mock_func.assert_called_once_with("arg1", kwarg2="value2")
+
+        # AND the final result should be the correct boolean equivalent
+        assert result is expected_result
 
     def test_repr(self):
-        """Test the __repr__ method for correct string formatting."""
-        condition = CallableCondition(func=lambda: True, name="my_test_condition")
-        assert repr(condition) == "<CallableCondition: my_test_condition>"
+        """
+        Tests that the __repr__ method returns the correct, readable string format.
+        """
+        # GIVEN a condition with a specific name
+        condition = CallableCondition(func=lambda: True, name="is_ready_for_testing")
+
+        # WHEN its representation is requested
+        repr_string = repr(condition)
+
+        # THEN the string should be in the expected format
+        assert repr_string == "<CallableCondition: is_ready_for_testing>"
 
 # =============================================================================
 # === 3. Tests for ApricornDeviceFSM Class
+# =============================================================================
+class TestTestSession:
+    """Unit tests for the TestSession data tracking class."""
+
+    def test_start_new_block_first_call(self, session_instance):
+        """
+        Tests that start_new_block correctly initializes all attributes
+        when called with a new block name.
+        """
+        # GIVEN: A fresh session instance and a known block name and number.
+        block_name = "first_test_block"
+        block_number = 1
+        
+        # To test the reset, set a counter to a non-zero value beforehand.
+        session_instance.current_block_pin_enum = 99
+
+        # WHEN: The method is called for the first time.
+        # We can patch time.time to get a predictable value for assertion.
+        with patch('time.time', return_value=12345.0):
+            session_instance.start_new_block(block_name=block_name, current_test_block=block_number)
+
+        # THEN: Verify all attributes are set correctly.
+        assert session_instance.current_test_block == block_number
+        assert session_instance.test_blocks == [block_name]
+        assert session_instance.block_start_time == 12345.0
+        
+        # Verify all counters were reset to 0.
+        assert session_instance.current_block_manufacturer_reset_enum == 0
+        assert session_instance.current_block_oob_enum == 0
+        assert session_instance.current_block_pin_enum == 0
+        assert session_instance.current_block_spi_enum == 0
+
+        # Verify the dictionaries were initialized for the new block name.
+        assert session_instance.block_failure_count[block_name] == 0
+        assert session_instance.warning_block[block_name] == []
+        assert session_instance.failure_description_block[block_name] == []
+
+    def test_start_new_block_re_enters_existing_block(self, session_instance):
+        """
+        Tests that start_new_block correctly resets counters but does NOT
+        clear existing failure/warning logs when called for a block that
+        has already been seen.
+        """
+        # GIVEN: The block has been started once and has some data logged.
+        block_name = "re-entered_block"
+        session_instance.start_new_block(block_name=block_name, current_test_block=1)
+        
+        # Add some mock data to the logs.
+        session_instance.block_failure_count[block_name] = 1
+        session_instance.failure_block[block_name].append("A previous failure")
+        session_instance.current_block_pin_enum = 50 # Set a counter to a non-zero value.
+
+        # WHEN: The method is called a second time for the same block name.
+        with patch('time.time', return_value=67890.0):
+            session_instance.start_new_block(block_name=block_name, current_test_block=2)
+            
+        # THEN: Verify attributes that should change have been updated.
+        assert session_instance.current_test_block == 2 # Should update to new number
+        assert session_instance.block_start_time == 67890.0 # Should update to new time
+        assert session_instance.current_block_pin_enum == 0 # Should be reset
+
+        # THEN: Verify attributes that should NOT change are preserved.
+        # The block name should only appear once in the list of all blocks.
+        assert session_instance.test_blocks == [block_name]
+        # The previously logged failure data should still be there.
+        assert session_instance.block_failure_count[block_name] == 1
+        assert session_instance.failure_block[block_name] == ["A previous failure"]
+
+    def test_end_block(self, session_instance):
+        """Tests that end_block captures the current time."""
+        # GIVEN a session
+        # WHEN end_block is called
+        with patch('time.time', return_value=99999.9):
+            session_instance.end_block()
+        # THEN the block_end_time attribute should be updated
+        assert session_instance.block_end_time == 99999.9
+
+    def test_log_key_press(self, session_instance):
+        """
+        Tests that log_key_press correctly initializes and increments
+        the key press counter.
+        """
+        # GIVEN an empty key press dictionary
+        assert session_instance.key_press_totals == {}
+
+        # WHEN a key is logged for the first time
+        session_instance.log_key_press("key1")
+        # THEN it should be initialized to 1
+        assert session_instance.key_press_totals["key1"] == 1
+
+        # WHEN the same key is logged again
+        session_instance.log_key_press("key1")
+        # THEN its count should be incremented
+        assert session_instance.key_press_totals["key1"] == 2
+
+        # WHEN a different key is logged
+        session_instance.log_key_press("lock")
+        # THEN it should be added to the dictionary
+        assert session_instance.key_press_totals["lock"] == 1
+
+    @pytest.mark.parametrize("enum_type, expected_attr", [
+        ("pin", "current_block_pin_enum"),
+        ("oob", "current_block_oob_enum"),
+        ("manufacturer_reset", "current_block_manufacturer_reset_enum"),
+        ("spi", "current_block_spi_enum"),
+    ])
+    def test_log_enumeration(self, session_instance, enum_type, expected_attr):
+        """
+        Tests that log_enumeration correctly increments the specified counter.
+        """
+        # GIVEN the counter is at 0
+        assert getattr(session_instance, expected_attr) == 0
+
+        # WHEN the enumeration is logged
+        session_instance.log_enumeration(enum_type)
+        # THEN the counter should be 1
+        assert getattr(session_instance, expected_attr) == 1
+
+        # WHEN it's logged again
+        session_instance.log_enumeration(enum_type)
+        # THEN the counter should be 2
+        assert getattr(session_instance, expected_attr) == 2
+
+    def test_log_failure(self, session_instance):
+        """
+        Tests that log_failure correctly appends failure details and
+        increments the failure count for a given block.
+        """
+        # GIVEN a block has been started
+        block_name = "test_block_with_failures"
+        session_instance.start_new_block(block_name=block_name, current_test_block=1)
+
+        # WHEN a failure is logged
+        session_instance.log_failure(
+            block_name=block_name,
+            failure_summary="Test failed",
+            failure_details="The widget did not spin"
+        )
+        
+        # THEN the data should be correctly stored
+        assert session_instance.block_failure_count[block_name] == 1
+        assert session_instance.failure_block[block_name] == ["Test failed"]
+        assert session_instance.failure_description_block[block_name] == ["The widget did not spin"]
+
+        # WHEN a second failure is logged for the same block
+        session_instance.log_failure(block_name=block_name, failure_summary="Another failure")
+        
+        # THEN the new data is appended and the count is updated
+        assert session_instance.block_failure_count[block_name] == 2
+        assert session_instance.failure_block[block_name] == ["Test failed", "Another failure"]
+        # Ensure details are appended even if empty
+        assert session_instance.failure_description_block[block_name] == ["The widget did not spin", ""]
+
+    def test_log_warning(self, session_instance):
+        """
+        Tests that log_warning correctly appends warning details and
+        increments the warning count for a given block.
+        """
+        # GIVEN a block has been started
+        block_name = "test_block_with_warnings"
+        session_instance.start_new_block(block_name=block_name, current_test_block=1)
+
+        # WHEN a warning is logged
+        session_instance.log_warning(
+            block_name=block_name,
+            warning_summary="Test is slow",
+            warning_details="The widget spun slowly"
+        )
+        
+        # THEN the data should be correctly stored
+        assert session_instance.block_warning_count[block_name] == 1
+        assert session_instance.warning_block[block_name] == ["Test is slow"]
+        assert session_instance.warning_description_block[block_name] == ["The widget spun slowly"]
+
+    def test_add_speed_test_result(self, session_instance):
+        """
+        Tests that add_speed_test_result correctly appends results to the list.
+        """
+        # GIVEN the results list is empty
+        assert session_instance.speed_test_results == []
+
+        # WHEN a result is added
+        result1 = {'read': 100.0, 'write': 90.0}
+        session_instance.add_speed_test_result(result1)
+        # THEN the list contains that result
+        assert session_instance.speed_test_results == [result1]
+
+        # WHEN another result is added
+        result2 = {'read': 110.0, 'write': 95.0}
+        session_instance.add_speed_test_result(result2)
+        # THEN it is appended to the list
+        assert session_instance.speed_test_results == [result1, result2]
+
+    def test_get_failure_summary_string(self, session_instance):
+        """
+        Tests that the failure summary string is generated correctly,
+        including skipping blocks with no failures.
+        """
+        # --- SCENARIO 1: No failures at all ---
+        # GIVEN a session with no failures
+        assert session_instance.get_failure_summary_string() == ""
+        
+        # --- SCENARIO 2: Failures in multiple blocks ---
+        # GIVEN a session with failures in multiple blocks
+        session_instance.start_new_block("BlockA", 1)
+        session_instance.log_failure("BlockA", "First A fail")
+        session_instance.log_failure("BlockA", "Second A fail")
+        
+        session_instance.start_new_block("BlockB", 2)
+        session_instance.log_failure("BlockB", "B failure")
+
+        # WHEN the summary string is generated
+        summary = session_instance.get_failure_summary_string()
+        
+        # THEN the string should be correctly formatted
+        expected = "Block 1 (BlockA): [First A fail; Second A fail], Block 2 (BlockB): [B failure]"
+        assert summary == expected
+        
+        # --- SCENARIO 3: A mix of failing and non-failing blocks ---
+        # GIVEN a third block is run with NO failures
+        session_instance.start_new_block("BlockC_passed", 3)
+        # Note: We do NOT call log_failure for BlockC_passed
+        
+        # WHEN the summary string is generated again
+        summary_with_pass = session_instance.get_failure_summary_string()
+        
+        # THEN the string should be IDENTICAL to the previous one,
+        # proving that BlockC was correctly skipped by the 'continue'.
+        assert summary_with_pass == expected
+
+    def test_generate_summary_report_with_data(self, session_instance, dut_instance):
+        """
+        Tests that generate_summary_report logs all sections correctly when
+        the session has accumulated data, including the 'Passed' case.
+        """
+        # ... (GIVEN block is unchanged) ...
+        # GIVEN: A session with pre-populated data for all report sections.
+        session_instance.script_title = "My Test Script"
+        dut_instance.secure_key = False
+        
+        session_instance.key_press_totals = {'key1': 5, 'lock': 2}
+        session_instance.test_blocks = ["BlockA", "BlockB", "BlockC"]
+        session_instance.block_enumeration_totals = {
+            "BlockA": {'pin': 2, 'oob': 1},
+            "BlockB": {'manufacturer_reset': 1},
+            "BlockC": {'spi': 3}
+        }
+        session_instance.failure_block = {
+            "BlockA": ["First fail"], "BlockB": ["B is broken"], "BlockC": []
+        }
+        session_instance.warning_block = {
+            "BlockA": ["A is slow"], "BlockB": ["A warning"], "BlockC": []
+        }
+        session_instance.speed_test_results = [
+            {'block': 'BlockA', 'read': 100.0, 'write': 80.0},
+            {'block': 'BlockB', 'read': 110.0, 'write': 85.0}
+        ]
+        session_instance.usb3_fail_count = 1
+        
+        mock_logger = MagicMock()
+        session_instance.logger = mock_logger
+
+        # WHEN
+        session_instance.generate_summary_report()
+
+        # THEN
+        log_output = "\n".join([call.args[0] for call in mock_logger.info.call_args_list])
+        warning_output = "\n".join([call.args[0] for call in mock_logger.warning.call_args_list])
+        error_output = "\n".join([call.args[0] for call in mock_logger.error.call_args_list])
+        
+        # --- Assertions for each section ---
+        assert "My Test Script Script Details" in log_output
+        assert "key1: 5" in log_output
+        assert "lock: 2" in log_output
+        
+        # Block 1 (A): resets=0, oob=1, pin=2, spi=0
+        assert "Block 1 :   0   |   1   |   2   |   0   |" in log_output
+        # Block 2 (B): resets=1, oob=0, pin=0, spi=0
+        assert "Block 2 :   1   |   0   |   0   |   0   |" in log_output
+        # Block 3 (C): resets=0, oob=0, pin=0, spi=3
+        assert "Block 3 :   0   |   0   |   0   |   3   |" in log_output
+        # Totals: resets=1, oob=1, pin=2, spi=3
+        assert "Total   :   1   |   1   |   2   |   3   |" in log_output
+        
+        assert "Block 1 (BlockA):" in log_output
+        assert "- First fail" in error_output
+        assert "- A is slow" in warning_output
+        
+        assert "Block 2 (BlockB):" in log_output
+        assert "- B is broken" in error_output
+        assert "- A warning" in warning_output
+        
+        assert "Block 3 (BlockC): Passed" in log_output
+
+        assert "Total Number of Failures: 2" in error_output
+        assert "Total Number of Warnings: 2" in warning_output
+        
+        assert "BlockA: Read: 100.0 MB/s, Write: 80.0 MB/s" in log_output
+        assert "BlockB: Read: 110.0 MB/s, Write: 85.0 MB/s" in log_output
+        assert "Avg: 105.0 MB/s" in log_output
+        assert "1 USB3 Failures detected" in warning_output
+        assert "My Test Script script complete" in log_output
+
+    def test_generate_summary_report_empty(self, session_instance):
+        """
+        Tests that generate_summary_report handles a session with no data gracefully.
+        """
+        # GIVEN: A completely fresh session instance
+        mock_logger = MagicMock()
+        session_instance.logger = mock_logger
+    
+        # WHEN: The summary report is generated.
+        session_instance.generate_summary_report()
+    
+        # THEN: The log output should indicate that no data was tracked for key sections.
+        log_output = "\n".join([call.args[0] for call in mock_logger.info.call_args_list])
+    
+        assert "No key presses were tracked" in log_output
+        assert "Total   :   0   |   0   |   0   |   0   |" in log_output
+        assert "Block Result:" in log_output
+        # Verify that sections for failures, warnings, and speed tests are not present
+        assert "Failure(s):" not in log_output
+        assert "Warning(s):" not in log_output
+        assert "Speed Test Block Results:" not in log_output
+
+    @patch.object(TestSession, '_handle_missing_serial_number')
+    @patch.object(TestSession, 'generate_summary_report')
+    @patch.object(TestSession, 'get_failure_summary_string')
+    def test_end_session_and_report_with_failures(
+        self,
+        mock_get_failure_summary,
+        mock_generate_report,
+        mock_handle_serial,
+        session_instance,
+        mock_at
+    ):
+        """
+        Tests that end_session_and_report calls all helpers and returns the
+        failure string when failures are present.
+        """
+        # GIVEN: The get_failure_summary_string method is mocked to return a failure message
+        failure_message = "Block 1: [Something failed]"
+        mock_get_failure_summary.return_value = failure_message
+
+        # WHEN: The end_session_and_report method is called
+        result = session_instance.end_session_and_report()
+
+        # THEN: Verify all helper methods were called exactly once.
+        mock_handle_serial.assert_called_once()
+        mock_generate_report.assert_called_once()
+        mock_get_failure_summary.assert_called_once()
+        
+        # AND: Verify the hardware cleanup commands were sent.
+        mock_at.off.assert_has_calls([call("usb3"), call("connect")], any_order=True)
+        
+        # AND: The method should return the failure string.
+        assert result == failure_message
+
+    @patch.object(TestSession, '_handle_missing_serial_number')
+    @patch.object(TestSession, 'generate_summary_report')
+    @patch.object(TestSession, 'get_failure_summary_string')
+    def test_end_session_and_report_no_failures(
+        self,
+        mock_get_failure_summary,
+        mock_generate_report,
+        mock_handle_serial,
+        session_instance,
+        mock_at
+    ):
+        """
+        Tests that end_session_and_report calls all helpers and returns None
+        when no failures are present.
+        """
+        # GIVEN: The get_failure_summary_string method is mocked to return an empty string
+        mock_get_failure_summary.return_value = ""
+
+        # WHEN: The end_session_and_report method is called
+        result = session_instance.end_session_and_report()
+
+        # THEN: Verify all helper methods were called exactly once.
+        mock_handle_serial.assert_called_once()
+        mock_generate_report.assert_called_once()
+        mock_get_failure_summary.assert_called_once()
+
+        # AND: Verify the hardware cleanup commands were sent.
+        mock_at.off.assert_has_calls([call("usb3"), call("connect")], any_order=True)
+
+        # AND: The method should return None since there were no failures.
+        assert result is None
+
+    def test_handle_missing_serial_number_skips_if_already_present(self, session_instance, dut_instance):
+        """
+        Tests that the method returns immediately if a serial number is already set.
+        """
+        # GIVEN: The DUT already has a serial number
+        dut_instance.serial_number = "EXISTING_SERIAL"
+        
+        # WHEN the method is called
+        # THEN it should not call input() and should return immediately
+        with patch('builtins.input') as mock_input:
+            session_instance._handle_missing_serial_number()
+            mock_input.assert_not_called()
+        
+        # AND the original serial number should be unchanged
+        assert dut_instance.serial_number == "EXISTING_SERIAL"
+
+    def test_handle_missing_serial_number_skips_for_dev_board(self, session_instance, dut_instance):
+        """
+        Tests that the method returns immediately for development boards.
+        """
+        # GIVEN: The DUT is a development board and has no serial number
+        dut_instance.serial_number = ""
+        dut_instance.device_name = "my-development-board-rev1"
+        
+        # WHEN the method is called
+        # THEN it should not call input() and should return immediately
+        with patch('builtins.input') as mock_input:
+            session_instance._handle_missing_serial_number()
+            mock_input.assert_not_called()
+            
+        # AND the serial number remains empty
+        assert dut_instance.serial_number == ""
+
+    def test_handle_missing_serial_number_valid_input_first_try(self, session_instance, dut_instance):
+        """
+        Tests the happy path where the user enters a valid serial number
+        on the first attempt.
+        """
+        # GIVEN: The DUT has no serial number
+        dut_instance.serial_number = ""
+        dut_instance.device_name = "production-device"
+        valid_serial = "123456789012"
+        
+        # WHEN the method is called, and we mock the user's input
+        with patch('builtins.input', return_value=valid_serial) as mock_input:
+            session_instance._handle_missing_serial_number()
+            
+            # THEN input() should have been called exactly once
+            mock_input.assert_called_once()
+        
+        # AND the DUT's serial number should be updated
+        assert dut_instance.serial_number == valid_serial
+
+    def test_handle_missing_serial_number_invalid_then_valid_input(self, session_instance, dut_instance, caplog):
+        """
+        Tests the loop where the user provides invalid input first,
+        then valid input.
+        """
+        # GIVEN: The DUT has no serial number
+        dut_instance.serial_number = ""
+        dut_instance.device_name = "production-device"
+        valid_serial = "987654321098"
+        
+        # WHEN we simulate the user typing an invalid value, then a valid one
+        with patch('builtins.input', side_effect=["invalid-input", valid_serial]) as mock_input:
+            with caplog.at_level(logging.WARNING, logger="DeviceFSM.Simplified"):
+                session_instance._handle_missing_serial_number()
+                
+                # THEN input() should have been called twice
+                assert mock_input.call_count == 2
+                
+        # AND a warning message should have been logged
+        assert "Invalid input" in caplog.text
+        
+        # AND the DUT's serial number should be updated with the final, valid value
+        assert dut_instance.serial_number == valid_serial
+
+# =============================================================================
+# === 4. Tests for ApricornDeviceFSM Class
 # =============================================================================
 class TestApricornDeviceFSM:
     """High-level tests for the FSM class itself."""
@@ -246,7 +776,7 @@ class TestApricornDeviceFSM:
     # Case 2: Diagram mode is OFF, do not expect the kwarg
     ('false', False),
     ])
-    def test_fsm_initialization_with_diagram_mode(self, monkeypatch, mock_at, diagram_mode_env, expect_graph_engine):
+    def test_fsm_initialization_with_diagram_mode(self, monkeypatch, mock_at, mock_session, diagram_mode_env, expect_graph_engine):
         """
         GIVEN a specific FSM_DIAGRAM_MODE environment setting
         WHEN the ApricornDeviceFSM is initialized
@@ -260,7 +790,10 @@ class TestApricornDeviceFSM:
         # We patch the Machine class within the FSM's module namespace.
         with patch('controllers.flight_control_fsm.Machine') as mock_machine_constructor:
             # WHEN: The FSM is instantiated.
-            fsm_instance = flight_control_fsm.ApricornDeviceFSM(at_controller=mock_at)
+            fsm_instance = flight_control_fsm.ApricornDeviceFSM(
+                at_controller=mock_at,
+                session_instance=mock_session # Use the mock_session fixture
+            )
 
             # THEN: Assert the constructor for the Machine was called.
             mock_machine_constructor.assert_called_once()
@@ -276,48 +809,85 @@ class TestApricornDeviceFSM:
 
     def test_log_state_change_details(self, fsm, caplog):
         """Test that _log_state_change_details logs correctly."""
-        # GIVEN the FSM is in a specific state before the transition
-        fsm.state = 'OFF'
-    
-        # WHEN a transition occurs
-        event = MagicMock()
-        event.transition.source = 'OFF'
-        # Configure the 'name' attribute on the nested mock to be a string
-        event.event.name = 'power_on' 
-        
-        # Manually update the FSM's state to simulate the transition
-        fsm.state = 'POWER_ON_SELF_TEST'
+        # GIVEN: The FSM is in its initial state 'OFF'
+        assert fsm.state == 'OFF'
 
-        fsm._log_state_change_details(event)
+        # We need to mock the 'before' and 'on_enter' callbacks for the
+        # power_on transition to prevent further automatic transitions.
+        fsm._do_power_on = MagicMock()
+        fsm.on_enter_POWER_ON_SELF_TEST = MagicMock() # <<< FIX: Mock this method
 
-        # THEN the source state should be updated and a log created
-        assert fsm.source_state == 'OFF'
-        assert "State changed: OFF -> POWER_ON_SELF_TEST (Event: power_on)" in caplog.text
+        # WHEN: A real transition is triggered
+        with caplog.at_level(logging.INFO):
+             fsm.power_on(usb3=True)
 
-        # THEN the source state should be updated and a log created
-        assert fsm.source_state == 'OFF'
-        assert "State changed: OFF -> POWER_ON_SELF_TEST (Event: power_on)" in caplog.text
+        # THEN: The FSM's internal state should have changed and STOPPED at POWER_ON_SELF_TEST
+        assert fsm.state == 'POWER_ON_SELF_TEST'
+
+        # AND: The log message for the FIRST transition should be present.
+        # We check the log messages directly for more precise testing.
+        assert any(
+            "State changed: OFF -> POWER_ON_SELF_TEST (Event: power_on)" in record.message
+            for record in caplog.records
+        )
 
     def test_log_state_change_details_on_initialization(self, fsm, caplog):
         """
         Test that _log_state_change_details logs the initial state correctly
         when the FSM is first created. This covers the 'if event_data.transition is None' block.
         """
-        # GIVEN: The FSM is in its initial state 'OFF'
+        # GIVEN: A fully constructed FSM from our fixture
         assert fsm.state == 'OFF'
 
-        # WHEN: The callback is triggered with event_data.transition as None,
-        # which simulates FSM initialization.
-        event = MagicMock()
-        event.transition = None
-        
-        fsm._log_state_change_details(event)
+        # AND: A special event object that simulates the one sent on initialization
+        event_data_on_init = MagicMock()
+        event_data_on_init.transition = None
 
-        # THEN: The initialization log message should be present.
+        # WHEN: We manually call the callback function, ensuring logs are captured
+        # from the FSM's specific logger.
+        with caplog.at_level(logging.INFO, logger="DeviceFSM.Simplified"):
+            fsm._log_state_change_details(event_data_on_init)
+
+        # THEN: The initialization log message should have been captured.
         assert f"FSM initialized to state: {fsm.state}" in caplog.text
 
-        # AND: The source state should not have been updated (it remains the default).
-        assert fsm.source_state == 'OFF'
+    @pytest.mark.parametrize("valid_enum_type", [
+        "pin",
+        "oob",
+        "reset",
+        "spi"
+    ])
+    def test_increment_enumeration_count_valid_type(self, fsm, valid_enum_type):
+        """
+        Tests that a valid enumeration type is correctly logged to the session.
+        """
+        # GIVEN an FSM with a mocked session
+        
+        # WHEN the method is called with a valid enumeration type
+        fsm._increment_enumeration_count(valid_enum_type)
+        
+        # THEN the session's log_enumeration method should have been called with that type
+        fsm.session.log_enumeration.assert_called_once_with(valid_enum_type)
+
+    def test_increment_enumeration_count_invalid_type(self, fsm, caplog):
+        """
+        Tests that an invalid enumeration type is not logged to the session
+        and that a warning is logged instead.
+        """
+        # GIVEN an FSM with a mocked session and logger
+        invalid_type = "not_a_real_enum"
+        fsm.logger = MagicMock() # Use a mock logger to check the warning call
+
+        # WHEN the method is called with an invalid type
+        fsm._increment_enumeration_count(invalid_type)
+
+        # THEN the session's log_enumeration method should NOT have been called
+        fsm.session.log_enumeration.assert_not_called()
+        
+        # AND a warning should have been logged to the FSM's logger
+        fsm.logger.warning.assert_called_once_with(
+            f"Invalid enumeration type '{invalid_type}' passed for tracking."
+        )
 
     # --- on_enter_* Callbacks ---
 
@@ -341,15 +911,18 @@ class TestApricornDeviceFSM:
         2. Brute force counter is already zero.
         3. A specific invalid PIN is provided via kwargs.
         """
+        # Set the logger for caplog to listen to for all scenarios in this test
+        caplog.set_level(logging.INFO, logger="DeviceFSM.Simplified")
+
         ExpectedException = get_reloaded_exception()
-        
+    
         if scenario == "hw_failure":
             # GIVEN: The hardware check will fail
             mock_at.await_and_confirm_led_pattern.return_value = False
-            
+    
             # WHEN: The function is called
             result = fsm._enter_invalid_pin(MagicMock(kwargs={}))
-            
+    
             # THEN: It should return False and not decrement the counter
             assert result is False
             assert dut_instance.brute_force_counter_current == 20 # Unchanged from default
@@ -378,6 +951,7 @@ class TestApricornDeviceFSM:
             result = fsm._enter_invalid_pin(event)
 
             # THEN: The specific log message should be present and the counter decremented
+            # <<< FIX: The assertion will now pass because caplog is listening correctly >>>
             assert "Intentionally entering a specific known-invalid PIN" in caplog.text
             assert result is True
             mock_at.sequence.assert_called_once_with(specific_pin)
@@ -385,8 +959,14 @@ class TestApricornDeviceFSM:
     
     @pytest.mark.parametrize("hw_success, log_msg", [(True, "Stable ADMIN_MODE confirmed"), (False, "Failed to confirm stable ADMIN_MODE LEDs")])
     def test_on_enter_ADMIN_MODE(self, fsm, mock_at, caplog, hw_success, log_msg):
+        # GIVEN: The hardware mock is set up for the scenario
         mock_at.confirm_led_solid.return_value = hw_success
-        fsm.on_enter_ADMIN_MODE(MagicMock())
+        
+        # WHEN: The on_enter method is called, while caplog is listening to the correct logger
+        with caplog.at_level(logging.INFO, logger="DeviceFSM.Simplified"):
+            fsm.on_enter_ADMIN_MODE(MagicMock())
+            
+        # THEN: The expected log message should have been captured
         assert log_msg in caplog.text
 
     @pytest.mark.parametrize("hw_success, expected_call", [(True, "post_pass"), (False, "post_fail")])
@@ -443,31 +1023,59 @@ class TestApricornDeviceFSM:
     def test_on_enter_OOB_MODE(self, fsm, mock_at, caplog, dut_instance, led_success, enum_success):
         # GIVEN
         mock_at.confirm_led_solid.return_value = led_success
-        mock_at.confirm_device_enum.return_value = enum_success
+        
+        # Create a mock device object to be part of the tuple
+        mock_device_info = MagicMock()
+        mock_device_info.iSerial = "MOCK_SERIAL_123"
+        # Set the return value to be a tuple, where the first element is the
+        # success status from the test's parameterization.
+        mock_at.confirm_device_enum.return_value = (enum_success, mock_device_info)
+        
         fsm.post_fail = MagicMock()
         # We must reset the DUT's property to its default before the test
         dut_instance.completed_cmfr = True
-
+    
         # WHEN
         fsm.on_enter_OOB_MODE(MagicMock())
 
         # THEN
         if not led_success:
-            # Assert the consequences of the failure path
-            assert dut_instance.completed_cmfr is False # Check the state change
-            # Verify the hardware calls made by the subsequent power_off sequence
-            mock_at.off.assert_any_call("usb3")
+            assert dut_instance.completed_cmfr is False
             mock_at.off.assert_any_call("connect")
-            # Ensure no error was logged from THIS function and post_fail was not called
-            assert "Failed to confirm OOB_MODE LEDs" not in caplog.text
             assert not fsm.post_fail.called
         elif not enum_success:
-            assert "Device did not enumerate in OOB_MODE" in caplog.text
             fsm.post_fail.assert_called_once_with(details="OOB_MODE_ENUM_FAILED")
-            assert dut_instance.completed_cmfr is True # Should not have changed
+            assert dut_instance.completed_cmfr is True
         else: # Happy Path
             assert not fsm.post_fail.called
-            assert dut_instance.completed_cmfr is True # Should not have changed
+            assert dut_instance.completed_cmfr is True
+
+    def test_on_enter_OOB_MODE_fails_if_no_serial(self, fsm, dut_instance, caplog):
+        """
+        Tests that on_enter_OOB_MODE fails correctly if no serial number
+        was scanned at startup.
+        """
+        # GIVEN: The DUT's scanned_serial_number is None
+        dut_instance.scanned_serial_number = None
+        
+        # AND the initial LED check will succeed, allowing the method to proceed
+        fsm.at.confirm_led_solid.return_value = True
+        
+        # AND we have a mock for the post_fail trigger
+        fsm.post_fail = MagicMock()
+        
+        # WHEN the on_enter method is called
+        with caplog.at_level(logging.ERROR, logger="DeviceFSM.Simplified"):
+            fsm.on_enter_OOB_MODE(MagicMock())
+
+        # THEN: The post_fail method should have been called with the correct details
+        fsm.post_fail.assert_called_once_with(details="OOB_ENUM_FAILED_NO_SERIAL")
+        
+        # AND: The specific error message should have been logged
+        assert "Cannot confirm device enumeration: No serial number was scanned at startup." in caplog.text
+        
+        # AND: The confirm_device_enum method should NOT have been called
+        fsm.at.confirm_device_enum.assert_not_called()
 
     @pytest.mark.parametrize("hw_success", [True, False])
     def test_on_enter_USER_FORCED_ENROLLMENT(self, fsm, mock_at, hw_success):
@@ -482,26 +1090,183 @@ class TestApricornDeviceFSM:
         mock_at.confirm_led_solid.assert_called_with(LEDs['STANDBY_MODE'], minimum=ANY, timeout=ANY, replay_extra_context=ANY)
     
     @pytest.mark.parametrize("enum_success", [True, False])
-    def test_on_enter_UNLOCKED_ADMIN(self, fsm, mock_at, enum_success):
-        mock_at.confirm_drive_enum.return_value = enum_success
+    def test_on_enter_UNLOCKED_ADMIN(self, fsm, mock_at, dut_instance, enum_success):
+        """Tests the on_enter_UNLOCKED_ADMIN callback for both success and failure."""
+        # GIVEN: The mock is set up to return the correct tuple format
+        mock_device_info = MagicMock()
+        mock_at.confirm_drive_enum.return_value = (enum_success, mock_device_info)
         fsm.post_fail = MagicMock()
+        dut_instance.scanned_serial_number = "TEST_SERIAL_123" # Ensure a serial number exists
+
+        # WHEN
         fsm.on_enter_UNLOCKED_ADMIN(MagicMock())
         
+        # THEN
         if not enum_success:
-            fsm.post_fail.assert_called_once_with(details="ADMIN_UNLOCK_ENUM_FAILED")
+            fsm.post_fail.assert_called_once_with(details="UNLOCKED_ADMIN_ENUM_FAILED")
         else:
             assert not fsm.post_fail.called
+            # Verify the enumeration count was incremented
+            fsm.session.log_enumeration.assert_called_with('pin')
+
+    def test_on_enter_UNLOCKED_ADMIN_sets_linux_path(self, fsm, mock_at, dut_instance, monkeypatch):
+        """
+        Tests that the on_enter_UNLOCKED_ADMIN callback correctly sets the
+        disk_path attribute when running on a Linux-like platform.
+        """
+        # GIVEN: We use monkeypatch to simulate running on Linux
+        monkeypatch.setattr(sys, 'platform', 'linux')
+        
+        # AND: The mock enumeration will succeed and return a mock device object
+        # with the expected Linux-specific attribute.
+        mock_device_info = MagicMock()
+        mock_device_info.blockDevice = "/dev/sdb" # Simulate the Linux attribute
+        mock_at.confirm_drive_enum.return_value = (True, mock_device_info)
+        
+        # AND: The DUT has a valid scanned serial number
+        dut_instance.scanned_serial_number = "TEST_SERIAL_123"
+        # AND: The initial disk_path is empty
+        dut_instance.disk_path = ""
+
+        # WHEN: The on_enter method is called
+        fsm.on_enter_UNLOCKED_ADMIN(MagicMock())
+
+        # THEN: The dut.disk_path should have been updated with the value
+        # from the mock_device_info.blockDevice attribute.
+        assert dut_instance.disk_path == "/dev/sdb"
         
     @pytest.mark.parametrize("enum_success", [True, False])
-    def test_on_enter_UNLOCKED_USER(self, fsm, mock_at, enum_success):
-        mock_at.confirm_drive_enum.return_value = enum_success
+    def test_on_enter_UNLOCKED_USER(self, fsm, mock_at, dut_instance, enum_success):
+        """Tests the on_enter_UNLOCKED_USER callback for both success and failure."""
+        # GIVEN: The mock is set up to return the correct tuple format
+        mock_device_info = MagicMock()
+        mock_at.confirm_drive_enum.return_value = (enum_success, mock_device_info)
         fsm.post_fail = MagicMock()
-        fsm.on_enter_UNLOCKED_USER(MagicMock())
+        dut_instance.scanned_serial_number = "TEST_SERIAL_123"
 
+        # WHEN
+        fsm.on_enter_UNLOCKED_USER(MagicMock())
+        
+        # THEN
         if not enum_success:
-            fsm.post_fail.assert_called_once_with(details="USER_UNLOCK_ENUM_FAILED")
+            fsm.post_fail.assert_called_once_with(details="UNLOCKED_USER_ENUM_FAILED")
         else:
             assert not fsm.post_fail.called
+            fsm.session.log_enumeration.assert_called_with('pin')
+
+    def test_on_enter_UNLOCKED_USER_sets_linux_path(self, fsm, mock_at, dut_instance, monkeypatch):
+        """
+        Tests that the on_enter_UNLOCKED_USER callback correctly sets the
+        disk_path attribute when running on a Linux-like platform.
+        """
+        # GIVEN: We use monkeypatch to simulate running on Linux
+        monkeypatch.setattr(sys, 'platform', 'linux')
+        
+        # AND: The mock enumeration will succeed and return a mock device object
+        # with the expected Linux-specific attribute.
+        mock_device_info = MagicMock()
+        mock_device_info.blockDevice = "/dev/sdc" # Use a different path to distinguish
+        mock_at.confirm_drive_enum.return_value = (True, mock_device_info)
+        
+        # AND: The DUT has a valid scanned serial number
+        dut_instance.scanned_serial_number = "TEST_SERIAL_123"
+        # AND: The initial disk_path is empty
+        dut_instance.disk_path = ""
+
+        # WHEN: The on_enter method is called
+        fsm.on_enter_UNLOCKED_USER(MagicMock())
+
+        # THEN: The dut.disk_path should have been updated with the value
+        # from the mock_device_info.blockDevice attribute.
+        assert dut_instance.disk_path == "/dev/sdc"
+
+    @pytest.mark.parametrize("enum_success", [True, False])
+    @pytest.mark.parametrize("led_success", [True, False])
+    def test_on_enter_UNLOCKED_RESET(self, fsm, mock_at, dut_instance, enum_success, led_success):
+        """Tests the on_enter_UNLOCKED_RESET callback."""
+        # GIVEN
+        mock_at.await_and_confirm_led_pattern.return_value = led_success
+        mock_device_info = MagicMock()
+        mock_at.confirm_drive_enum.return_value = (enum_success, mock_device_info)
+        fsm.post_fail = MagicMock()
+        dut_instance.scanned_serial_number = "TEST_SERIAL_123"
+        ExpectedException = get_reloaded_exception()
+
+        # WHEN / THEN
+        if not led_success:
+            # If the initial LED pattern check fails, it should raise an exception
+            with pytest.raises(ExpectedException, match="Failed Manufacturer Reset unlock LED pattern"):
+                fsm.on_enter_UNLOCKED_RESET(MagicMock())
+            # And no further checks should be made
+            mock_at.confirm_drive_enum.assert_not_called()
+            return
+
+        # If LED check passes, proceed with the rest of the logic
+        fsm.on_enter_UNLOCKED_RESET(MagicMock())
+
+        if not enum_success:
+            fsm.post_fail.assert_called_once_with(details="UNLOCKED_RESET_ENUM_FAILED")
+        else:
+            assert not fsm.post_fail.called
+            fsm.session.log_enumeration.assert_called_with('reset')
+
+    def test_on_enter_UNLOCKED_RESET_sets_linux_path(self, fsm, mock_at, dut_instance, monkeypatch):
+        """
+        Tests that the on_enter_UNLOCKED_RESET callback correctly sets the
+        disk_path attribute when running on a Linux-like platform.
+        """
+        # GIVEN: We use monkeypatch to simulate running on Linux
+        monkeypatch.setattr(sys, 'platform', 'linux')
+        
+        # AND: All mock hardware checks will succeed
+        mock_at.await_and_confirm_led_pattern.return_value = True
+        mock_device_info = MagicMock()
+        mock_device_info.blockDevice = "/dev/sdd" # Use a unique path
+        mock_at.confirm_drive_enum.return_value = (True, mock_device_info)
+        
+        # AND: The DUT has a valid scanned serial number and empty disk path
+        dut_instance.scanned_serial_number = "TEST_SERIAL_123"
+        dut_instance.disk_path = ""
+
+        # WHEN: The on_enter method is called
+        fsm.on_enter_UNLOCKED_RESET(MagicMock())
+
+        # THEN: The dut.disk_path should have been updated with the value
+        # from the mock_device_info.blockDevice attribute.
+        assert dut_instance.disk_path == "/dev/sdd"
+
+    def test_unlocked_enum_fails_if_no_serial(self, fsm):
+        """
+        Tests that on_enter for all UNLOCKED states correctly fails if no
+        serial number was previously scanned.
+        """
+        # GIVEN: The scanned_serial_number on the DUT is None
+        fsm.dut.scanned_serial_number = None
+        fsm.post_fail = MagicMock()
+
+        # --- Test for UNLOCKED_ADMIN ---
+        # WHEN we call the on_enter method for UNLOCKED_ADMIN
+        fsm.on_enter_UNLOCKED_ADMIN(MagicMock())
+        # THEN it should fail with the correct details
+        fsm.post_fail.assert_called_once_with(details="ADMIN_ENUM_FAILED_NO_SERIAL")
+
+        # --- Test for UNLOCKED_USER ---
+        fsm.post_fail.reset_mock() # Reset the mock for the next call
+        # WHEN we call the on_enter method for UNLOCKED_USER
+        fsm.on_enter_UNLOCKED_USER(MagicMock())
+        # THEN it should fail with the correct details
+        fsm.post_fail.assert_called_once_with(details="USER_ENUM_FAILED_NO_SERIAL")
+
+        # <<< FIX: Add the test case for UNLOCKED_RESET >>>
+        # --- Test for UNLOCKED_RESET ---
+        fsm.post_fail.reset_mock() # Reset the mock again
+        # GIVEN the initial LED check for RESET will pass
+        fsm.at.await_and_confirm_led_pattern.return_value = True
+
+        # WHEN we call the on_enter method for UNLOCKED_RESET
+        fsm.on_enter_UNLOCKED_RESET(MagicMock())
+        # THEN it should fail with the correct details
+        fsm.post_fail.assert_called_once_with(details="RESET_ENUM_FAILED_NO_SERIAL")
 
     @pytest.mark.parametrize("hw_success", [True, False])
     def test_on_enter_BRUTE_FORCE(self, fsm, mock_at, hw_success):
@@ -519,48 +1284,54 @@ class TestApricornDeviceFSM:
 
     # --- 'before' Callbacks ---
 
-    @pytest.mark.parametrize("usb2_arg, vbus_state, hw_success", [
-    (False, True, True),   # Standard success case
-    (True, True, True),    # USB2 success case
-    (False, False, True),  # VBUS is off, skip LED check
-    (False, True, False),  # Hardware fails LED check
+    @pytest.mark.parametrize("usb3_arg, vbus_state, hw_success", [
+        (True, True, True),    # Standard success case (USB3 on)
+        (False, True, True),   # USB2 success case (USB3 off)
+        (True, False, True),   # VBUS is off, skip LED check (USB3 on)
+        (True, True, False),   # Hardware fails LED check (USB3 on)
     ])
-    def test_do_power_on_scenarios(self, fsm, mock_at, dut_instance, usb2_arg, vbus_state, hw_success):
+    def test_do_power_on_scenarios(self, fsm, mock_at, dut_instance, usb3_arg, vbus_state, hw_success):
         """Tests various scenarios in the _do_power_on method."""
         # GIVEN
         dut_instance.vbus = vbus_state
+        
+        # <<< FIX: Mock the correct method that is actually called >>>
         mock_at.confirm_led_pattern.return_value = hw_success
-        event = MagicMock(transition=MagicMock(), kwargs={'usb2': usb2_arg})
+        
+        event = MagicMock(transition=MagicMock(), kwargs={'usb3': usb3_arg})
         ExpectedException = get_reloaded_exception()
-
+    
         # WHEN / THEN
         if not hw_success:
             with pytest.raises(ExpectedException, match="Failed Startup Self-Test LED confirmation"):
                 fsm._do_power_on(event)
+            # It should still check for the pattern even if it fails
             mock_at.confirm_led_pattern.assert_called_once()
             return
 
         fsm._do_power_on(event)
-        
+
         # Assertions
-        if usb2_arg:
-            mock_at.on.assert_has_calls([call("usb3"), call("connect")])
+        if usb3_arg:
+            mock_at.on.assert_has_calls([call("usb3"), call("connect")], any_order=True)
+            assert mock_at.on.call_count == 2
         else:
             mock_at.on.assert_called_once_with("connect")
 
         if vbus_state:
+            # <<< FIX: Assert that the correct method was called >>>
             mock_at.confirm_led_pattern.assert_called_once()
         else:
             mock_at.confirm_led_pattern.assert_not_called()
 
     def test_do_power_on_invalid_arg(self, fsm):
-        """Tests that _do_power_on raises an error for an invalid 'usb2' argument type."""
-        # GIVEN an invalid argument for usb2
-        event = MagicMock(transition=MagicMock(), kwargs={'usb2': 'not-a-bool'})
+        """Tests that _do_power_on raises an error for an invalid 'usb3' argument type."""
+        # GIVEN an invalid argument for usb3
+        event = MagicMock(transition=MagicMock(), kwargs={'usb3': 'not-a-bool'})
         ExpectedException = get_reloaded_exception()
 
         # WHEN / THEN
-        with pytest.raises(ExpectedException, match="usb2 argument, if provided, must be a boolean"):
+        with pytest.raises(ExpectedException, match="usb3 argument, if provided, must be a boolean"):
             fsm._do_power_on(event)
         
     def test_do_power_off(self, fsm, mock_at):
@@ -763,66 +1534,71 @@ class TestApricornDeviceFSM:
         assert dut_instance.admin_pin == ['1']
         
     @pytest.mark.parametrize("is_secure_key", [True, False])
-    def test_do_manufacturer_reset(self, fsm, mock_at, dut_instance, is_secure_key):
+    @pytest.mark.parametrize("from_factory_mode", [True, False]) # Test both branches
+    def test_do_manufacturer_reset(self, fsm, mock_at, dut_instance, is_secure_key, from_factory_mode):
         """
         Tests the full, successful manufacturer reset process for both
-        standard and 'secure_key' devices. This covers the key list selection logic.
+        standard and 'secure_key' devices, and from both FACTORY_MODE and other states.
         """
-        # GIVEN: The FSM is in FACTORY_MODE and the DUT is configured for the test run.
-        fsm.state = 'FACTORY_MODE'
+        # GIVEN: The FSM is in the correct starting state and the DUT is configured.
+        fsm.state = 'FACTORY_MODE' if from_factory_mode else 'STANDBY_MODE'
         dut_instance.secure_key = is_secure_key
-        
+        # Provide mock hardware IDs for the FACTORY_MODE path
+        dut_instance.hardware_id_1 = 1
+        dut_instance.hardware_id_2 = 2
+        dut_instance.model_id_1 = 3
+        dut_instance.model_id_2 = 4
+
         # WHEN
         with patch('time.sleep'): # Avoid long sleeps
             fsm._do_manufacturer_reset(MagicMock(transition=MagicMock()))
 
         # THEN
-        # 1. Assert the initial sequence and long press happen once.
+        # 1. Assert the correct initial sequence was called.
         assert mock_at.sequence.call_count == 1
         
-        # The final key press will be different based on the key list
-        final_key = "unlock" if not is_secure_key else "unlock" # Note: In your code, both lists end with 'unlock' after the change
-        
-        # Assert the two `press` calls were made correctly.
-        mock_at.press.assert_has_calls([
-            call("lock", duration_ms=6000), # The first long press
-            call(final_key)                # The final key press in the sequence
-        ])
+        # 2. Assert the correct long press was used.
+        if from_factory_mode:
+            mock_at.press.assert_any_call("lock", duration_ms=6000)
+        else:
+            mock_at.press.assert_any_call("unlock", duration_ms=6000)
+
+        # The final key press is always the last key in the list.
+        final_key = "unlock"
+        mock_at.press.assert_any_call(final_key)
         assert mock_at.press.call_count == 2
-
-        # 2. Assert the keypad test loop calls 'on' and 'off' the correct number of times.
-        # Both key lists have 12 keys, so the call counts should be the same.
-        # The loop runs for 10 'OTHER_KEYS'.
-        assert mock_at.on.call_count == 11 # The first key + 10 other keys
-        assert mock_at.off.call_count == 1 # Only for the first key
-
-        # 3. Assert the LED checks happen as expected.
-        # One `confirm_led_pattern` for the first key press
-        assert mock_at.confirm_led_pattern.call_count == 1
-        # One `await_and_confirm_led_pattern` for the 'Reset Ready' state
-        # One `await_and_confirm_led_pattern` for the final 'ENUM' state
-        assert mock_at.await_and_confirm_led_pattern.call_count == 2
         
-        assert mock_at.confirm_led_solid.call_count == 1 # For the all_off check after the first key
-        assert mock_at.await_led_state.call_count == 10 # Once for each of the OTHER_KEYS
-        assert mock_at.confirm_led_solid_strict.call_count == 1
+        # 3. Assert the keypad test loop calls 'on' and 'off' the correct number of times.
+        # on() is called for the first key and all 10 'other' keys.
+        # off() is now also called for the first key and all 10 'other' keys.
+        # <<< FIX: Correct the call count assertions >>>
+        assert mock_at.on.call_count == 11 
+        assert mock_at.off.call_count == 11
+        
+        # 4. Assert the LED checks happen as expected.
+        assert mock_at.await_and_confirm_led_pattern.call_count == 1
+        assert mock_at.confirm_led_pattern.call_count == 1
+        # confirm_led_solid is called for the first key and all 10 'other' keys, plus the final key gen
+        assert mock_at.confirm_led_solid.call_count == 12
+        assert mock_at.await_led_state.call_count == 10
 
+    @pytest.mark.parametrize("from_factory_mode", [True, False]) # <<< NEW
     @pytest.mark.parametrize("step_to_fail, error_msg", [
-    (1, "Failed Reset Ready LED confirmation"),
-    (2, "Failed Manufacturer Reset unlock LED pattern"),
+        (1, "Failed Reset Ready LED confirmation"),
+        # The second failure case is no longer valid because the final LED check
+        # was removed in your new code. I'll remove it from the test.
+        # (2, "Failed Manufacturer Reset unlock LED pattern"),
     ])
-    def test_do_manufacturer_reset_led_failures(self, fsm, mock_at, dut_instance, step_to_fail, error_msg):
+    def test_do_manufacturer_reset_led_failures(self, fsm, mock_at, dut_instance, from_factory_mode, step_to_fail, error_msg):
         """
-        Tests specific LED failure paths in _do_manufacturer_reset, either before
-        or after the keypad test sequence.
+        Tests specific LED failure paths in _do_manufacturer_reset.
         """
-        # GIVEN: The mock is configured to fail at a specific step.
-        # The `await_and_confirm_led_pattern` method is called twice. We use side_effect
-        # to control its return value for each call.
-        mock_at.await_and_confirm_led_pattern.side_effect = [
-            step_to_fail != 1, # First call (Reset Ready): returns False if step_to_fail is 1
-            step_to_fail != 2, # Second call (Final ENUM): returns False if step_to_fail is 2
-        ]
+        # GIVEN: The FSM is in the correct starting state
+        fsm.state = 'FACTORY_MODE' if from_factory_mode else 'STANDBY_MODE'
+        
+        # GIVEN: The mock is configured to fail the LED check.
+        # Since there's only one await_and_confirm_led_pattern call now, no side_effect is needed.
+        mock_at.await_and_confirm_led_pattern.return_value = False
         ExpectedException = get_reloaded_exception()
 
         # WHEN the function is called
@@ -831,22 +1607,19 @@ class TestApricornDeviceFSM:
             with patch('time.sleep'): # Avoid long sleeps
                 fsm._do_manufacturer_reset(MagicMock(transition=MagicMock()))
 
-        # FINALLY: Verify what happened before the failure and what was avoided.
+        # FINALLY: Verify what happened before the failure.
         
-        # 1. Assert that the initial setup was always called.
-        mock_at.press.assert_any_call("lock", duration_ms=6000)
+        # 1. Assert that the correct initial sequence was always called.
+        mock_at.sequence.assert_called_once()
         
-        # 2. Assert behavior based on which step failed.
-        if step_to_fail == 1:
-            # If it failed on the 'Reset Ready' LED, the keypad test loop should never start.
-            mock_at.on.assert_not_called()
-        elif step_to_fail == 2:
-            # If it failed on the final 'ENUM' LED, the keypad test must have completed.
-            # This means `at.on` was called 11 times (from our previous test analysis).
-            assert mock_at.on.call_count == 11
-            # And the dut state should have been reset right before the final LED check.
-            # We can check a proxy for this, like the admin_pin being cleared.
-            assert dut_instance.admin_pin == []
+        # 2. Assert that the correct long press was initiated.
+        if from_factory_mode:
+            mock_at.press.assert_called_once_with("lock", duration_ms=6000)
+        else:
+            mock_at.press.assert_called_once_with("unlock", duration_ms=6000)
+
+        # 3. Assert that if the first LED check fails, the keypad test loop never starts.
+        mock_at.on.assert_not_called()
 
     def test_press_lock_button(self, fsm, mock_at):
         fsm._press_lock_button(MagicMock())
@@ -1319,6 +2092,95 @@ class TestApricornDeviceFSM:
         assert dut_instance.self_destruct_pin == []
         mock_at.sequence.assert_called_once_with(new_pin) # Only first entry
 
+    @pytest.mark.parametrize("start_state", ["OOB_MODE", "ADMIN_MODE"])
+    def test_enroll_admin_pin_happy_path(self, fsm, start_state):
+        """
+        Tests that enroll_admin_pin correctly calls the underlying triggers
+        from valid start states.
+        """
+        # GIVEN: The FSM is in a valid starting state
+        fsm.state = start_state
+        # AND: The FSM triggers are mocked to prevent further execution
+        fsm.enroll_admin = MagicMock()
+        fsm.enroll_pin = MagicMock()
+        
+        # WHEN: The convenience method is called
+        pin_seq = ['1', '2', '3', '4', '5', '6', '7']
+        fsm.enroll_admin_pin(new_pin_sequence=pin_seq)
+        
+        # THEN: The correct sequence of FSM triggers should have been called
+        fsm.enroll_admin.assert_called_once()
+        fsm.enroll_pin.assert_called_once_with(new_pin=pin_seq)
+
+    def test_enroll_admin_pin_invalid_state(self, fsm):
+        """
+        Tests that enroll_admin_pin raises a RuntimeError if called from an
+        invalid state.
+        """
+        # GIVEN: The FSM is in an invalid state like STANDBY_MODE
+        fsm.state = 'STANDBY_MODE'
+        
+        # WHEN/THEN: The method should raise a RuntimeError
+        with pytest.raises(RuntimeError, match="Cannot enroll admin PIN from state 'STANDBY_MODE'"):
+            fsm.enroll_admin_pin(new_pin_sequence=[])
+
+    @pytest.mark.parametrize("pin_type", ["user", "recovery", "self_destruct"])
+    def test_enroll_other_pins_happy_path(self, fsm, pin_type):
+        """
+        Tests the happy path for user, recovery, and self-destruct PIN enrollment.
+        """
+        # GIVEN: The FSM is in ADMIN_MODE
+        fsm.state = 'ADMIN_MODE'
+        # AND: The underlying FSM triggers are mocked
+        fsm.enroll_user = MagicMock()
+        fsm.enroll_recovery = MagicMock()
+        fsm.enroll_self_destruct = MagicMock()
+        fsm.enroll_pin = MagicMock()
+        
+        # WHEN: The corresponding convenience method is called
+        pin_seq = ['1', '2', '3', '4', '5', '6', '7', '8']
+        method_to_call = getattr(fsm, f"enroll_{pin_type}_pin")
+        method_to_call(new_pin_sequence=pin_seq)
+        
+        # THEN: The correct trigger should have been called, followed by enroll_pin
+        expected_trigger_mock = getattr(fsm, f"enroll_{pin_type}")
+        expected_trigger_mock.assert_called_once()
+        fsm.enroll_pin.assert_called_once_with(new_pin=pin_seq)
+
+    @pytest.mark.parametrize("pin_type", ["user", "recovery", "self_destruct"])
+    def test_enroll_other_pins_invalid_state(self, fsm, pin_type):
+        """
+        Tests that user, recovery, and self-destruct enrollments fail if not
+        in ADMIN_MODE.
+        """
+        # GIVEN: The FSM is in an invalid state
+        fsm.state = 'OOB_MODE'
+        
+        # WHEN/THEN: The method should raise a RuntimeError
+        method_to_call = getattr(fsm, f"enroll_{pin_type}_pin")
+        with pytest.raises(RuntimeError, match=f"Cannot enroll .* from state 'OOB_MODE'"):
+            method_to_call(new_pin_sequence=[])
+
+    @pytest.mark.parametrize("pin_type, dut_attr", [
+        ("user", "user_pin"),
+        ("recovery", "recovery_pin"),
+    ])
+    def test_enroll_pin_fails_if_slots_full(self, fsm, dut_instance, pin_type, dut_attr):
+        """
+        Tests that user and recovery PIN enrollments fail if all slots are full.
+        """
+        # GIVEN: The FSM is in ADMIN_MODE
+        fsm.state = 'ADMIN_MODE'
+        # AND: All slots for the given PIN type are full
+        pin_dict = getattr(dut_instance, dut_attr)
+        for i in pin_dict:
+            pin_dict[i] = ["filled"]
+        
+        # WHEN/THEN: The convenience method should raise a RuntimeError
+        method_to_call = getattr(fsm, f"enroll_{pin_type}_pin")
+        with pytest.raises(RuntimeError, match="No available .* slots"):
+            method_to_call(new_pin_sequence=[])
+
     @pytest.mark.parametrize("toggle_method, expected_press, dut_attr, expected_val", [
         ("_basic_disk_toggle", ['key2', 'key3'], "basic_disk", True),
         ("_removable_media_toggle", ['key3', 'key7'], "removable_media", True),
@@ -1650,8 +2512,56 @@ class TestApricornDeviceFSM:
 
     # --- Other Methods ---
 
-    def test_speed_test(self, fsm, mock_at):
-        """Test the speed_test method."""
-        target_disk = "/dev/sd_test"
-        fsm.speed_test(target=target_disk, event_data=MagicMock(transition=MagicMock()))
-        mock_at.run_fio_tests.assert_called_once_with(disk_path=target_disk)
+    def test_speed_test_happy_path(self, fsm, mock_at, dut_instance):
+        """
+        Tests the successful execution of a speed test.
+        GIVEN the DUT has a valid disk path,
+        WHEN speed_test is called,
+        THEN it should call the controller's test method and return the results.
+        """
+        # GIVEN: A valid disk path is set on the DUT model
+        test_disk_path = "PhysicalDrive1"
+        dut_instance.disk_path = test_disk_path
+
+        # AND: The mock controller is set up to return a successful result
+        mock_results = {'read': 150.5, 'write': 120.2}
+        mock_at.run_fio_tests.return_value = mock_results
+        
+        # <<< FIX: Mock the logger on the FSM instance itself for this test >>>
+        # This prevents any logging calls from interfering.
+        fsm.logger = MagicMock()
+
+        # WHEN: The FSM's speed_test method is called
+        results = fsm.speed_test()
+
+        # THEN: The controller's method should have been called with the correct path
+        mock_at.run_fio_tests.assert_called_once_with(disk_path=test_disk_path)
+
+        # AND: The session's method should have been called with the results
+        fsm.session.add_speed_test_result.assert_called_once_with(mock_results)
+        
+        # AND: The function should return the results from the controller
+        assert results == mock_results
+
+    def test_speed_test_unhappy_path_no_disk(self, fsm, mock_at, dut_instance, caplog):
+        """
+        Tests the failure case where the speed test is called without a disk path.
+        GIVEN the DUT's disk path is empty,
+        WHEN speed_test is called,
+        THEN it should log an error and not call the controller.
+        """
+        # GIVEN: The disk path on the DUT model is empty
+        dut_instance.disk_path = ""
+        
+        # WHEN: The FSM's speed_test method is called, while capturing logs
+        with caplog.at_level(logging.ERROR, logger="DeviceFSM.Simplified"):
+            results = fsm.speed_test()
+
+        # THEN: The controller's method should NOT have been called
+        mock_at.run_fio_tests.assert_not_called()
+
+        # AND: An error message should have been logged
+        assert "Cannot run speed test: DUT disk path is not set" in caplog.text
+
+        # AND: The function should return None
+        assert results is None

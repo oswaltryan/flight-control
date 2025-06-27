@@ -10,6 +10,7 @@ import json
 from camera.led_dictionaries import LEDs
 import subprocess
 import statistics
+import sys
 
 ### For running scripts
 # from transitions import Machine, EventData
@@ -234,7 +235,8 @@ class TestSession:
     test results. It is distinct from the DeviceUnderTest, which models the
     hardware state.
     """    
-    def __init__(self, at_controller: 'UnifiedController'):
+    __test__ = False
+    def __init__(self, at_controller: 'UnifiedController', dut_instance: 'DeviceUnderTest'):
         """
         Initializes the session tracker.
 
@@ -245,7 +247,7 @@ class TestSession:
 
         self.logger = logging.getLogger("DeviceFSM.Simplified")
         self.at = at_controller
-        self.dut = DeviceUnderTest(at_controller=self.at)
+        self.dut = dut_instance # Use the provided DUT, don't create a new one.
 
         # Script Identification
         self.script_num: int = 0
@@ -285,8 +287,9 @@ class TestSession:
     def start_new_block(self, block_name: str, current_test_block: int):
         """Resets counters and timers for the start of a new test block."""
         self.current_test_block = current_test_block
-        self.test_blocks.append(block_name)
         self.block_start_time = time.time()
+        if block_name not in self.test_blocks:
+            self.test_blocks.append(block_name)
         
         # Reset current block counters
         self.current_block_manufacturer_reset_enum = 0
@@ -354,7 +357,7 @@ class TestSession:
         logger = self.logger
         dut = self.dut
 
-        logger.info("" + "________________________________________________________________________________" * 2)
+        logger.info("" + "___________________________________" * 2)
         logger.info(f"{self.script_title} Script Details:")
         logger.info("___________________________________")
 
@@ -547,13 +550,12 @@ class CallableCondition:
         Makes the object behave like a function for the FSM.
 
         When the FSM evaluates this condition, this method is called, which
-        in turn executes the wrapped function.
+        in turn executes the wrapped function and returns its boolean value.
 
         Returns:
             The boolean result of the wrapped function.
         """
-        # This makes the object behave like a function for the FSM
-        return self.func(*args, **kwargs)
+        return bool(self.func(*args, **kwargs))
 
     def __repr__(self) -> str:
         """
@@ -800,7 +802,7 @@ class ApricornDeviceFSM:
     def _increment_enumeration_count(self, enum_type: str):
         """Validates the enumeration type and logs it to the session."""
         # Define the valid enumeration types in one central place.
-        valid_enum_types = ['pin', 'oob', 'manufacturer_reset', 'spi']
+        valid_enum_types = ['pin', 'oob', 'reset', 'spi']
 
         if enum_type in valid_enum_types:
             self.session.log_enumeration(enum_type)
@@ -1017,6 +1019,10 @@ class ApricornDeviceFSM:
             if device_info:
                 self._increment_enumeration_count('pin')
                 self.dut.serial_number = device_info.iSerial
+                if sys.platform == 'win32':
+                    self.dut.disk_path = device_info.physicalDriveNum
+                elif sys.platform.startswith('linux'):
+                    self.dut.disk_path = device_info.blockDevice
                 # You could update other properties here as well if they can change
                 self.logger.info(f"Successfully confirmed enumeration for S/N: {self.dut.serial_number}")
 
@@ -1047,6 +1053,10 @@ class ApricornDeviceFSM:
             if device_info:
                 self._increment_enumeration_count('pin')
                 self.dut.serial_number = device_info.iSerial
+                if sys.platform == 'win32':
+                    self.dut.disk_path = device_info.physicalDriveNum
+                elif sys.platform.startswith('linux'):
+                    self.dut.disk_path = device_info.blockDevice
                 # You could update other properties here as well if they can change
                 self.logger.info(f"Successfully confirmed enumeration for S/N: {self.dut.serial_number}")
 
@@ -1080,6 +1090,10 @@ class ApricornDeviceFSM:
             if device_info:
                 self._increment_enumeration_count('reset')
                 self.dut.serial_number = device_info.iSerial
+                if sys.platform == 'win32':
+                    self.dut.disk_path = device_info.physicalDriveNum
+                elif sys.platform.startswith('linux'):
+                    self.dut.disk_path = device_info.blockDevice
                 # You could update other properties here as well if they can change
                 self.logger.info(f"Successfully confirmed enumeration for S/N: {self.dut.serial_number}")
 
@@ -2212,8 +2226,32 @@ class ApricornDeviceFSM:
 
 #################
 ## Speed Test
-    def speed_test(self) -> None:
-        self.logger.info(f"Performing FIO Speed Test...")        
-        self.at.run_fio_tests(disk_path=self.dut.disk_path)
+    def speed_test(self) -> Optional[Dict[str, float]]:
+        """
+        Performs a standardized FIO speed test on the DUT's disk.
+
+        This method retrieves the disk path from the DUT model and triggers
+        the Unified Controller to execute the read/write tests. It handles
+        potential errors like a missing disk path.
+
+        Returns:
+            A dictionary with 'read' and 'write' speeds in MB/s on success,
+            or None on failure.
+        """
+        self.logger.info(f"Performing FIO Speed Test...")
+        
+        disk_to_test = self.dut.disk_path
+        
+        if not disk_to_test:
+            self.logger.error("Cannot run speed test: DUT disk path is not set. Ensure the device is unlocked first.")
+            return None
+
+        self.logger.info(f"Initiating speed test on target: {disk_to_test}")
+        results = self.at.run_fio_tests(disk_path=disk_to_test)
+        
+        if results:
+            self.session.add_speed_test_result(results)
+
+        return results
 
 
