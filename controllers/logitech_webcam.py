@@ -356,9 +356,6 @@ class LogitechLedChecker:
         cv2.putText(img, text, pos, OVERLAY_FONT, OVERLAY_FONT_SCALE, OVERLAY_TEXT_COLOR_MAIN, OVERLAY_FONT_THICKNESS, cv2.LINE_AA)
 
     def _draw_overlays(self, frame: np.ndarray, timestamp_in_replay: float, led_state_for_frame: Dict[str, int], active_keys_for_frame: set) -> np.ndarray:
-        """
-        MODIFIED: The keypad overlay is now drawn in the bottom-left corner.
-        """
         overlay_frame = frame.copy()
         current_y_offset = OVERLAY_PADDING
 
