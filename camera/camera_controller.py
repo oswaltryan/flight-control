@@ -27,6 +27,8 @@ DEFAULT_DURATION_TOLERANCE_SEC = 0.1 # NEW: Default tolerance for duration check
 GLOBAL_ENABLE_INSTANT_REPLAY_FEATURE = True
 DEFAULT_REPLAY_PRE_FAIL_DURATION_SEC = 7.0
 DEFAULT_REPLAY_POST_FAIL_DURATION_SEC = 5.0
+KEY_PRESS_VISUAL_DELAY_S = 0.1
+KEY_PRESS_VISUAL_SUSTAIN_S = 0.15
 DEFAULT_REPLAY_FPS_FOR_OUTPUT = DEFAULT_FPS # Use camera's default FPS for replay output
 _CAMERA_CONTROLLER_FILE_DIR = os.path.dirname(os.path.abspath(__file__))
 _PROJECT_ROOT_FROM_CAMERA = os.path.dirname(_CAMERA_CONTROLLER_FILE_DIR)
@@ -429,24 +431,41 @@ class LogitechLedChecker:
         self.logger.info(f"Keypad layout for replay overlays has been set.")
         self.keypad_layout = layout
 
+    def _add_key_to_replay(self, key_name: str):
+        """NEW: A thread-safe helper called by a Timer to add a key to the active set."""
+        with self.active_keys_lock:
+            self.active_keys_for_replay.add(key_name)
+
     def _remove_key_from_replay(self, key_name: str):
-        """NEW: A thread-safe callback for the Timer to remove a key from the active set."""
+        """A thread-safe callback for the Timer to remove a key from the active set."""
         with self.active_keys_lock:
             self.active_keys_for_replay.discard(key_name)
 
     def log_key_press_for_replay(self, key_name: str, duration_s: float):
         """
-        NEW: Public method to be called by the UnifiedController to log a key press event.
-        This method is thread-safe.
+        CORRECTED: Now adds a fixed "sustain" time to the visual overlay's
+        duration to improve the "feel" of the key release.
         """
         if not self.enable_instant_replay:
             return
 
-        with self.active_keys_lock:
-            self.active_keys_for_replay.add(key_name)
+        # Timer to ADD the key to the visual set after a small delay.
+        # This remains unchanged.
+        threading.Timer(
+            KEY_PRESS_VISUAL_DELAY_S,
+            self._add_key_to_replay,
+            [key_name]
+        ).start()
 
-        # Start a timer to remove the key after its press duration has elapsed.
-        threading.Timer(duration_s, self._remove_key_from_replay, [key_name]).start()
+        # Timer to REMOVE the key.
+        # CORRECTED: We add the new sustain time to the total duration.
+        total_visual_duration = KEY_PRESS_VISUAL_DELAY_S + duration_s + KEY_PRESS_VISUAL_SUSTAIN_S
+        
+        threading.Timer(
+            total_visual_duration,
+            self._remove_key_from_replay,
+            [key_name]
+        ).start()
 
     def _start_replay_recording(self, method_name: str, extra_context: Optional[Dict[str, str]] = None):
         """
