@@ -50,6 +50,18 @@ except ImportError as e_uc_import:
 DEFAULT_CAMERA_ID = 0
 DEFAULT_LED_DISPLAY_ORDER = ["red", "green", "blue"]
 
+# --- Keypad layouts here ---
+KEYPAD_LAYOUTS = {
+    'secure': [
+        ['key1', 'key2'], ['key3', 'key4'], ['key5', 'key6'],
+        ['key7', 'key8'], ['key9', 'key0'], ['lock', 'unlock']
+    ],
+    'standard': [
+        ['key1', 'key2', 'key3'], ['key4', 'key5', 'key6'],
+        ['key7', 'key8', 'key9'], ['lock', 'key0', 'unlock']
+    ]
+}
+
 # --- Instantiate the Global Controller ('at') ---
 at = None
 try:
@@ -74,6 +86,9 @@ if at: # Only initialize DUT if 'at' was successful
     try:
         dut = DeviceUnderTest(at_controller=at)
         global_at_logger.info(f"Global DUT initialized.")
+        layout_type = 'secure' if dut.secure_key else 'standard'
+        keypad_layout_to_use = KEYPAD_LAYOUTS[layout_type]
+        at.set_keypad_layout(keypad_layout_to_use)
     except Exception as e_dut_create:
         global_at_logger.critical(f"Failed to create global 'dut' instance: {e_dut_create}", exc_info=True)
 

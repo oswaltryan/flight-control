@@ -25,7 +25,7 @@ DEFAULT_DURATION_TOLERANCE_SEC = 0.1 # NEW: Default tolerance for duration check
 
 # --- Instant Replay Configuration ---
 GLOBAL_ENABLE_INSTANT_REPLAY_FEATURE = True
-DEFAULT_REPLAY_PRE_FAIL_DURATION_SEC = 5.0
+DEFAULT_REPLAY_PRE_FAIL_DURATION_SEC = 7.0
 DEFAULT_REPLAY_POST_FAIL_DURATION_SEC = 5.0
 DEFAULT_REPLAY_FPS_FOR_OUTPUT = DEFAULT_FPS # Use camera's default FPS for replay output
 _CAMERA_CONTROLLER_FILE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -106,7 +106,8 @@ class LogitechLedChecker:
                  display_order: Optional[List[str]] = None, duration_tolerance_sec: float = DEFAULT_DURATION_TOLERANCE_SEC,
                  replay_post_failure_duration_sec: float = DEFAULT_REPLAY_POST_FAIL_DURATION_SEC,
                  replay_output_dir: Optional[str] = None,
-                 enable_instant_replay: Optional[bool] = None):
+                 enable_instant_replay: Optional[bool] = None,
+                 keypad_layout: Optional[Dict[str, Any]] = None):
         self.logger = logger_instance if logger_instance else logger
         self.cap = None
         self.is_camera_initialized = False
@@ -115,6 +116,11 @@ class LogitechLedChecker:
         self._ordered_keys_for_display_cache = None
         self.explicit_display_order = display_order
         self.duration_tolerance_sec = duration_tolerance_sec
+
+        # --- Attributes for Key Press Overlay ---
+        self.keypad_layout = keypad_layout
+        self.active_keys_for_replay: set = set()
+        self.active_keys_lock = threading.Lock()
 
         # --- Instant Replay Initialization ---
         if enable_instant_replay is not None:
@@ -192,25 +198,29 @@ class LogitechLedChecker:
 
     def _update_frame_thread(self):
         """
-        CORRECTED: This thread now continuously processes frames and populates
-        the replay buffer with full state information, independent of the main thread.
+        MODIFIED: This thread now also snapshots the set of active keys
+        and includes it in the replay buffer tuple.
         """
         self.logger.info("Starting background frame-reading and processing thread.")
         while not self.stopped:
             if self.cap and self.cap.isOpened():
                 ret, frame = self.cap.read()
                 if not ret:
-                    continue # Skip processing if frame read fails
+                    continue
 
-                # --- Processing is now done in the background thread ---
                 detected_led_states = {}
                 for led_key, config_item in self.led_configs.items():
                     detected_led_states[led_key] = 1 if self._check_roi_for_color(frame, config_item) else 0
 
-                # --- Atomically update the replay buffer ---
+                # MODIFIED: Get a snapshot of active keys for this specific frame.
+                with self.active_keys_lock:
+                    active_keys_snapshot = self.active_keys_for_replay.copy()
+
                 with self.buffer_lock:
                     current_capture_time = time.time()
-                    self.replay_buffer.append((current_capture_time, frame.copy(), detected_led_states.copy()))
+                    # MODIFIED: The tuple now includes the active keys snapshot.
+                    self.replay_buffer.append((current_capture_time, frame.copy(),
+                                               detected_led_states.copy(), active_keys_snapshot))
                     if self.replay_frame_width is None or self.replay_frame_height is None:
                         h, w = frame.shape[:2]
                         self.replay_frame_width, self.replay_frame_height = w, h
@@ -301,21 +311,23 @@ class LogitechLedChecker:
 
     def _get_current_led_state_from_camera(self) -> Tuple[Optional[np.ndarray], Dict[str, int]]:
         """
-        CORRECTED: This method is now a lightweight "getter" that safely peeks
-        at the last processed frame from the continuously updated buffer.
+        CORRECTED: This method now correctly unpacks the 4-element tuple from the
+        replay buffer but still returns only the frame and states to its callers.
         """
         with self.buffer_lock:
             if not self.replay_buffer:
                 return None, {}
             
-            # Get the most recent full reading from the buffer
-            _, last_frame, last_states = self.replay_buffer[-1]
+            # CORRECTED: Unpack the 4-element tuple that is now stored in the buffer.
+            # We ignore the timestamp and active_keys for the immediate return value.
+            _, last_frame, last_states, _ = self.replay_buffer[-1]
             
-            # Return a copy to ensure thread safety for consumers of this data
+            # Return a copy to ensure thread safety for consumers of this data.
             return last_frame.copy(), last_states.copy()
-
+        
     def _draw_text_with_background(self, img: np.ndarray, text: str, pos: Tuple[int, int]):
         """
+        NEW: This is the missing helper function.
         Draws the given text on the image with an opaque background for better readability.
 
         Args:
@@ -341,60 +353,100 @@ class LogitechLedChecker:
         # Draw the text on top of the background.
         cv2.putText(img, text, pos, OVERLAY_FONT, OVERLAY_FONT_SCALE, OVERLAY_TEXT_COLOR_MAIN, OVERLAY_FONT_THICKNESS, cv2.LINE_AA)
 
-
-    def _draw_overlays(self, frame: np.ndarray, timestamp_in_replay: float, led_state_for_frame: Dict[str, int]) -> np.ndarray:
+    def _draw_overlays(self, frame: np.ndarray, timestamp_in_replay: float, led_state_for_frame: Dict[str, int], active_keys_for_frame: set) -> np.ndarray:
+        """
+        MODIFIED: The keypad overlay is now drawn in the bottom-left corner.
+        """
         overlay_frame = frame.copy()
         current_y_offset = OVERLAY_PADDING
 
-        # --- MODIFICATION: Use the new helper function for drawing text ---
+        # --- FSM State and other text overlays (unchanged) ---
         if self.replay_extra_context:
             fsm_curr = self.replay_extra_context.get('fsm_current_state', 'N/A')
             fsm_dest = self.replay_extra_context.get('fsm_destination_state', 'N/A')
             
-            # Draw Current State text with an opaque background.
             self._draw_text_with_background(overlay_frame, f"Current State: {fsm_curr}", 
                         (OVERLAY_PADDING + 5, current_y_offset + OVERLAY_LINE_HEIGHT))
             current_y_offset += OVERLAY_LINE_HEIGHT
 
-            # Draw Destination State text with an opaque background.
             self._draw_text_with_background(overlay_frame, f"Destination State: {fsm_dest}",
                         (OVERLAY_PADDING + 5, current_y_offset + OVERLAY_LINE_HEIGHT))
             current_y_offset += (OVERLAY_LINE_HEIGHT * 2)
 
-        # The rest of the function for drawing ROIs and LED indicators remains the same.
+        # --- Keypad Overlay Drawing ---
+        if self.keypad_layout:
+            key_height, key_width = 30, 45
+            key_padding = 5
+
+            X_OFFSET_FROM_LEFT = 10   # Pixels from the left edge
+            Y_OFFSET_FROM_BOTTOM = 50 # Pixels from the bottom edge
+            
+            num_rows = len(self.keypad_layout)
+            grid_height = (key_height * num_rows) + (key_padding * (num_rows -1))
+            
+            start_x = OVERLAY_PADDING + X_OFFSET_FROM_LEFT
+            start_y = overlay_frame.shape[0] - grid_height - OVERLAY_PADDING - Y_OFFSET_FROM_BOTTOM
+
+            for row_idx, row_of_keys in enumerate(self.keypad_layout):
+                for col_idx, key_name in enumerate(row_of_keys):
+                    x1 = start_x + col_idx * (key_width + key_padding)
+                    y1 = start_y + row_idx * (key_height + key_padding)
+                    x2, y2 = x1 + key_width, y1 + key_height
+                    
+                    is_pressed = key_name in active_keys_for_frame
+                    
+                    rect_color = (200, 200, 200)
+                    rect_thickness = -1 if is_pressed else 2
+                    cv2.rectangle(overlay_frame, (x1, y1), (x2, y2), rect_color, rect_thickness)
+                    
+                    if is_pressed:
+                        cv2.rectangle(overlay_frame, (x1, y1), (x2, y2), OVERLAY_TEXT_COLOR_MAIN, 2)
+
+                    text_color = (0, 0, 0) if is_pressed else OVERLAY_TEXT_COLOR_MAIN
+                    cv2.putText(overlay_frame, key_name, (x1 + 5, y1 + 20), OVERLAY_FONT, 0.4, text_color, 1)
+
+        # --- ROI and LED Indicator Drawing (unchanged) ---
         ordered_leds = self._get_ordered_led_keys_for_display()
         for led_key in ordered_leds:
             if led_key not in self.led_configs:
                 continue
-
             config_item = self.led_configs[led_key]
             x, y, w, h = config_item["roi"]
-
-            # 1. Draw the ROI box (This remains colored as before)
             roi_box_color = config_item.get("display_color_bgr", (128, 128, 128))
             cv2.rectangle(overlay_frame, (x, y), (x + w, y + h), roi_box_color, 1)
-
-            # 2. Calculate the position for the indicator: centered above the ROI
             indicator_x_pos = x + (w // 2)
             indicator_y_pos = y - OVERLAY_LINE_HEIGHT
-            
             if indicator_y_pos < OVERLAY_LED_INDICATOR_RADIUS + OVERLAY_PADDING:
                 indicator_y_pos = OVERLAY_LED_INDICATOR_RADIUS + OVERLAY_PADDING
-
-            # 3. Determine the color of the indicator
             is_on = led_state_for_frame.get(led_key, 0) == 1
-            if is_on:
-                # The indicator is now WHITE when the LED is ON.
-                indicator_color = OVERLAY_TEXT_COLOR_MAIN 
-            else:
-                # The indicator remains dark grey when the LED is OFF.
-                indicator_color = OVERLAY_LED_INDICATOR_OFF_COLOR
-
-            # 4. Draw the indicator circle
+            indicator_color = OVERLAY_TEXT_COLOR_MAIN if is_on else OVERLAY_LED_INDICATOR_OFF_COLOR
             cv2.circle(overlay_frame, (indicator_x_pos, indicator_y_pos), OVERLAY_LED_INDICATOR_RADIUS, indicator_color, -1)
             cv2.circle(overlay_frame, (indicator_x_pos, indicator_y_pos), OVERLAY_LED_INDICATOR_RADIUS, OVERLAY_TEXT_COLOR_MAIN, 1)
 
         return overlay_frame
+    
+    def set_keypad_layout(self, layout: list[list[str]]):
+        self.logger.info(f"Keypad layout for replay overlays has been set.")
+        self.keypad_layout = layout
+
+    def _remove_key_from_replay(self, key_name: str):
+        """NEW: A thread-safe callback for the Timer to remove a key from the active set."""
+        with self.active_keys_lock:
+            self.active_keys_for_replay.discard(key_name)
+
+    def log_key_press_for_replay(self, key_name: str, duration_s: float):
+        """
+        NEW: Public method to be called by the UnifiedController to log a key press event.
+        This method is thread-safe.
+        """
+        if not self.enable_instant_replay:
+            return
+
+        with self.active_keys_lock:
+            self.active_keys_for_replay.add(key_name)
+
+        # Start a timer to remove the key after its press duration has elapsed.
+        threading.Timer(duration_s, self._remove_key_from_replay, [key_name]).start()
 
     def _start_replay_recording(self, method_name: str, extra_context: Optional[Dict[str, str]] = None):
         """
@@ -420,15 +472,13 @@ class LogitechLedChecker:
 
     def _save_replay_video(self, replay_sequence_to_save: list):
         """
-        MODIFIED: This method now accepts the full replay sequence as an argument
-        instead of reading directly from the class's replay_buffer. It also
-        logs the number of frames being written.
+        CORRECTED: Now correctly unpacks the 4-element tuple from the buffer
+        and calls the updated _draw_overlays function with all 4 arguments.
         """
         if not self.is_replay_armed or not replay_sequence_to_save or not self.replay_output_dir:
             if not replay_sequence_to_save and self.is_replay_armed: self.logger.debug("Replay: No frames in sequence to save.")
             return
 
-        # DEBUG LOG: Log the total number of frames to be written.
         self.logger.debug(f"Replay: Writing a total of {len(replay_sequence_to_save)} frames to video.")
 
         if self.replay_frame_width is None or self.replay_frame_height is None:
@@ -448,9 +498,11 @@ class LogitechLedChecker:
             if not video_writer.isOpened():
                 self.logger.error(f"Replay: Failed to open VideoWriter for {filepath}."); return
 
-            for frame_capture_time, frame_data, led_state in replay_sequence_to_save:
+            # Unpack the 4-element tuple from the replay sequence
+            for frame_capture_time, frame_data, led_state, active_keys in replay_sequence_to_save:
                 time_in_replay_seconds = frame_capture_time - self.replay_start_time
-                frame_with_overlays = self._draw_overlays(frame_data, time_in_replay_seconds, led_state)
+                # Pass all 4 arguments to the drawing function
+                frame_with_overlays = self._draw_overlays(frame_data, time_in_replay_seconds, led_state, active_keys)
 
                 fh_overlay, fw_overlay = frame_with_overlays.shape[:2]
                 if fw_overlay == self.replay_frame_width and fh_overlay == self.replay_frame_height:

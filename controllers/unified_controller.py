@@ -56,7 +56,8 @@ class UnifiedController:
                  led_duration_tolerance_sec: Optional[float] = None,
                  replay_post_failure_duration_sec: Optional[float] = None,
                  replay_output_dir: Optional[str] = None,
-                 enable_instant_replay: Optional[bool] = None):
+                 enable_instant_replay: Optional[bool] = None,
+                 keypad_layout: Optional[Dict[str, Any]] = None):
         self.logger = logger_instance if logger_instance else module_logger
         effective_replay_output_dir = replay_output_dir
         self.phidget_config_to_use = script_map_config if script_map_config is not None else DEFAULT_SCRIPT_CHANNEL_MAP_CONFIG
@@ -81,7 +82,7 @@ class UnifiedController:
             self._camera_checker = LogitechLedChecker(
                 camera_id=camera_id, led_configs=led_configs, display_order=display_order,
                 logger_instance=camera_ctrl_logger, duration_tolerance_sec=self.effective_led_duration_tolerance,
-                replay_post_failure_duration_sec=effective_replay_duration, replay_output_dir=effective_replay_output_dir, enable_instant_replay=enable_instant_replay)
+                replay_post_failure_duration_sec=effective_replay_duration, replay_output_dir=effective_replay_output_dir, enable_instant_replay=enable_instant_replay, keypad_layout=keypad_layout)
             if not self._camera_checker.is_camera_initialized:
                 self.logger.error(f"LogitechLedChecker FAILED to initialize camera {camera_id}.")
         except Exception as e_camera_init:
@@ -92,6 +93,13 @@ class UnifiedController:
         if not self.scanned_serial_number:
             self.logger.error("Initialization scan failed. No serial number captured!")
             sys.exit(1)
+
+    def set_keypad_layout(self, layout: list[list[str]]):
+        """
+        Delegates setting the keypad layout to the camera controller.
+        """
+        if self._camera_checker:
+            self._camera_checker.set_keypad_layout(layout)
 
     # --- PhidgetController Method Delegation ---
     def on(self, *channel_names: str):
@@ -107,9 +115,24 @@ class UnifiedController:
         self._phidget_controller.hold(channel_name, duration_ms)
     def press(self, channel_or_channels: Union[str, List[str]], duration_ms: float = 100):
         if not self._phidget_controller: self.logger.error("Phidget not init for 'press'."); return
+        
+        # NEW: Log key press(es) to the camera for replay overlay
+        if self._camera_checker:
+            keys_to_log = [channel_or_channels] if isinstance(channel_or_channels, str) else channel_or_channels
+            for key in keys_to_log:
+                self._camera_checker.log_key_press_for_replay(key, duration_s=duration_ms / 1000.0)
+
         self._phidget_controller.press(channel_or_channels, duration_ms=duration_ms)
     def sequence(self, pin_sequence: List[Any], press_duration_ms: float = 100, pause_duration_ms: float = 100):
         if not self._phidget_controller: self.logger.error("Phidget not init for 'sequence'."); return
+
+        # NEW: Log key presses to the camera for replay overlay
+        if self._camera_checker:
+            for item in pin_sequence:
+                keys_to_log = [item] if isinstance(item, str) else item
+                for key in keys_to_log:
+                    self._camera_checker.log_key_press_for_replay(key, duration_s=press_duration_ms / 1000.0)
+        
         self._phidget_controller.sequence(pin_sequence, press_ms=press_duration_ms, pause_ms=pause_duration_ms)
     def read_input(self, channel_name: str) -> Optional[bool]:
         if not self._phidget_controller: self.logger.error("Phidget not init for 'read_input'."); return None
