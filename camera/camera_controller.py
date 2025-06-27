@@ -25,6 +25,7 @@ DEFAULT_DURATION_TOLERANCE_SEC = 0.1 # NEW: Default tolerance for duration check
 
 # --- Instant Replay Configuration ---
 GLOBAL_ENABLE_INSTANT_REPLAY_FEATURE = True
+DEFAULT_REPLAY_PRE_FAIL_DURATION_SEC = 5.0
 DEFAULT_REPLAY_POST_FAIL_DURATION_SEC = 5.0
 DEFAULT_REPLAY_FPS_FOR_OUTPUT = DEFAULT_FPS # Use camera's default FPS for replay output
 _CAMERA_CONTROLLER_FILE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -122,15 +123,19 @@ class LogitechLedChecker:
             self.enable_instant_replay = GLOBAL_ENABLE_INSTANT_REPLAY_FEATURE
         self.replay_post_failure_duration_sec = replay_post_failure_duration_sec
         self.replay_output_dir = replay_output_dir
-        self.is_recording_replay = False
-        self.replay_buffer = collections.deque()
+        self.is_replay_armed = False
+
+        self.replay_fps = float(DEFAULT_REPLAY_FPS_FOR_OUTPUT)
+        self.replay_pre_fail_duration_sec = DEFAULT_REPLAY_PRE_FAIL_DURATION_SEC
+        replay_buffer_maxlen = int(self.replay_pre_fail_duration_sec * self.replay_fps)
+        self.replay_buffer = collections.deque(maxlen=replay_buffer_maxlen)
+        
         self.replay_start_time = 0.0
         self.replay_method_name = ""
         self.replay_extra_context: Optional[Dict[str, str]] = None
         self.replay_failure_reason = ""
         self.replay_frame_width = None
         self.replay_frame_height = None
-        self.replay_fps = float(DEFAULT_REPLAY_FPS_FOR_OUTPUT) 
 
         if self.enable_instant_replay and self.replay_output_dir:
             try:
@@ -171,10 +176,12 @@ class LogitechLedChecker:
                 raise ValueError(f"ROI for LED '{key}' must be tuple of 4 ints.")
             
         self.stopped = False
-        self.frame_lock = threading.Lock()
-        self.latest_frame: Optional[np.ndarray] = None
-        self.frame_read_ok: bool = False
-
+        # CORRECTED: One lock for the replay buffer, which now contains all data.
+        self.buffer_lock = threading.Lock()
+        
+        # The latest_frame and frame_read_ok attributes are no longer needed
+        # as all access will go through the locked buffer.
+        
         if self.camera_id is None: self.logger.error("Camera ID cannot be None."); return 
         self._initialize_camera()
 
@@ -184,18 +191,32 @@ class LogitechLedChecker:
             self.thread.start()
 
     def _update_frame_thread(self):
-        """Dedicated thread to continuously read frames from the camera."""
-        self.logger.info("Starting background frame-reading thread.")
+        """
+        CORRECTED: This thread now continuously processes frames and populates
+        the replay buffer with full state information, independent of the main thread.
+        """
+        self.logger.info("Starting background frame-reading and processing thread.")
         while not self.stopped:
             if self.cap and self.cap.isOpened():
                 ret, frame = self.cap.read()
-                with self.frame_lock:
-                    self.frame_read_ok = ret
-                    self.latest_frame = frame
+                if not ret:
+                    continue # Skip processing if frame read fails
+
+                # --- Processing is now done in the background thread ---
+                detected_led_states = {}
+                for led_key, config_item in self.led_configs.items():
+                    detected_led_states[led_key] = 1 if self._check_roi_for_color(frame, config_item) else 0
+
+                # --- Atomically update the replay buffer ---
+                with self.buffer_lock:
+                    current_capture_time = time.time()
+                    self.replay_buffer.append((current_capture_time, frame.copy(), detected_led_states.copy()))
+                    if self.replay_frame_width is None or self.replay_frame_height is None:
+                        h, w = frame.shape[:2]
+                        self.replay_frame_width, self.replay_frame_height = w, h
             else:
-                # If camera is closed, sleep to prevent a busy-wait loop
                 time.sleep(0.1)
-        self.logger.info("Frame-reading thread has stopped.")
+        self.logger.info("Frame-reading and processing thread has stopped.")
 
     def _initialize_camera(self):
         try:
@@ -278,33 +299,20 @@ class LogitechLedChecker:
         current_match_percentage = matching_pixels / float(total_pixels_in_roi)
         return current_match_percentage >= min_match_percentage
 
-    def _get_current_led_state_from_camera(self, record_for_replay: bool = False) -> Tuple[Optional[np.ndarray], Dict[str, int]]:
+    def _get_current_led_state_from_camera(self) -> Tuple[Optional[np.ndarray], Dict[str, int]]:
         """
-        MODIFIED: Now accepts a 'record_for_replay' flag. It will only add a frame
-        to the replay buffer if this flag is explicitly set to True.
+        CORRECTED: This method is now a lightweight "getter" that safely peeks
+        at the last processed frame from the continuously updated buffer.
         """
-        frame_for_processing = None
-        
-        with self.frame_lock:
-            if not self.frame_read_ok or self.latest_frame is None:
+        with self.buffer_lock:
+            if not self.replay_buffer:
                 return None, {}
-            # Return a direct reference, do not copy here.
-            frame_for_processing = self.latest_frame
-        
-        detected_led_states = {}
-        for led_key, config_item in self.led_configs.items():
-            detected_led_states[led_key] = 1 if self._check_roi_for_color(frame_for_processing, config_item) else 0
-
-        # Only record if explicitly told to
-        if self.is_recording_replay and record_for_replay:
-            current_capture_time = time.time()
-            # The replay buffer MUST get a copy, otherwise all frames in it will point to the same image.
-            self.replay_buffer.append((current_capture_time, frame_for_processing.copy(), detected_led_states.copy()))
-            if self.replay_frame_width is None or self.replay_frame_height is None:
-                h, w = frame_for_processing.shape[:2]
-                self.replay_frame_width, self.replay_frame_height = w, h
-
-        return frame_for_processing, detected_led_states
+            
+            # Get the most recent full reading from the buffer
+            _, last_frame, last_states = self.replay_buffer[-1]
+            
+            # Return a copy to ensure thread safety for consumers of this data
+            return last_frame.copy(), last_states.copy()
 
     def _draw_text_with_background(self, img: np.ndarray, text: str, pos: Tuple[int, int]):
         """
@@ -389,104 +397,118 @@ class LogitechLedChecker:
         return overlay_frame
 
     def _start_replay_recording(self, method_name: str, extra_context: Optional[Dict[str, str]] = None):
+        """
+        MODIFIED: This method now ONLY arms the replay system. It does not set
+        the start time, as that will be anchored to the moment of failure.
+        """
         if not self.enable_instant_replay:
-            self.logger.debug(f"Replay recording not started for method '{method_name}': Instant replay is disabled.")
+            self.logger.debug(f"Replay not armed for '{method_name}': Instant replay is disabled.")
             return
         if not self.replay_output_dir:
-            self.logger.debug(f"Replay recording not started for method '{method_name}': output directory not available.")
+            self.logger.debug(f"Replay not armed for '{method_name}': output directory not available.")
             return
-        if self.is_recording_replay: 
-            self.logger.debug(f"Replay: Recording already active for method '{self.replay_method_name}'. Ignoring start for '{method_name}'.")
+        if self.is_replay_armed:
+            self.logger.debug(f"Replay: System already armed for method '{self.replay_method_name}'. Ignoring start for '{method_name}'.")
             return
 
-        self.is_recording_replay = True
-        self.replay_buffer.clear()
-        self.replay_start_time = time.time()
+        self.is_replay_armed = True
+        # CORRECTED: The start time is no longer set here.
         self.replay_method_name = method_name
         self.replay_extra_context = extra_context.copy() if extra_context else {}
         self.replay_failure_reason = ""
-        self.replay_frame_width = None; self.replay_frame_height = None
+        self.logger.debug(f"Replay system armed for method '{method_name}'.")
 
-    def _save_replay_video(self):
-        if not self.is_recording_replay or not self.replay_buffer or not self.replay_output_dir:
-            if not self.replay_buffer and self.is_recording_replay: self.logger.debug("Replay: No frames in buffer to save.")
+    def _save_replay_video(self, replay_sequence_to_save: list):
+        """
+        MODIFIED: This method now accepts the full replay sequence as an argument
+        instead of reading directly from the class's replay_buffer. It also
+        logs the number of frames being written.
+        """
+        if not self.is_replay_armed or not replay_sequence_to_save or not self.replay_output_dir:
+            if not replay_sequence_to_save and self.is_replay_armed: self.logger.debug("Replay: No frames in sequence to save.")
             return
+
+        # DEBUG LOG: Log the total number of frames to be written.
+        self.logger.debug(f"Replay: Writing a total of {len(replay_sequence_to_save)} frames to video.")
 
         if self.replay_frame_width is None or self.replay_frame_height is None:
             self.logger.error("Replay: Frame dimensions not set. Cannot save video.")
             return
 
-        # --- MODIFICATION: Generate a unique, timestamped filename ---
-        # Get the current time in a format suitable for a filename.
         timestamp_str = datetime.datetime.now().strftime("%H-%M-%S")
-        
-        # Sanitize the method name just in case it contains characters not suitable for filenames.
         method_name_safe = self.replay_method_name.replace(" ", "_")
-
-        # Create a descriptive and unique filename.
         filename_base = f"replay_{timestamp_str}_{method_name_safe}.mp4"
-        # --- END MODIFICATION ---
-
         filepath = os.path.join(self.replay_output_dir, filename_base)
 
         fourcc = int.from_bytes(b'mp4v', 'little')
         video_writer = None
         try:
-            video_writer = cv2.VideoWriter(filepath, fourcc, self.replay_fps, 
+            video_writer = cv2.VideoWriter(filepath, fourcc, self.replay_fps,
                                            (self.replay_frame_width, self.replay_frame_height))
-            if not video_writer.isOpened(): 
+            if not video_writer.isOpened():
                 self.logger.error(f"Replay: Failed to open VideoWriter for {filepath}."); return
 
-            for frame_capture_time, frame_data, led_state in self.replay_buffer:
+            for frame_capture_time, frame_data, led_state in replay_sequence_to_save:
                 time_in_replay_seconds = frame_capture_time - self.replay_start_time
                 frame_with_overlays = self._draw_overlays(frame_data, time_in_replay_seconds, led_state)
-                
+
                 fh_overlay, fw_overlay = frame_with_overlays.shape[:2]
                 if fw_overlay == self.replay_frame_width and fh_overlay == self.replay_frame_height:
                     video_writer.write(frame_with_overlays)
-                else: 
+                else:
                     self.logger.warning(f"Replay: Overlay frame dimension mismatch. Resizing.")
                     resized_overlay_frame = cv2.resize(frame_with_overlays, (self.replay_frame_width, self.replay_frame_height))
                     video_writer.write(resized_overlay_frame)
-            
-            # Use the new unique filepath in the log message.
+
             self.logger.info(f"Replay: Successfully wrote frames to {filepath}.")
-        except Exception as e: 
+        except Exception as e:
             self.logger.error(f"Replay: Error during video writing for {filepath}: {e}", exc_info=True)
         finally:
             if video_writer: video_writer.release()
 
     def _stop_replay_recording(self, success: bool, failure_reason: str = "unspecified_failure"):
-        if not self.is_recording_replay: return
+        """
+        CORRECTED: Now properly snapshots the pre-roll buffer *before* capturing
+        post-roll footage to prevent data loss.
+        """
+        if not self.is_replay_armed: return
 
-        self.replay_failure_reason = failure_reason.replace("_", " ")
+        if not success:
+            self.replay_failure_reason = failure_reason.replace("_", " ")
+            if self.replay_buffer and self.replay_output_dir:
+                self.replay_start_time = time.time()
+                
+                # CORRECTED LOGIC: Snapshot the pre-roll buffer immediately.
+                pre_roll_footage = list(self.replay_buffer)
+                
+                # DEBUG LOG: Log the number of pre-roll frames captured.
+                self.logger.debug(f"Replay: Failure '{self.replay_failure_reason}'. "
+                                  f"Captured {len(pre_roll_footage)} pre-roll frames. Now recording post-failure.")
 
-        if not success and self.replay_buffer and self.replay_output_dir:
-            self.logger.debug(self.replay_failure_reason)
-            post_failure_start_time = time.time(); frames_after_failure = 0
-            
-            if self.replay_frame_width is None or self.replay_frame_height is None: 
-                self.logger.error("Replay: Frame dimensions not set. Cannot save.");
-                self.is_recording_replay = False; self.replay_buffer.clear(); return
-
-            while time.time() - post_failure_start_time < self.replay_post_failure_duration_sec:
-                frame, led_state_for_frame = self._get_current_led_state_from_camera()
-                if frame is not None:
-                    # The replay buffer expects the frame and states, which our new method provides.
-                    # We just need to add the timestamp.
-                    self.replay_buffer.append((time.time(), frame, led_state_for_frame))
-                    frames_after_failure += 1
-                else:
-                    self.logger.warning("Replay: Failed to capture frame during post-failure recording.")
-                time.sleep(1.0 / self.replay_fps if self.replay_fps > 0 else 0.01) 
-
-            self._save_replay_video() 
+                post_roll_footage = []
+                post_failure_start_time = time.time()
+                while time.time() - post_failure_start_time < self.replay_post_failure_duration_sec:
+                    frame, detected_led_states = self._get_current_led_state_from_camera()
+                    # The main buffer continues to update, but we don't care about it anymore for this save.
+                    if frame is not None:
+                        # We append to our temporary post-roll list.
+                        post_roll_footage.append((time.time(), frame.copy(), detected_led_states))
+                    time.sleep(1.0 / self.replay_fps if self.replay_fps > 0 else 0.01)
+                
+                # DEBUG LOG: Log the number of post-roll frames captured.
+                self.logger.debug(f"Replay: Captured {len(post_roll_footage)} post-roll frames.")
+                
+                full_replay_sequence = pre_roll_footage + post_roll_footage
+                
+                self._save_replay_video(full_replay_sequence)
+            else:
+                self.logger.debug("Failure occurred, but no replay will be saved (buffer empty or output dir not set).")
         
-        self.replay_buffer.clear()
-        self.is_recording_replay = False
+        # Disarm the system. The main circular buffer continues to run.
+        self.is_replay_armed = False
         self.replay_method_name = ""
         self.replay_failure_reason = ""
-        self.replay_extra_context = None 
+        self.replay_extra_context = None
 
     def _matches_state(self, current_state: dict, target_state: dict, fail_leds: Optional[List[str]] = None) -> bool:
         if not current_state: return False
@@ -519,23 +541,23 @@ class LogitechLedChecker:
 
     def _handle_state_change_logging(self, current_state_dict: dict, current_time: float,
                                      last_state_info: list, reason: str = "") -> bool:
+        # CORRECTED: All replay-related logic has been removed from this function.
+        # Its only responsibility is to log state changes to the console/log file.
+        # Frame buffering is now handled exclusively and continuously by _get_current_led_state_from_camera.
         prev_state_dict, prev_state_timestamp = last_state_info
         if prev_state_dict is None: 
-            last_state_info[0] = current_state_dict; last_state_info[1] = current_time
-            # Record the very first frame for context
-            if self.is_recording_replay: self._get_current_led_state_from_camera(record_for_replay=True)
+            last_state_info[0] = current_state_dict
+            last_state_info[1] = current_time
             return False 
         
         logged_change = False
         if current_state_dict != prev_state_dict:
-            # Only record frames when the LED state actually changes
-            if self.is_recording_replay: self._get_current_led_state_from_camera(record_for_replay=True)
-
             duration = current_time - prev_state_timestamp
             if duration >= MIN_LOGGABLE_STATE_DURATION:
                 self.logger.info(f"{self._format_led_display_string(prev_state_dict)} ({duration:.2f}s)")
                 logged_change = True
-            last_state_info[0] = current_state_dict; last_state_info[1] = current_time
+            last_state_info[0] = current_state_dict
+            last_state_info[1] = current_time
         return logged_change
         
     def _log_final_state(self, last_state_info: list, end_time: float, reason_suffix: str = ""):
@@ -566,8 +588,9 @@ class LogitechLedChecker:
             initial_capture_time = time.time()
             if clear_buffer: self._clear_camera_buffer()
             
-            # This call will record the first frame for the replay automatically
-            _, initial_leds_for_log = self._get_current_led_state_from_camera(record_for_replay=self.is_recording_replay)
+            # CORRECTED: The call no longer takes a 'record_for_replay' argument.
+            # The continuous buffer is always active.
+            _, initial_leds_for_log = self._get_current_led_state_from_camera()
             if not initial_leds_for_log: initial_leds_for_log = {} 
             last_state_info = [initial_leds_for_log, initial_capture_time]
 
@@ -577,7 +600,7 @@ class LogitechLedChecker:
                 while time.time() - overall_start_time < timeout:
                     current_time = time.time()
                     
-                    # This call is now very cheap and does not record to replay
+                    # This call is correct, as it was already updated.
                     _, current_leds = self._get_current_led_state_from_camera()
                     
                     if not current_leds: 
@@ -586,7 +609,6 @@ class LogitechLedChecker:
                         time.sleep(0.01) # Minimal sleep for empty frames
                         continue
                     
-                    # This now implicitly records frames for replay only on state change
                     self._handle_state_change_logging(current_leds, current_time, last_state_info)
 
                     if self._matches_state(current_leds, state, fail_leds):
@@ -620,7 +642,7 @@ class LogitechLedChecker:
 
         if manage_replay: self._stop_replay_recording(success=success_flag, failure_reason=failure_detail)
         return success_flag
-
+    
     def confirm_led_solid_strict(self, state: dict, minimum: float, clear_buffer: bool = True,
                                  manage_replay: bool = True, replay_extra_context: Optional[Dict[str, str]] = None) -> bool:
         method_name = "confirm_led_solid_strict"
@@ -746,7 +768,8 @@ class LogitechLedChecker:
                         if time.time()-pattern_start_time > overall_timeout: 
                             failure_detail=f"timeout_find_step_{current_step_idx+1}"; success_flag=False; break
                         
-                        _, current_leds = self._get_current_led_state_from_camera() # No replay recording here
+                        # CORRECTED: This call is now simple and part of the continuous buffering.
+                        _, current_leds = self._get_current_led_state_from_camera()
                         
                         if not current_leds:
                             time.sleep(0.001) # Tiny sleep to yield CPU if no frame is ready
@@ -766,8 +789,9 @@ class LogitechLedChecker:
                             self.logger.info(f"{target_state_str} 0.00s ({current_step_idx + 1:02d}/{len(pattern):02d}) - Skipped (0 dur)"); current_step_idx+=1; continue
                         failure_detail=f"step_{current_step_idx+1}_never_detected_logic_{target_state_str.replace(' ','_')}"; success_flag=False; break
                     
-                    # Once the step is seen, we must log it and record the frame
-                    self._get_current_led_state_from_camera(record_for_replay=True)
+                    # CORRECTED: The explicit call to record the frame is removed.
+                    # The frame that matched the step was already added to the buffer
+                    # by the _get_current_led_state_from_camera() call in the loop above.
 
                     while True: 
                         if time.time()-pattern_start_time > overall_timeout: 
@@ -786,8 +810,9 @@ class LogitechLedChecker:
                                 self.logger.info(f"{target_state_str}  {held_time:.2f}s+ ({current_step_idx + 1:02d}/{len(pattern):02d})")
                                 current_step_idx+=1; break 
                         else:
-                            # State changed! Log this moment for the replay.
-                            self._get_current_led_state_from_camera(record_for_replay=True)
+                            # CORRECTED: The explicit call to record the frame is removed.
+                            # The frame with the changed state was already added to the buffer
+                            # by the _get_current_led_state_from_camera() call at the start of this loop.
                             
                             if held_time >= min_d_check:
                                 self.logger.info(f"{target_state_str}  {held_time:.2f}s ({current_step_idx + 1:02d}/{len(pattern):02d})")
@@ -815,7 +840,7 @@ class LogitechLedChecker:
         
         if manage_replay: self._stop_replay_recording(success=success_flag, failure_reason=failure_detail)
         return success_flag
-
+    
     def await_and_confirm_led_pattern(self, pattern: list, timeout: float, clear_buffer: bool = True,
                                       manage_replay: bool = True, replay_extra_context: Optional[Dict[str, str]] = None) -> bool:
         method_name = "await_and_confirm_led_pattern"
@@ -846,9 +871,14 @@ class LogitechLedChecker:
         self.stopped = True
         if hasattr(self, 'thread') and self.thread.is_alive():
             self.thread.join(timeout=1.0) # Wait for thread to exit cleanly
-        if self.is_recording_replay:
-            self.logger.info("Replay: Active recording stopped due to camera release. Discarding buffered frames.")
-            self.replay_buffer.clear(); self.is_recording_replay = False 
+        
+        # MODIFIED: Check the renamed flag.
+        if self.is_replay_armed:
+            self.logger.info("Replay: System was armed when camera released. Discarding potential replay.")
+            self.is_replay_armed = False
+        
+        self.replay_buffer.clear()
+
         if self.cap and self.cap.isOpened(): self.cap.release(); self.logger.info(f"Camera ID {self.camera_id} released.")
         else: self.logger.debug(f"Camera ID {self.camera_id} was not open or already released.")
         self.cap = None; self.is_camera_initialized = False
