@@ -40,7 +40,7 @@ global_at_logger = logging.getLogger("GlobalATController")
 # --- IMPORT CONTROLLERS AND FSM ---
 try:
     from controllers.unified_controller import UnifiedController
-    from controllers.flight_control_fsm import DeviceUnderTest, ApricornDeviceFSM, TestSession
+    from controllers.finite_state_machine import DeviceUnderTest, ApricornDeviceFSM, TestSession
     from utils.pin_generator import PINGenerator
 except ImportError as e_uc_import:
     global_at_logger.critical(f"Import Error for UnifiedController or FSM: {e_uc_import}. Ensure paths are correct.", exc_info=True)

@@ -18,6 +18,10 @@ class MockUnifiedController:
     def __getattr__(self, name):
         def method(*args, **kwargs): return True
         return method
+    
+class MockTestSession:
+    """A mock class to satisfy the FSM's type hint for its session."""
+    pass
 
 def create_diagram(machine_instance, filename, title=""):
     """
@@ -63,7 +67,8 @@ def build_transition_label(transition_config: Dict[str, Any]) -> str:
 if __name__ == "__main__":
     os.environ['FSM_DIAGRAM_MODE'] = 'true'
 
-    from controllers.flight_control_fsm import ApricornDeviceFSM
+    # <<< FIX: Import TestSession for type casting >>>
+    from controllers.finite_state_machine import ApricornDeviceFSM, TestSession
     from transitions.extensions import GraphMachine
     from controllers.unified_controller import UnifiedController
     from typing import cast
@@ -74,9 +79,11 @@ if __name__ == "__main__":
 
     print("\nInitializing original FSM to access its configuration...")
     mock_at = MockUnifiedController()
-    fsm_config_source = ApricornDeviceFSM(at_controller=cast(UnifiedController, mock_at))
-
-    # --- START OF REVISED LOGIC ---
+    mock_session = MockTestSession()
+    fsm_config_source = ApricornDeviceFSM(
+        at_controller=cast(UnifiedController, mock_at),
+        session_instance=cast(TestSession, mock_session)
+    )
 
     # 1. Build and generate the complete, detailed diagram
     print("\nCreating a new FSM instance for the full detailed diagram...")

@@ -1,13 +1,13 @@
 # Directory: tests/
-# Filename: test_phidget_controller.py
+# Filename: test_phidget_board.py
 
 #############################################################
 ##
 ## This test file is designed to systematically cover every function
-## in hardware/phidget_controller.py.
+## in controllers/phidget_board.py.
 ##
 ## Run this test with the following command:
-## pytest tests/test_phidget_controller.py --cov=hardware.phidget_controller --cov-report term-missing
+## pytest tests/test_phidget_board.py --cov=controllers.phidget_board --cov-report term-missing
 ##
 #############################################################
 
@@ -17,7 +17,7 @@ import time
 from unittest.mock import patch, MagicMock, call, ANY
 from typing import cast
 # We must import the module we are testing
-from hardware.phidget_controller import PhidgetController, PhidgetException, ErrorCode
+from controllers.phidget_board import PhidgetController, PhidgetException, ErrorCode
 from Phidget22.Devices.DigitalOutput import DigitalOutput
 
 
@@ -61,10 +61,10 @@ TEST_SCRIPT_MAP_CONFIG = {
 TEST_DEVICE_CONFIGS = { "main": {"serial_number": 12345}, "fail_phidget": {"serial_number": 67890}, "remote_phidget": {"serial_number": 54321, "is_remote": True}, "hub_device": { "serial_number": 99999, "is_hub_port_device": True, "hub_port": 3, "parent_serial_number": 88888 } }
 
 # --- Test Suite ---
-@patch('hardware.phidget_controller.DigitalInput', new=MockDigitalInput)
-@patch('hardware.phidget_controller.DigitalOutput', new=MockDigitalOutput)
-@patch('hardware.phidget_controller.PhidgetException', new=PhidgetException)
-@patch('hardware.phidget_controller.ErrorCode', new=ErrorCode)
+@patch('controllers.phidget_board.DigitalInput', new=MockDigitalInput)
+@patch('controllers.phidget_board.DigitalOutput', new=MockDigitalOutput)
+@patch('controllers.phidget_board.PhidgetException', new=PhidgetException)
+@patch('controllers.phidget_board.ErrorCode', new=ErrorCode)
 class TestPhidgetController(unittest.TestCase):
 
     def setUp(self):
@@ -142,7 +142,7 @@ class TestPhidgetController(unittest.TestCase):
             
             # Create a mock PhidgetException
             test_exception = PhidgetException(ErrorCode.EPHIDGET_UNEXPECTED)
-            test_exception.description = "A hardware error occurred"
+            test_exception.description = "A controllers error occurred"
 
             # Patch the setState method on the specific mock instance to raise the exception
             with patch.object(out1_ch, 'setState', side_effect=test_exception):

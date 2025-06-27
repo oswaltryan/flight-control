@@ -1,5 +1,5 @@
-# Directory: camera
-# Filename: camera_controller.py
+# Directory: controllers
+# Filename: logitech_webcam.py
 #!/usr/bin/env python3
 
 import time
@@ -14,7 +14,7 @@ from typing import Dict, Optional, List, Tuple, Any # For type hinting
 import threading
 
 
-# Get the logger for this module. Its name will be 'camera.camera_controller'.
+# Get the logger for this module. Its name will be 'controllers.logitech_webcam'.
 # Configuration (handlers, level, format) comes from the global setup.
 logger = logging.getLogger(__name__)
 
@@ -466,6 +466,30 @@ class LogitechLedChecker:
             self._remove_key_from_replay,
             [key_name]
         ).start()
+
+    def start_key_press_for_replay(self, key_name: str):
+        """
+        NEW: Adds a key to the active set for an indefinite hold (for use with on()).
+        This is thread-safe.
+        """
+        if not self.enable_instant_replay:
+            return
+        
+        with self.active_keys_lock:
+            self.active_keys_for_replay.add(key_name)
+        self.logger.debug(f"Replay Overlay: Started persistent press for '{key_name}'.")
+
+    def stop_key_press_for_replay(self, key_name: str):
+        """
+        NEW: Removes a key from the active set to end an indefinite hold (for use with off()).
+        This is thread-safe.
+        """
+        if not self.enable_instant_replay:
+            return
+            
+        with self.active_keys_lock:
+            self.active_keys_for_replay.discard(key_name)
+        self.logger.debug(f"Replay Overlay: Stopped persistent press for '{key_name}'.")
 
     def _start_replay_recording(self, method_name: str, extra_context: Optional[Dict[str, str]] = None):
         """

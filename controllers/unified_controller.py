@@ -22,15 +22,15 @@ if PROJECT_ROOT not in sys.path:
 module_logger = logging.getLogger(__name__)
 
 try:
-    from hardware.phidget_controller import PhidgetController, DEFAULT_SCRIPT_CHANNEL_MAP_CONFIG
-    from camera.camera_controller import (
+    from controllers.phidget_board import PhidgetController, DEFAULT_SCRIPT_CHANNEL_MAP_CONFIG
+    from controllers.logitech_webcam import (
         LogitechLedChecker, 
         DEFAULT_DURATION_TOLERANCE_SEC as CAMERA_DEFAULT_TOLERANCE,
         DEFAULT_REPLAY_POST_FAIL_DURATION_SEC as CAMERA_DEFAULT_REPLAY_DURATION, 
     )
-    from hardware.barcode_scanner import BarcodeScanner
+    from controllers.barcode_scanner import BarcodeScanner
     from Phidget22.PhidgetException import PhidgetException
-    from camera.led_dictionaries import LEDs
+    from utils.led_states import LEDs
     from usb_tool import find_apricorn_device
     from transitions import EventData
 except ImportError as e_import:
@@ -105,34 +105,38 @@ class UnifiedController:
     def on(self, *channel_names: str):
         if not self._phidget_controller: self.logger.error("Phidget not initialized for 'on' command."); return
         for channel_name in channel_names:
+            # Visualize the start of the press
+            if self._camera_checker:
+                self._camera_checker.start_key_press_for_replay(channel_name)
+            # Perform the physical action
             self._phidget_controller.on(channel_name)
     def off(self, *channel_names: str):
         if not self._phidget_controller: self.logger.error("Phidget not initialized for 'off' command."); return
         for channel_name in channel_names:
+            # Visualize the end of the press
+            if self._camera_checker:
+                self._camera_checker.stop_key_press_for_replay(channel_name)
+            # Perform the physical action
             self._phidget_controller.off(channel_name)
     def hold(self, channel_name: str, duration_ms: float = 200):
         if not self._phidget_controller: self.logger.error("Phidget not init for 'hold'."); return
+        if self._camera_checker:
+            self._camera_checker.log_key_press_for_replay(channel_name, duration_s=duration_ms / 1000.0)
         self._phidget_controller.hold(channel_name, duration_ms)
     def press(self, channel_or_channels: Union[str, List[str]], duration_ms: float = 100):
         if not self._phidget_controller: self.logger.error("Phidget not init for 'press'."); return
-        
-        # NEW: Log key press(es) to the camera for replay overlay
         if self._camera_checker:
             keys_to_log = [channel_or_channels] if isinstance(channel_or_channels, str) else channel_or_channels
             for key in keys_to_log:
                 self._camera_checker.log_key_press_for_replay(key, duration_s=duration_ms / 1000.0)
-
         self._phidget_controller.press(channel_or_channels, duration_ms=duration_ms)
     def sequence(self, pin_sequence: List[Any], press_duration_ms: float = 100, pause_duration_ms: float = 100):
         if not self._phidget_controller: self.logger.error("Phidget not init for 'sequence'."); return
-
-        # NEW: Log key presses to the camera for replay overlay
         if self._camera_checker:
             for item in pin_sequence:
                 keys_to_log = [item] if isinstance(item, str) else item
                 for key in keys_to_log:
                     self._camera_checker.log_key_press_for_replay(key, duration_s=press_duration_ms / 1000.0)
-        
         self._phidget_controller.sequence(pin_sequence, press_ms=press_duration_ms, pause_ms=pause_duration_ms)
     def read_input(self, channel_name: str) -> Optional[bool]:
         if not self._phidget_controller: self.logger.error("Phidget not init for 'read_input'."); return None

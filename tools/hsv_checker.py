@@ -20,7 +20,7 @@ logger = logging.getLogger("HSV_Checker")
 # --- Import Project Modules & Constants ---
 try:
     from controllers.unified_controller import UnifiedController
-    from camera.camera_controller import (
+    from controllers.logitech_webcam import (
         LogitechLedChecker,
         OVERLAY_TEXT_COLOR_MAIN,
         OVERLAY_LED_INDICATOR_OFF_COLOR,

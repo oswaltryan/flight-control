@@ -18,10 +18,9 @@ import logging
 import json
 import subprocess
 import os
-
+import importlib
 from controllers.unified_controller import UnifiedController
 import controllers.unified_controller as unified_controller_module
-
 
 @pytest.fixture
 def mock_dependencies():
@@ -58,53 +57,53 @@ class TestUnifiedController:
         assert e.value.code == 1
         assert "Initialization scan failed" in caplog.text
 
-    def test_critical_error_on_failed_import(self, monkeypatch, caplog):
+    def test_critical_error_on_failed_import(self, monkeypatch):
         """
-        GIVEN a core dependency cannot be imported within unified_controller.py's
-              top-level import block
-        WHEN the unified_controller module is loaded
-        THEN a critical error should be logged and the ImportError should be re-raised.
+        Tests that a top-level ImportError in unified_controller.py is
+        caught, logged, and re-raised. This test works by temporarily removing
+        a class from a dependency module, causing 'from...import' to fail.
         """
         # --- ARRANGE ---
-        # Ensure the module we want to test is not in the cache, so its top-level
-        # import logic will be re-executed when we try to import it again.
-        if 'controllers.unified_controller' in sys.modules:
-            del sys.modules['controllers.unified_controller']
+        # We must get a direct handle to the dependency module that has already
+        # been loaded by pytest during test discovery.
+        import controllers.phidget_board as phidget_module_to_break
 
-        # To reliably cause an ImportError that unified_controller.py's
-        # 'except ImportError' block will catch, we set one of its direct
-        # dependencies in sys.modules to None. This simulates a prior failed
-        # import for that dependency, causing it to raise ImportError when
-        # unified_controller tries to import it.
-        dependency_to_break = 'hardware.phidget_controller' # Target a module imported in the try block
-        monkeypatch.setitem(sys.modules, dependency_to_break, None)
+        # The module under test must be reloaded to trigger its import logic again.
+        module_to_reload = 'controllers.unified_controller'
+
+        # CRITICAL STEP: Temporarily delete the 'PhidgetController' class from the
+        # already-loaded phidget_controller module. This will cause the
+        # `from controllers.phidget_controller import PhidgetController` line
+        # to raise an ImportError.
+        monkeypatch.delattr(phidget_module_to_break, 'PhidgetController')
+        
+        # We must also clear the module we are about to reload from the cache.
+        if module_to_reload in sys.modules:
+            del sys.modules[module_to_reload]
 
         # --- ACT & ASSERT ---
-        # Set the log level to capture CRITICAL messages from module_logger
-        # FIX: Pass the logger's name (string) instead of the logger object.
-        with caplog.at_level(logging.CRITICAL, logger=unified_controller_module.__name__):
-            # We now expect the import of unified_controller to fail
-            # because its dependency is "broken".
+        # We patch the logger at its source to reliably intercept the call.
+        with patch('logging.getLogger') as mock_get_logger:
+            mock_logger_instance = MagicMock()
+            mock_get_logger.return_value = mock_logger_instance
+            
+            # Now, when we import unified_controller, it will find the phidget_controller
+            # module but will fail to find the PhidgetController class inside it.
             with pytest.raises(ImportError) as excinfo:
-                # Attempt to re-import the module to trigger its top-level code
-                import controllers.unified_controller 
+                import controllers.unified_controller
 
-        # After the exception is caught, we verify the log contents.
-        assert "Critical Import Error in unified_controller.py" in caplog.text
-        assert "Check paths and dependencies" in caplog.text
-        # Verify that the re-raised exception is an ImportError (or subclass)
-        # The original error was because excinfo.type is a class (ModuleNotFoundError), not an instance.
-        # ModuleNotFoundError is a subclass of ImportError. Use issubclass() for class checks.
+        # Verify the exception was caught and logged as expected.
+        mock_logger_instance.critical.assert_called_once()
+        call_args, call_kwargs = mock_logger_instance.critical.call_args
+        assert "Critical Import Error" in call_args[0]
+        assert call_kwargs.get('exc_info') is True
         assert issubclass(excinfo.type, ImportError)
 
-        # --- CLEANUP (important for subsequent tests) ---
-        # Remove the 'broken' dependency from sys.modules so it can be imported normally later
-        if dependency_to_break in sys.modules:
-            del sys.modules[dependency_to_break]
-        # Remove unified_controller itself from sys.modules if it got partially loaded,
-        # to ensure clean state for other tests.
-        if 'controllers.unified_controller' in sys.modules:
-            del sys.modules['controllers.unified_controller']
+        # --- CLEANUP ---
+        # monkeypatch automatically restores the 'PhidgetController' class.
+        # We just need to remove the module we imported for the test.
+        if module_to_reload in sys.modules:
+            del sys.modules[module_to_reload]
 
     def test_initialization_handles_phidget_exception(self, mock_dependencies, caplog):
         """
@@ -206,9 +205,9 @@ class TestUnifiedController:
             # Test case for 'sequence'
             (
                 "sequence",
-                ([1, 2, 3],),
+                (['key1', 'key2', 'key3'],), # <<< FIX: Use strings, not integers
                 {"press_duration_ms": 50, "pause_duration_ms": 75},
-                ([1, 2, 3],),
+                (['key1', 'key2', 'key3'],), # <<< FIX: Match the corrected args
                 {"press_ms": 50, "pause_ms": 75},
                 None
             ),
@@ -320,6 +319,38 @@ class TestUnifiedController:
         mock_camera_instance.confirm_led_solid.assert_not_called()
         assert "Camera not ready" in caplog.text
         assert result is False
+
+    def test_set_keypad_layout_delegation(self, mock_dependencies, caplog):
+        """
+        Tests that set_keypad_layout correctly delegates to the camera checker
+        and handles the case where the camera checker is not available.
+        """
+        # --- SCENARIO 1: Happy Path (camera is available) ---
+        controller = UnifiedController()
+        mock_camera_instance = mock_dependencies["camera"].return_value
+        
+        # GIVEN a sample keypad layout
+        test_layout = [['1', '2'], ['3', '4']]
+        
+        # WHEN the method is called
+        controller.set_keypad_layout(test_layout)
+        
+        # THEN the call should be delegated to the camera checker's method
+        mock_camera_instance.set_keypad_layout.assert_called_once_with(test_layout)
+        
+        # --- SCENARIO 2: Sad Path (camera is not available) ---
+        # Reset the mock for a clean assertion
+        mock_camera_instance.reset_mock()
+        
+        # GIVEN the internal camera checker is None
+        controller._camera_checker = None
+        
+        # WHEN the method is called again
+        controller.set_keypad_layout(test_layout)
+        
+        # THEN the camera checker's method should NOT have been called,
+        # and no error should have been raised.
+        mock_camera_instance.set_keypad_layout.assert_not_called()
 
     def test_run_fio_tests_path_formatting(self, mock_dependencies, monkeypatch):
         """

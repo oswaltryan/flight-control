@@ -46,7 +46,7 @@ display_logger = logging.getLogger("CameraFeedDisplay")
 try:
     # We now import UnifiedController as it orchestrates both camera and Phidgets
     from controllers.unified_controller import UnifiedController
-    from camera.camera_controller import (
+    from controllers.logitech_webcam import (
         PRIMARY_LED_CONFIGURATIONS, # Contains the ROI definitions
         DEFAULT_FPS, # Default FPS for camera if not detected
         # Overlay drawing constants from camera_controller.py
@@ -55,7 +55,7 @@ try:
         OVERLAY_LINE_HEIGHT, OVERLAY_PADDING
     )
     # We'll need access to the internal LogitechLedChecker instance
-    from camera.camera_controller import LogitechLedChecker # Used for type hinting
+    from controllers.logitech_webcam import LogitechLedChecker # Used for type hinting
 
 except ImportError as e_import:
     display_logger.critical(f"Import Error in camera_feed_test.py: {e_import}. Ensure paths are correct and dependencies are installed.", exc_info=True)

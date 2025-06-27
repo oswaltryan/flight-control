@@ -1,5 +1,6 @@
 # Directory: controllers
-# Filename: flight_control_fsm.py
+# Filename: finite_state_machine.py
+#!/usr/bin/env python3
 
 import logging
 import time # For simulating delays if needed
@@ -7,7 +8,7 @@ from typing import List, Dict, Tuple, Any, Optional, Callable, Union # For type 
 import os
 from pprint import pprint
 import json
-from camera.led_dictionaries import LEDs
+from utils.led_states import LEDs
 import subprocess
 import statistics
 import sys

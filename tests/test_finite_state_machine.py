@@ -4,10 +4,10 @@
 #############################################################
 ##
 ## This test file is designed to systematically cover every function
-## in controllers/flight_control_fsm.py.
+## in controllers/finite_state_machine.py.
 ##
 ## Run this test with the following command:
-## pytest tests/test_finite_state_machine.py --cov=controllers.flight_control_fsm --cov-report term-missing
+## pytest tests/test_finite_state_machine.py --cov=controllers.finite_state_machine --cov-report term-missing
 ##
 #############################################################
 
@@ -23,11 +23,11 @@ import sys
 from unittest.mock import patch
 
 # --- Module and Class Imports ---
-from controllers import flight_control_fsm
-from controllers.flight_control_fsm import (
+from controllers import finite_state_machine
+from controllers.finite_state_machine import (
     ApricornDeviceFSM, DeviceUnderTest, TestSession, TransitionCallbackError, CallableCondition
 )
-from camera.led_dictionaries import LEDs
+from utils.led_states import LEDs
 from transitions import Machine as StandardMachine
 
 # Handle optional import for diagramming
@@ -43,10 +43,10 @@ except ImportError:
 @pytest.fixture(autouse=True)
 def ensure_device_properties(monkeypatch):
     """Auto-running fixture to ensure DEVICE_PROPERTIES is always loaded."""
-    json_path = flight_control_fsm._json_path
+    json_path = finite_state_machine._json_path
     with open(json_path, 'r') as f:
         real_properties = json.load(f)
-    monkeypatch.setattr(flight_control_fsm, 'DEVICE_PROPERTIES', real_properties)
+    monkeypatch.setattr(finite_state_machine, 'DEVICE_PROPERTIES', real_properties)
 
 @pytest.fixture
 def mock_at():
@@ -67,14 +67,14 @@ def mock_at():
 @pytest.fixture
 def dut_instance(mock_at):
     """Provides a fresh, clean instance of the DUT for each test."""
-    with patch('controllers.flight_control_fsm.UnifiedController', return_value=mock_at):
+    with patch('controllers.finite_state_machine.UnifiedController', return_value=mock_at):
         dut = DeviceUnderTest(at_controller=mock_at)
     return dut
 
 @pytest.fixture
 def mock_session(mock_at, dut_instance):
     """Provides a fully mocked TestSession for FSM tests."""
-    with patch('controllers.flight_control_fsm.UnifiedController', return_value=mock_at):
+    with patch('controllers.finite_state_machine.UnifiedController', return_value=mock_at):
         session = TestSession(at_controller=mock_at, dut_instance=dut_instance)
     session.log_enumeration = MagicMock()
     session.log_key_press = MagicMock()
@@ -84,7 +84,7 @@ def mock_session(mock_at, dut_instance):
 @pytest.fixture
 def session_instance(mock_at, dut_instance):
     """Provides a real, clean instance of the TestSession for testing its own methods."""
-    with patch('controllers.flight_control_fsm.UnifiedController', return_value=mock_at):
+    with patch('controllers.finite_state_machine.UnifiedController', return_value=mock_at):
         session = TestSession(at_controller=mock_at, dut_instance=dut_instance)
     return session
 
@@ -100,7 +100,7 @@ def fsm(mock_at, dut_instance, mock_session):
 
 # Helper to get the reloaded exception class
 def get_reloaded_exception():
-    return flight_control_fsm.TransitionCallbackError
+    return finite_state_machine.TransitionCallbackError
 
 # =============================================================================
 # === 0. Tests for Module Setup and Helper Classes
@@ -128,7 +128,7 @@ class TestModuleAndHelpers:
     def test_conditional_machine_import(self, monkeypatch, diagram_mode_env, expected_class_name):
         """
         GIVEN a specific FSM_DIAGRAM_MODE environment variable setting
-        WHEN the flight_control_fsm module is reloaded
+        WHEN the finite_state_machine module is reloaded
         THEN the correct Machine class is imported and used.
         """
         # GIVEN: Set or delete the environment variable
@@ -138,11 +138,11 @@ class TestModuleAndHelpers:
             monkeypatch.setenv("FSM_DIAGRAM_MODE", diagram_mode_env)
 
         # WHEN: Reload the module to trigger the conditional import
-        importlib.reload(flight_control_fsm)
+        importlib.reload(finite_state_machine)
 
         # THEN: Inspect the reloaded module to see which class was aliased to 'Machine'
         # We check the class name as a string to avoid object identity issues.
-        assert flight_control_fsm.Machine.__name__ == expected_class_name
+        assert finite_state_machine.Machine.__name__ == expected_class_name
 
 class TestModuleLoading:
     """Tests for failures during module loading."""
@@ -152,7 +152,7 @@ class TestModuleLoading:
         """Test module load failure when JSON file is not found."""
         mock_open.side_effect = FileNotFoundError
         with pytest.raises(FileNotFoundError):
-            importlib.reload(flight_control_fsm)
+            importlib.reload(finite_state_machine)
 
     @patch('builtins.open', new_callable=MagicMock)
     def test_load_config_json_decode_error(self, mock_open, monkeypatch):
@@ -163,14 +163,14 @@ class TestModuleLoading:
         mock_open.return_value.__enter__.return_value = mock_file
         
         with pytest.raises(json.JSONDecodeError):
-            importlib.reload(flight_control_fsm)
+            importlib.reload(finite_state_machine)
             
     @patch('builtins.open', new_callable=MagicMock)
     def test_load_config_unexpected_error(self, mock_open, monkeypatch):
         """Test module load failure on an unexpected exception."""
         mock_open.side_effect = Exception("A random error occurred")
         with pytest.raises(Exception, match="A random error occurred"):
-            importlib.reload(flight_control_fsm)
+            importlib.reload(finite_state_machine)
 
 # =============================================================================
 # === 1. Tests for DeviceUnderTest Class
@@ -785,12 +785,12 @@ class TestApricornDeviceFSM:
         """
         # GIVEN: The environment is set and the FSM module is reloaded to pick it up.
         monkeypatch.setenv("FSM_DIAGRAM_MODE", diagram_mode_env)
-        importlib.reload(flight_control_fsm)
+        importlib.reload(finite_state_machine)
 
         # We patch the Machine class within the FSM's module namespace.
-        with patch('controllers.flight_control_fsm.Machine') as mock_machine_constructor:
+        with patch('controllers.finite_state_machine.Machine') as mock_machine_constructor:
             # WHEN: The FSM is instantiated.
-            fsm_instance = flight_control_fsm.ApricornDeviceFSM(
+            fsm_instance = finite_state_machine.ApricornDeviceFSM(
                 at_controller=mock_at,
                 session_instance=mock_session # Use the mock_session fixture
             )

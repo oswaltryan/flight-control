@@ -1,5 +1,6 @@
-# Directory: hardware
+# Directory: controllers
 # Filename: barcode_scanner.py
+#!/usr/bin/env python3
 
 import sys
 import time

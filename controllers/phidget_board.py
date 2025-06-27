@@ -1,5 +1,5 @@
-# Directory: hardware
-# Filename: phidget_io_controller.py
+# Directory: controllers
+# Filename: phidget_board.py
 #!/usr/bin/env python3
 
 import time
@@ -12,7 +12,7 @@ from Phidget22.PhidgetException import PhidgetException
 from Phidget22.ErrorCode import ErrorCode
 from typing import Optional, List, Any, Union
 
-# Get the logger for this module. Its name will be 'hardware.phidget_io_controller'.
+# Get the logger for this module. Its name will be 'controllers.phidget_board'.
 # Configuration (handlers, level, format) comes from the global setup.
 module_logger = logging.getLogger(__name__)
 

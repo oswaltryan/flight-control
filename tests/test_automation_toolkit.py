@@ -54,9 +54,9 @@ class TestAutomationToolkit:
             at_toolkit.get_pin_generator()
 
     @patch('controllers.unified_controller.UnifiedController')
-    @patch('controllers.flight_control_fsm.DeviceUnderTest')
-    @patch('controllers.flight_control_fsm.TestSession')
-    @patch('controllers.flight_control_fsm.ApricornDeviceFSM')
+    @patch('controllers.finite_state_machine.DeviceUnderTest')
+    @patch('controllers.finite_state_machine.TestSession')
+    @patch('controllers.finite_state_machine.ApricornDeviceFSM')
     @patch('utils.pin_generator.PINGenerator')
     @patch('automation_toolkit.os.makedirs')
     @patch('automation_toolkit.setup_logging')
@@ -198,7 +198,7 @@ class TestAutomationToolkit:
             importlib.reload(at_toolkit)
 
     @patch('controllers.unified_controller.UnifiedController')
-    @patch('controllers.flight_control_fsm.DeviceUnderTest', side_effect=Exception("DUT Fail"))
+    @patch('controllers.finite_state_machine.DeviceUnderTest', side_effect=Exception("DUT Fail"))
     @patch('automation_toolkit.os.makedirs')
     @patch('automation_toolkit.setup_logging')
     def test_creation_failure_of_dut(self, mock_logging, mock_mkdirs, mock_dut, mock_controller):
@@ -210,8 +210,8 @@ class TestAutomationToolkit:
         assert at_toolkit.pin_gen is None
 
     @patch('controllers.unified_controller.UnifiedController')
-    @patch('controllers.flight_control_fsm.DeviceUnderTest')
-    @patch('controllers.flight_control_fsm.TestSession', side_effect=Exception("Session Fail"))
+    @patch('controllers.finite_state_machine.DeviceUnderTest')
+    @patch('controllers.finite_state_machine.TestSession', side_effect=Exception("Session Fail"))
     @patch('automation_toolkit.os.makedirs')
     @patch('automation_toolkit.setup_logging')
     def test_creation_failure_of_session(self, mock_logging, mock_mkdirs, mock_session, mock_dut, mock_controller):
@@ -222,9 +222,9 @@ class TestAutomationToolkit:
         assert at_toolkit.fsm is None
 
     @patch('controllers.unified_controller.UnifiedController')
-    @patch('controllers.flight_control_fsm.DeviceUnderTest')
-    @patch('controllers.flight_control_fsm.TestSession')
-    @patch('controllers.flight_control_fsm.ApricornDeviceFSM', side_effect=Exception("FSM Fail"))
+    @patch('controllers.finite_state_machine.DeviceUnderTest')
+    @patch('controllers.finite_state_machine.TestSession')
+    @patch('controllers.finite_state_machine.ApricornDeviceFSM', side_effect=Exception("FSM Fail"))
     @patch('automation_toolkit.os.makedirs')
     @patch('automation_toolkit.setup_logging')
     def test_creation_failure_of_fsm(self, mock_logging, mock_mkdirs, mock_fsm, mock_session, mock_dut, mock_controller):
@@ -235,7 +235,7 @@ class TestAutomationToolkit:
         assert at_toolkit.fsm is None
 
     @patch('controllers.unified_controller.UnifiedController')
-    @patch('controllers.flight_control_fsm.DeviceUnderTest')
+    @patch('controllers.finite_state_machine.DeviceUnderTest')
     @patch('utils.pin_generator.PINGenerator', side_effect=Exception("PinGen Fail"))
     @patch('automation_toolkit.os.makedirs')
     @patch('automation_toolkit.setup_logging')

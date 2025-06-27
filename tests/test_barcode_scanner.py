@@ -7,20 +7,21 @@
 ## in hardware/barcode_scanner.py.
 ##
 ## Run this test with the following command:
-## pytest tests/test_barcode_scanner.py --cov=hardware.barcode_scanner --cov-report term-missing
+## pytest tests/test_barcode_scanner.py --cov=controllers.barcode_scanner --cov-report term-missing
 ##
 #############################################################
 
 import pytest
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock, patch, call
 import sys
 import threading
 import time
 from pynput import keyboard
-import typing
+import importlib
 
-import hardware.barcode_scanner as barcode_scanner
-from hardware.barcode_scanner import BarcodeScanner
+# Corrected import to match the actual file location
+import controllers.barcode_scanner as barcode_scanner_module
+from controllers.barcode_scanner import BarcodeScanner
 
 
 @pytest.fixture
@@ -29,13 +30,11 @@ def mock_phidget_callback():
         time.sleep(duration_ms / 1000)  # simulate delay
     return MagicMock(side_effect=fake_callback)
 
-@patch("hardware.barcode_scanner.keyboard.Listener")
+@patch("controllers.barcode_scanner.keyboard.Listener")
 def test_successful_scan(mock_listener_class, mock_phidget_callback):
     """
     Simulates a scan that captures characters followed by Enter.
     """
-    from hardware.barcode_scanner import keyboard
-
     # Simulate the listener instance
     listener_instance = MagicMock()
     mock_listener_class.return_value = listener_instance
@@ -73,7 +72,7 @@ def test_successful_scan(mock_listener_class, mock_phidget_callback):
     mock_phidget_callback.assert_called_once_with("barcode", 1000)
 
 
-@patch("hardware.barcode_scanner.keyboard.Listener")
+@patch("controllers.barcode_scanner.keyboard.Listener")
 def test_scan_timeout_returns_none(mock_listener_class, mock_phidget_callback):
     """
     Verifies that a timeout results in a None return and no exception.
@@ -85,74 +84,77 @@ def test_scan_timeout_returns_none(mock_listener_class, mock_phidget_callback):
     mock_listener_class.return_value = mock_listener_instance
 
     scanner = BarcodeScanner(phidget_press_callback=mock_phidget_callback)
-    result = scanner.await_scan(timeout=1)  # must be int, not float
+    result = scanner.await_scan(timeout=1)
 
     assert result is None
     mock_phidget_callback.assert_called_once_with("barcode", 1000)
 
-@patch("hardware.barcode_scanner.msvcrt", create=True)
-@patch("hardware.barcode_scanner.keyboard.Listener")
-def test_flush_buffer_windows(mock_listener_class, mock_msvcrt, mock_phidget_callback):
+@patch("controllers.barcode_scanner.keyboard.Listener")
+def test_flush_buffer_windows(mock_listener_class, mock_phidget_callback):
     """
-    Tests stdin flush on Windows after timeout with no input.
+    Tests stdin flush on Windows. This test is now platform-independent.
     """
+    # GIVEN a simulated Windows environment
+    with patch("sys.platform", "win32"):
+        # AND we reload the module to trigger the 'import msvcrt'
+        importlib.reload(barcode_scanner_module)
+        
+        # AND we patch the msvcrt module that was just "imported"
+        with patch("controllers.barcode_scanner.msvcrt") as mock_msvcrt:
+            listener_instance = MagicMock()
+            mock_listener_class.return_value = listener_instance
+            listener_instance.start.return_value = None
+            listener_instance.stop.return_value = None
+            listener_instance.join.return_value = None
 
-    # Simulate the mock listener
-    listener_instance = MagicMock()
-    mock_listener_class.return_value = listener_instance
-    listener_instance.start.return_value = None
-    listener_instance.stop.return_value = None
-    listener_instance.join.return_value = None
+            # Simulate Windows keystroke buffer has data
+            mock_msvcrt.kbhit.side_effect = [True, True, False]
+            mock_msvcrt.getch.return_value = b'x'
 
-    # Simulate Windows keystroke buffer has data
-    mock_msvcrt.kbhit.side_effect = [True, True, False]
-    mock_msvcrt.getch.return_value = b'x'
+            # WHEN the scanner is used
+            scanner = BarcodeScanner(phidget_press_callback=mock_phidget_callback)
+            result = scanner.await_scan(timeout=1)
 
-    # Call scanner — it should timeout, not block indefinitely
-    scanner = BarcodeScanner(phidget_press_callback=mock_phidget_callback)
-    result = scanner.await_scan(timeout=1)
+            # THEN the buffer flushing logic should be called correctly
+            assert result is None
+            assert mock_phidget_callback.call_count == 1
+            assert mock_msvcrt.getch.call_count == 2
 
-    assert result is None
-    assert mock_phidget_callback.call_count == 1
-    assert mock_msvcrt.getch.call_count == 2
 
 def test_flush_buffer_unix():
-    import sys
-    import time
-    from unittest.mock import MagicMock, patch
-    from hardware.barcode_scanner import BarcodeScanner
+    """
+    Tests stdin flush on Unix-like systems. This test is now platform-independent.
+    """
+    # GIVEN a mock termios module and a simulated Linux environment
+    mock_termios = MagicMock()
+    with patch.dict(sys.modules, {'termios': mock_termios}):
+        with patch("sys.platform", "linux"):
+            # AND we reload the module to trigger the 'import termios'
+            importlib.reload(barcode_scanner_module)
+            from controllers.barcode_scanner import BarcodeScanner
 
-    def fake_callback(name, duration_ms):
-        time.sleep(0.01)
+            with patch("controllers.barcode_scanner.keyboard.Listener") as mock_listener_class:
+                listener_instance = MagicMock()
+                mock_listener_class.return_value = listener_instance
+                listener_instance.start.return_value = None
+                listener_instance.stop.return_value = None
+                listener_instance.join.return_value = None
 
-    mock_phidget_callback = MagicMock(side_effect=fake_callback)
-    listener_instance = MagicMock()
+                mock_phidget_callback = MagicMock()
 
-    with patch("hardware.barcode_scanner.termios", create=True) as mock_termios, \
-         patch("hardware.barcode_scanner.keyboard.Listener") as mock_listener_class, \
-         patch("hardware.barcode_scanner.sys.platform", "linux"):
+                # WHEN the scanner is used
+                scanner = BarcodeScanner(phidget_press_callback=mock_phidget_callback)
+                result = scanner.await_scan(timeout=1)
 
-        mock_termios.tcflush = MagicMock()
-        mock_termios.TCIOFLUSH = MagicMock()
+                # THEN the buffer flushing logic should be called correctly
+                assert result is None
+                mock_termios.tcflush.assert_called_once_with(sys.stdin, mock_termios.TCIOFLUSH)
 
-        mock_listener_class.return_value = listener_instance
-        listener_instance.start.return_value = None
-        listener_instance.stop.return_value = None
-        listener_instance.join.return_value = None
 
-        scanner = BarcodeScanner(phidget_press_callback=mock_phidget_callback)
-        result = scanner.await_scan(timeout=1)
-
-        assert result is None
-        mock_termios.tcflush.assert_called_once_with(sys.stdin, mock_termios.TCIOFLUSH)
-
-@patch("hardware.barcode_scanner.keyboard.Listener")
+@patch("controllers.barcode_scanner.keyboard.Listener")
 def test_scan_complete_event_prevents_extra_keys(mock_listener_class):
     """
-    Ensures that on_press() exits early when scan_complete_event is set,
-    covering this code:
-        if scan_complete_event.is_set():
-            return
+    Ensures that on_press() exits early when scan_complete_event is set.
     """
 
     pressed_keys = []
@@ -171,7 +173,7 @@ def test_scan_complete_event_prevents_extra_keys(mock_listener_class):
     listener_instance.join.return_value = None
 
     def fake_phidget_callback(name, duration_ms):
-        time.sleep(0.05)  # Simulate hardware delay
+        time.sleep(0.05)  # Simulate controllers delay
 
     def simulate_keypresses(cb_dict):
         # Trigger valid scan: "X", "Y", "Z", Enter
@@ -188,7 +190,7 @@ def test_scan_complete_event_prevents_extra_keys(mock_listener_class):
         late_key = MagicMock()
         late_key.char = "E"
         cb_dict["fn"](late_key)
-        pressed_keys.append("E")  # This should be ignored due to early return
+        pressed_keys.append("E")
 
     scanner = BarcodeScanner(phidget_press_callback=fake_phidget_callback)
     result = scanner.await_scan(timeout=1)
@@ -196,7 +198,7 @@ def test_scan_complete_event_prevents_extra_keys(mock_listener_class):
     assert result == "XYZ"
     assert "E" in pressed_keys
 
-@patch("hardware.barcode_scanner.keyboard.Listener")
+@patch("controllers.barcode_scanner.keyboard.Listener")
 def test_key_with_no_char_triggers_attributeerror(mock_listener_class):
     """
     Ensures that the AttributeError handler in on_press() is covered when key.char is missing.
@@ -239,37 +241,45 @@ def test_key_with_no_char_triggers_attributeerror(mock_listener_class):
 
     assert result == "X"
 
-@patch("hardware.barcode_scanner.msvcrt.getch", side_effect=OSError("flush fail"))
-@patch("hardware.barcode_scanner.msvcrt.kbhit", side_effect=[True, False])
-@patch("hardware.barcode_scanner.keyboard.Listener")
-def test_stdin_flush_error_windows(mock_listener_class, mock_kbhit, mock_getch):
+def test_stdin_flush_error_windows(mock_phidget_callback):
     """
-    Triggers an exception in msvcrt.getch() to cover the flush error handler.
+    Triggers an exception during buffer flushing on Windows to test the error handler.
+    This test is now platform-independent.
     """
+    # GIVEN a simulated Windows environment
+    with patch("sys.platform", "win32"):
+        # AND we reload the module to trigger the 'import msvcrt'
+        importlib.reload(barcode_scanner_module)
+        
+        with patch("controllers.barcode_scanner.msvcrt") as mock_msvcrt, \
+             patch("controllers.barcode_scanner.keyboard.Listener") as mock_listener_class:
+            
+            # Configure mocks for the test conditions
+            mock_msvcrt.getch.side_effect = OSError("flush fail")
+            mock_msvcrt.kbhit.side_effect = [True, False]
+            
+            listener_instance = MagicMock()
+            mock_listener_class.return_value = listener_instance
 
-    on_press_wrapper = {}
-    listener_instance = MagicMock()
+            # Wrap the rest of the original test logic
+            def simulate_scan(cb_dict):
+                key = MagicMock(char="Q")
+                cb_dict["fn"](key)
+                enter = keyboard.Key.enter
+                cb_dict["fn"](enter)
 
-    def simulate_listener(on_press):
-        on_press_wrapper["fn"] = on_press
-        return listener_instance
+            on_press_wrapper = {}
+            def simulate_listener(on_press):
+                on_press_wrapper["fn"] = on_press
+                return listener_instance
+            
+            mock_listener_class.side_effect = simulate_listener
+            listener_instance.start.side_effect = lambda: simulate_scan(on_press_wrapper)
 
-    mock_listener_class.side_effect = simulate_listener
-    listener_instance.start.side_effect = lambda: simulate_scan(on_press_wrapper)
-    listener_instance.stop.return_value = None
-    listener_instance.join.return_value = None
+            # WHEN the scanner is used
+            scanner = BarcodeScanner(phidget_press_callback=mock_phidget_callback)
+            result = scanner.await_scan(timeout=1)
 
-    def fake_phidget_callback(name, duration_ms):
-        time.sleep(0.01)
-
-    def simulate_scan(cb_dict):
-        key = MagicMock()
-        key.char = "Q"
-        cb_dict["fn"](key)
-        enter = keyboard.Key.enter
-        cb_dict["fn"](enter)
-
-    scanner = BarcodeScanner(phidget_press_callback=fake_phidget_callback)
-    result = scanner.await_scan(timeout=1)
-
-    assert result == "Q"
+            # THEN the scan should succeed despite the flush error
+            assert result == "Q"
+            mock_msvcrt.getch.assert_called_once()
