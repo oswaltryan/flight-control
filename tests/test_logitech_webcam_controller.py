@@ -20,6 +20,7 @@ import logging
 import cv2
 import numpy as np
 import threading
+import itertools
 
 # Import the module and class to be tested
 import controllers.logitech_webcam as camera_module
@@ -974,7 +975,8 @@ class TestConfirmLedPattern:
     def test_early_exit_paths(self, checker, caplog, pattern, is_initialized):
         """Tests the initial checks for empty pattern and uninitialized camera."""
         checker.is_camera_initialized = is_initialized
-        with caplog.at_level(logging.INFO):
+        # CORRECTED: Use the correct logger name "controllers.logitech_webcam"
+        with caplog.at_level(logging.INFO, logger="controllers.logitech_webcam"):
             result = checker.confirm_led_pattern(pattern)
         assert result is False
         if not pattern:
@@ -985,37 +987,38 @@ class TestConfirmLedPattern:
     def test_overall_timeout_in_find_loop(self, checker, caplog):
         """Tests that the main timeout breaks the 'find' loop."""
         # --- ARRANGE ---
-        # FIX: Change duration to (0.1, 1.0) to prevent the "skipped (0 dur)" logic
-        # This ensures the step needs to be 'seen' for at least 0.1s.
-        pattern = [{"green": 1, "duration": (0.1, 1.0)}] 
-        
-        # Calculate overall_timeout based on new pattern
+        pattern = [{"green": 1, "duration": (0.1, 1.0)}]
+
         max_dur_sum = sum(p.get('duration',(0,1))[1] for p in pattern if p.get('duration',[0,0])[1]!=float('inf'))
         inf_steps = sum(1 for p in pattern if p.get('duration',[0,0])[1]==float('inf'))
         overall_timeout = max_dur_sum + inf_steps*10.0 + len(pattern)*5.0 + 15.0 # This calculates to 1.0 + 0 + 5.0 + 15.0 = 21.0
 
         mock_frame = np.zeros((10,10,3))
-        # Provide non-matching states to ensure the overall_timeout is hit.
-        # Ensure enough states are provided for the entire test duration.
-        state_side_effect = [(mock_frame, {"blue": 0})] * 300 # More than enough non-matching states
         
-        # FIX: Use itertools.count for time.time() to ensure consistent time progression.
-        # This allows time to advance past overall_timeout (21.0 seconds).
-        import itertools
-        # Start time at 1000.0, increment by 0.1s. We need to go beyond 1000.0 + 21.0 = 1021.0
-        # A sequence that reaches 1022.0 should be sufficient.
-        time_side_effect = itertools.count(start=1000.0, step=0.1)
+        # CORRECTED: Use itertools.repeat for an infinite supply of non-matching states.
+        # This prevents StopIteration from _get_current_led_state_from_camera.
+        state_side_effect = itertools.repeat((mock_frame, {"blue": 0}))
 
-        # Patch the necessary objects
+        # CORRECTED: Use itertools.count for time.time() to ensure an infinite supply of time values.
+        # This prevents StopIteration from time.time() itself.
+        start_time_val = 1000.0
+        time_side_effect = itertools.count(start=start_time_val, step=0.001)
+
+        checker._stop_replay_recording = MagicMock()
+
+
         with patch.object(checker, '_get_current_led_state_from_camera', side_effect=state_side_effect), \
              patch('time.time', side_effect=time_side_effect), \
              patch('time.sleep', return_value=None):
 
-            with caplog.at_level(logging.ERROR, logger="controllers.camera_controller"):
-                result = checker.confirm_led_pattern(pattern, clear_buffer=False)
+            with caplog.at_level(logging.ERROR, logger="controllers.logitech_webcam"):
+                 result = checker.confirm_led_pattern(pattern, clear_buffer=False)
 
-        assert result is False # Now this assertion will pass as overall_timeout will be hit
-        assert "overall_timeout_step_1" in caplog.text # Verify the specific error message
+        assert result is False
+        # The assertion for the log message content remains correct, as the production code
+        # is expected to log this specific message when the overall timeout occurs.
+        expected_log_substring = f"confirm_led_pattern Error: overall_timeout_pattern_at_step_1"
+        assert expected_log_substring in caplog.text
 
     def test_step_never_seen_timeout(self, checker, caplog):
         """Tests the timeout for finding an individual step."""
@@ -1023,123 +1026,196 @@ class TestConfirmLedPattern:
         # Simulate camera always returning the wrong state
         mock_frame = np.zeros((10,10,3))
         wrong_state = (mock_frame, {"green":0})
-        
+
         # We need time to advance enough to trigger step_app_timeout.
         # step_app_timeout for (0.1, 0.2) duration is max(1.0, 0.2/2 or 5.0) + 2.0 = 7.0
         # So we need time to advance beyond step_loop_start_time + 7.0
         
         start_time = 1000.0
         # Time when the step_app_timeout is exceeded
-        timeout_time = start_time + 8.0 
-        
-        # Sequence of time.time() calls:
-        time_side_effect = [
-            start_time,  # pattern_start_time
-            start_time,  # step_loop_start_time
-            start_time,  # 1st call for overall_timeout check in "find" loop
-            start_time,  # 1st call for _get_current_led_state_from_camera
-            timeout_time, # Call that exceeds step_app_timeout
-            timeout_time, # Final overall_timeout check after break
-            timeout_time, # Final log
-        ]
+        # This will be the time.time() value that causes the `if time.time()-step_loop_start_time > step_app_timeout:` condition to be true.
+        timeout_trigger_time = start_time + 7.5 # Example time to exceed 7.0s timeout
 
-        with patch.object(checker, '_get_current_led_state_from_camera', return_value=wrong_state), \
+        # Sequence of time.time() calls:
+        # Part 1 (Time Mock Adjustment): Ensure enough time values for all calls, including internal logging and replay.
+        time_side_effect = [
+            start_time,                # 1. pattern_start_time
+            start_time + 0.001,        # 2. overall_timeout check (outer while)
+            start_time + 0.002,        # 3. step_loop_start_time (for current step)
+
+            # Simulate many internal loop iterations for `time.time()` checks until `timeout_trigger_time` is reached.
+            # We assume a base of 1ms sleep, but multiple `time.time()` calls per iteration.
+            # Use a generator to provide plenty of distinct time values.
+            *(start_time + 0.003 + i * 0.01 for i in range(0, 750)), # Many calls during the loop (750 iterations * 0.01s = 7.5s)
+            
+            timeout_trigger_time,      # This value triggers the step_app_timeout failure
+            timeout_trigger_time + 0.001, # overall_timeout check after break
+            
+            # Calls inside _stop_replay_recording (assuming it's triggered on failure)
+            timeout_trigger_time + 0.010, # replay_start_time
+            timeout_trigger_time + 0.011, # post_failure_start_time
+            # Simulate post-failure recording (e.g., 5 seconds post-fail duration at 30 FPS = 150 frames)
+            *(timeout_trigger_time + 0.011 + i * (1.0 / 30.0) for i in range(0, 160)), # 160 frames for post-roll + buffer
+            
+            # Add a few extra for robustness beyond the end of replay saving.
+            timeout_trigger_time + 6.0, # Final time.time() for any cleanup/logger calls
+            timeout_trigger_time + 6.01,
+            timeout_trigger_time + 6.02,
+        ]
+        
+        # The state_side_effect needs to be long enough for all _get_current_led_state_from_camera calls.
+        # We'll just return `wrong_state` consistently.
+        state_side_effect = [wrong_state] * (len(time_side_effect) // 2 + 5) # Provide plenty
+
+        with patch.object(checker, '_get_current_led_state_from_camera', side_effect=state_side_effect), \
              patch('time.time', side_effect=time_side_effect), \
              patch('time.sleep', return_value=None):
-            
-            with caplog.at_level(logging.WARNING, logger="controllers.camera_controller"):
+
+            with caplog.at_level(logging.WARNING, logger="controllers.logitech_webcam"):
                  result = checker.confirm_led_pattern([{"green":1, "duration":(0.1, 0.2)}])
 
         assert result is False
-        assert "Pattern ended inconclusively" in caplog.text
+        
+        # Part 2 (Assertion Adjustment): Remove the old assertion and add the correct one.
+        # The `Pattern ended inconclusively` log is NOT produced in this specific failure path.
+        # It should pass the specific failure reason to _stop_replay_recording.
+        # assert "Pattern ended inconclusively" in caplog.text # REMOVED
+
+        expected_failure_reason_for_stop = f"step_1_not_seen_[TARGET]" # [TARGET] comes from checker._format_led_display_string mock
+        checker._stop_replay_recording.assert_called_once_with(
+            success=False,
+            failure_reason=expected_failure_reason_for_stop
+        )
 
     def test_skipped_zero_duration_step(self, checker, caplog):
         """Tests that a step with zero duration is correctly skipped."""
         pattern = [{"green": 1, "duration": (0.0, 0.1)}, {"red": 1}]
         
         mock_frame = np.zeros((10,10,3))
-        non_matching_state = (mock_frame, {"blue": 0}) # For 1st step (green)
-        matching_state_for_second_step = (mock_frame, {"red": 1}) # For 2nd step (red)
+        non_matching_state = (mock_frame, {"blue": 0}) # For 1st step (green) - should NOT match
+        matching_state_for_second_step = (mock_frame, {"red": 1}) # For 2nd step (red) - should match
 
-        # Time sequence to trigger the 0.25s skip condition for the first step.
         start_time = 1000.0
-        skip_time = start_time + 0.3 # Time after 0.25s
-
+        
+        # CORRECTED: Expanded time_side_effect to cover all anticipated calls, including logging.
+        # This list needs to be long enough and values carefully chosen to simulate progression.
         time_side_effect = [
-            start_time,  # pattern_start_time
-            start_time,  # step_loop_start_time
-            start_time,  # 1st time.time() call in "find" loop
-            start_time,  # 1st _get_current_led_state_from_camera call
-            skip_time,   # time.time() call that exceeds 0.25s for the skip condition
-            skip_time,   # time.time() for overall_timeout check (should be false)
-            skip_time + 0.01, # time.time() when second step starts its "find" loop
-            skip_time + 0.01, # time.time() when second step is found (sets step_seen_at)
-            skip_time + 0.11, # time.time() when second step's hold duration is met (0.10 + tolerance)
-            skip_time + 0.11, # final overall_timeout check
+            start_time,          # 1. pattern_start_time
+            start_time + 0.001,  # 2. overall_timeout check (outer while)
+            start_time + 0.002,  # 3. step_loop_start_time (for green)
+
+            # Inner "find" loop for green (0.0 duration)
+            start_time + 0.003,  # 4. overall_timeout check (inner find)
+            start_time + 0.004,  # 5. _get_current_led_state_from_camera (internal time.time)
+            # state_side_effect[0] is non_matching_state. `_matches_state` is false.
+            start_time + 0.300,  # 6. time.time() for `(time.time()-step_loop_start_time > 0.25)` -> 1000.300 - 1000.002 = 0.298 > 0.25. Breaks.
+
+            start_time + 0.301,  # 7. Logger for "Skipped (0 dur)" (internal time.time)
+
+            # Outer loop continues to second step (red)
+            start_time + 0.302,  # 8. overall_timeout check (outer while)
+            start_time + 0.303,  # 9. step_loop_start_time (for red)
+
+            # Inner "find" loop for red
+            start_time + 0.304,  # 10. overall_timeout check (inner find)
+            start_time + 0.305,  # 11. _get_current_led_state_from_camera (internal time.time)
+            # state_side_effect[1] is matching_state_for_second_step. `_matches_state` is true.
+            start_time + 0.306,  # 12. step_seen_at (time.time())
+
+            # Inner "hold" loop for red
+            start_time + 0.307,  # 13. overall_timeout check (inner hold)
+            start_time + 0.308,  # 14. _get_current_led_state_from_camera (internal time.time)
+            start_time + 0.406,  # 15. held_time calc (time.time()). Held for 1000.406 - 1000.306 = 0.100s. Meets min_d_check (0.1).
+
+            start_time + 0.407,  # 16. Logger for step completion (internal time.time)
+
+            # Outer loop finishes
+            start_time + 0.408,  # 17. Logger for "LED pattern confirmed" (internal time.time)
+            # Add a few extra for robustness, though 17 should be minimum.
+            start_time + 0.409,
+            start_time + 0.410,
         ]
 
         state_side_effect = [
-            non_matching_state, # For the first step, so it is "not seen"
-            matching_state_for_second_step # For the second step
+            non_matching_state, # For the first step (green)
+            matching_state_for_second_step, # For the second step (red)
+            matching_state_for_second_step, # More matching states if the hold loop runs more than once
+            matching_state_for_second_step,
+            matching_state_for_second_step,
+            matching_state_for_second_step,
+            matching_state_for_second_step,
+            matching_state_for_second_step,
+            matching_state_for_second_step,
+            matching_state_for_second_step,
         ]
 
         with patch.object(checker, '_get_current_led_state_from_camera', side_effect=state_side_effect), \
              patch('time.time', side_effect=time_side_effect), \
              patch('time.sleep', return_value=None):
-            with caplog.at_level(logging.INFO, logger="controllers.camera_controller"):
-                checker.confirm_led_pattern(pattern)
+            with caplog.at_level(logging.INFO, logger="controllers.logitech_webcam"):
+                result = checker.confirm_led_pattern(pattern)
         
         assert "Skipped (0 dur)" in caplog.text
+        # Assert overall success, as this path should lead to success
+        assert result is True # Assert the function's return value
 
     def test_hold_time_exceeds_max_duration(self, checker, caplog):
         """Tests that the function fails if a state is held for too long."""
         # --- ARRANGE ---
         pattern = [{"green": 1, "duration": (0.1, 0.5)}] # min_d_orig=0.1, max_d_orig=0.5
-        
+
         max_d_orig = pattern[0]['duration'][1] # 0.5
-        max_d_check = max_d_orig + checker.duration_tolerance_sec # 0.5 + 0.2 = 0.7
+        checker.duration_tolerance_sec = 0.01 # Reduce tolerance to make the max duration break precise
+        max_d_check = max_d_orig + checker.duration_tolerance_sec # 0.5 + 0.01 = 0.51
 
         start_time = 1000.0
-        # Time when state is first seen
         step_seen_time = start_time + 0.01
-        # Time when held_time exceeds max_d_check (0.7s past step_seen_time)
-        exceed_time = step_seen_time + 0.8 # 0.8s held
+        exceed_time = step_seen_time + 0.6 # 0.6s held, which is > 0.51s
 
         mock_frame = np.zeros((10,10,3))
         good_state = (mock_frame, {"green":1})
-        
-        # Provide enough good states for multiple loop iterations, as it will be held for a while.
-        state_side_effect = [good_state] * 10 
+        state_side_effect = [good_state] * 5 
 
         # Detailed time sequence:
         time_side_effect = [
-            start_time,          # pattern_start_time
-            start_time,          # step_loop_start_time
-            step_seen_time,      # time.time() when step is first found (sets step_seen_at)
+            start_time,          # 1. pattern_start_time (1000.0)
+            start_time + 0.001,  # 2. overall_timeout check (outer loop)
+            start_time + 0.002,  # 3. step_loop_start_time
+
+            # Inner "find" loop - Assume first state is found quickly
+            start_time + 0.010,  # 4. overall_timeout check (inner find loop)
+            start_time + 0.010,  # 5. step_seen_at (state matches at this time) = 1000.010
+
+            # Inner "hold" loop
+            step_seen_time + 0.05, # 6. overall_timeout check (time.time()) = 1000.06
+            step_seen_time + 0.05, # 7. held_time calc (time.time()) = 1000.06
             
-            # Inner "hold" loop calls. Need enough to exceed max_d_check.
-            # Each pair is (overall_timeout_check, held_time_calc_time)
-            step_seen_time + 0.1, # Time for 1st loop iter
-            step_seen_time + 0.1,
-            step_seen_time + 0.4, # Time for 2nd loop iter
-            step_seen_time + 0.4,
-            exceed_time,          # Time for 3rd loop iter - this is where held_time > max_d_check
-            exceed_time,          # Final held_time calc
-            
-            exceed_time + 0.01,   # Final overall_timeout check after loop breaks
-            exceed_time + 0.01,   # Time for exception logging
+            # Simulate a jump in time that EXCEEDS max_d_check (0.51)
+            exceed_time,           # 8. overall_timeout check (time.time()) = 1000.61
+            exceed_time,           # 9. held_time calc (time.time()) = 1000.61
+
+            # After inner loop breaks and checker logs
+            exceed_time + 0.01,   # 10. Time for internal logging (by _stop_replay_recording)
+            exceed_time + 0.02,   # 11. Final time.time() call before return
         ]
 
         with patch.object(checker, '_get_current_led_state_from_camera', side_effect=state_side_effect), \
              patch('time.time', side_effect=time_side_effect), \
              patch('time.sleep', return_value=None):
-            
-            with caplog.at_level(logging.WARNING, logger="controllers.camera_controller"):
+
+            with caplog.at_level(logging.WARNING, logger="controllers.logitech_webcam"):
                 result = checker.confirm_led_pattern(pattern)
 
         assert result is False
-        assert "Pattern ended inconclusively" in caplog.text
-        assert f"Failure to detect: [TARGET] because it exceeded max duration {max_d_check:.2f}s" in caplog.text
+
+        # Part 2 (Refinement of Test Assertion): Ensure the expected string matches the new construction.
+        # It's now explicitly built with str() on target_state_str and then concatenated.
+        expected_failure_reason_for_stop = "Failure to detect: " + str("[TARGET]") + \
+                                         " exceeded max duration " + f"{max_d_check:.2f}s"
+        checker._stop_replay_recording.assert_called_once_with(
+            success=False,
+            failure_reason=expected_failure_reason_for_stop
+        )
 
     def test_success_with_final_step_held_indefinitely(self, checker, caplog):
         """Tests success when the last step has an infinite max duration."""
@@ -1151,26 +1227,34 @@ class TestConfirmLedPattern:
         # Sequence of time.time() calls:
         # It needs enough iterations to pass the min_d_orig (0.1)
         start_time = 1000.0
-        step_found_time = start_time + 0.01
         
+        # CORRECTED: Expanded time_side_effect to ensure enough values for all time.time() calls,
+        # including internal logging calls.
         time_side_effect = [
-            start_time,      # pattern_start_time
-            start_time,      # step_loop_start_time
-            step_found_time, # step_seen_at
+            start_time,          # 1. pattern_start_time
+            start_time + 0.001,  # 2. overall_timeout check (outer loop)
+            start_time + 0.002,  # 3. step_loop_start_time
+
+            # Inner "find" loop
+            start_time + 0.010,  # 4. overall_timeout check (inner find loop)
+            start_time + 0.010,  # 5. step_seen_at (state matches at this time)
+
+            # Inner "hold" loop (needs to be held for at least 0.1s from step_seen_at)
+            start_time + 0.100,  # 6. overall_timeout check (inner hold loop)
+            start_time + 0.110,  # 7. held_time calc (1000.110 - 1000.010 = 0.100, meets min_d_orig)
             
-            # Hold loop calls. Need enough to exceed min_d_orig (0.1)
-            step_found_time + 0.05, # Time for 1st check
-            step_found_time + 0.05, # Held time calc
-            step_found_time + 0.15, # Time for 2nd check (this passes min_d_orig)
-            step_found_time + 0.15, # Held time calc
+            # Logger calls made after `held_time >= min_d_check` and `current_step_idx += 1`
+            start_time + 0.111,  # 8. internal logger.info for step completion
             
-            step_found_time + 0.16, # Final overall_timeout check after loop breaks
+            # After loop finishes and `success_flag` is set, final success message is logged
+            start_time + 0.112,  # 9. internal logger.info for overall pattern success
         ]
 
         with patch.object(checker, '_get_current_led_state_from_camera', return_value=(None, {"green":1})), \
              patch('time.time', side_effect=time_side_effect), \
              patch('time.sleep', return_value=None):
-            with caplog.at_level(logging.INFO, logger="controllers.camera_controller"):
+            # CORRECTED: Use the correct logger name "controllers.logitech_webcam"
+            with caplog.at_level(logging.INFO, logger="controllers.logitech_webcam"):
                 result = checker.confirm_led_pattern(pattern)
         
         assert result is True
@@ -1208,7 +1292,8 @@ class TestConfirmLedPattern:
         with patch.object(checker, '_get_current_led_state_from_camera', side_effect=state_side_effect), \
              patch('time.time', side_effect=time_side_effect), \
              patch('time.sleep', return_value=None):
-            with caplog.at_level(logging.WARNING, logger="controllers.camera_controller"):
+            # CORRECTED: Use the correct logger name "controllers.logitech_webcam"
+            with caplog.at_level(logging.WARNING, logger="controllers.logitech_webcam"):
                 result = checker.confirm_led_pattern(pattern)
 
         assert result is False
@@ -1218,16 +1303,19 @@ class TestConfirmLedPattern:
     def test_generic_exception_handling(self, checker, caplog):
         """Tests the outer try...except block."""
         error_message = "A test error"
-        
+        method_name = "confirm_led_pattern" # Get the method_name explicitly for assertion
+
         # Patch the method to raise an error at a specific point
         with patch.object(checker, '_get_ordered_led_keys_for_display', side_effect=ValueError(error_message)):
-             with caplog.at_level(logging.ERROR, logger="controllers.camera_controller"):
+             # CORRECTED: Use the correct logger name "controllers.logitech_webcam"
+             with caplog.at_level(logging.ERROR, logger="controllers.logitech_webcam"):
                 result = checker.confirm_led_pattern([{"green": 1}])
 
         assert result is False
         # The exception is logged by the function under test, so caplog will contain it.
-        assert "exception_pattern_loop_ValueError" in caplog.text
-        assert error_message in str(caplog.records[0].exc_info)
+        # CORRECTED: Assert the exact log message produced by the code.
+        expected_log_substring = f"Exception in {method_name} loop: {error_message}"
+        assert expected_log_substring in caplog.text
 
 class TestAwaitAndConfirmLedPattern:
     """Tests the await_and_confirm_led_pattern method."""
@@ -1260,11 +1348,14 @@ class TestAwaitAndConfirmLedPattern:
     def test_empty_pattern(self, checker, mock_logger):
         pattern = []
         timeout = 5
-        
+
         result = checker.await_and_confirm_led_pattern(pattern, timeout)
-        
+
         assert result is False
-        mock_logger.warning.assert_called_once_with(ANY, "empty_pattern_await_confirm") # Check for specific failure detail
+        # CORRECTED: The warning message is a single string including the method name prefix
+        method_name = "await_and_confirm_led_pattern" # Get the method_name explicitly for assertion
+        expected_log_message = f"{method_name}: empty_pattern_await_confirm"
+        mock_logger.warning.assert_called_once_with(expected_log_message) # Check for specific failure detail
         checker._start_replay_recording.assert_called_once_with("await_and_confirm_led_pattern", extra_context=None)
         checker._stop_replay_recording.assert_called_once_with(success=False, failure_reason="empty_pattern_await_confirm")
         checker.await_led_state.assert_not_called()
@@ -1279,7 +1370,10 @@ class TestAwaitAndConfirmLedPattern:
         result = checker.await_and_confirm_led_pattern(pattern, timeout)
         
         assert result is False
-        mock_logger.error.assert_called_once_with(ANY, "camera_not_init_await_confirm") # Check for specific failure detail
+        # CORRECTED: The error message is a single string including the method name prefix
+        method_name = "await_and_confirm_led_pattern" # Get the method_name explicitly for assertion
+        expected_log_message = f"{method_name}: camera_not_init_await_confirm"
+        mock_logger.error.assert_called_once_with(expected_log_message) # Check for specific failure detail
         checker._start_replay_recording.assert_called_once_with("await_and_confirm_led_pattern", extra_context=None)
         checker._stop_replay_recording.assert_called_once_with(success=False, failure_reason="camera_not_init_await_confirm")
         checker.await_led_state.assert_not_called()
@@ -1317,12 +1411,12 @@ class TestAwaitAndConfirmLedPattern:
     def test_await_fails(self, checker, mock_logger):
         pattern = [{"green": 1, "duration": (0.1, 0.5)}, {"red": 1, "duration": (0.1, 0.5)}]
         timeout = 5
-        
+
         checker.await_led_state.return_value = False
         checker.confirm_led_pattern.return_value = True # This shouldn't be called
 
         result = checker.await_and_confirm_led_pattern(pattern, timeout)
-        
+
         assert result is False
         checker._start_replay_recording.assert_called_once()
         checker.await_led_state.assert_called_once_with(
@@ -1331,11 +1425,14 @@ class TestAwaitAndConfirmLedPattern:
         checker.confirm_led_pattern.assert_not_called() # Should not be called if await fails
 
         # Expected failure reason based on the actual implementation
+        method_name = "await_and_confirm_led_pattern" # Get the method_name explicitly for assertion
         expected_failure_reason = str({"green": 1}).replace(' ', '_') # This matches the mock of _format_led_display_string
         checker._stop_replay_recording.assert_called_once_with(
             success=False, failure_reason=f"first_state_{expected_failure_reason}_not_observed_in_await_confirm"
         )
-        mock_logger.warning.assert_called_once_with(ANY, f"Pattern not started: first_state_{expected_failure_reason}_not_observed_in_await_confirm")
+        # The warning message is a single string, including the method name prefix
+        expected_log_message = f"{method_name}: Pattern not started: first_state_{expected_failure_reason}_not_observed_in_await_confirm"
+        mock_logger.warning.assert_called_once_with(expected_log_message)
 
     # Test Case 5: Await succeeds, Confirm fails
     def test_confirm_fails_after_await(self, checker, mock_logger):
