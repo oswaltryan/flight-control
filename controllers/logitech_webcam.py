@@ -610,7 +610,7 @@ class LogitechLedChecker:
         for led, expected_value in target_state.items():
             if current_state.get(led, 0) != expected_value: return False 
         return True 
-
+    
     def _get_ordered_led_keys_for_display(self) -> List[str]:
         if self._ordered_keys_for_display_cache is None:
             if self.explicit_display_order:
@@ -658,6 +658,146 @@ class LogitechLedChecker:
             duration = end_time - state_timestamp
             if duration >= MIN_LOGGABLE_STATE_DURATION:
                 self.logger.info(f"{self._format_led_display_string(state_dict)} ({duration:.2f}s{reason_suffix})")
+
+    def _process_pattern_step(self, step_cfg: dict, ordered_keys: List[str], overall_timeout_end_time: float, step_idx: int, total_steps: int) -> Tuple[bool, str]:
+        """
+        Processes a single step in an LED pattern sequence: finds the state and confirms its duration.
+
+        Args:
+            step_cfg: Dictionary defining the target state and duration for this step.
+            ordered_keys: Ordered list of LED keys for consistent display string formatting.
+            overall_timeout_end_time: The absolute time at which the entire pattern check should timeout.
+            step_idx: The 0-based index of the current step.
+            total_steps: The total number of steps in the pattern.
+
+        Returns:
+            A tuple (success: bool, failure_reason: str).
+        """
+        target_state_for_step = {k: v for k, v in step_cfg.items() if k != 'duration'}
+        min_d_orig, max_d_orig = step_cfg.get('duration', (0, float('inf')))
+        min_d_check = min_d_orig
+        max_d_check = max_d_orig + self.duration_tolerance_sec if max_d_orig != float('inf') else float('inf')
+        target_state_str = self._format_led_display_string(target_state_for_step, ordered_keys)
+
+        self.logger.debug(f"Pattern step {step_idx + 1}/{total_steps}: Awaiting '{target_state_str}' (min {min_d_orig:.2f}s, max {max_d_orig:.2f}s)")
+
+        # --- Phase 1: Find the target state for this step ---
+        step_seen_at = None
+        step_find_start_time = time.time()
+        
+        # Determine the maximum time to wait for the step to *appear*.
+        step_appearance_timeout = max(1.0, max_d_orig if max_d_orig != float('inf') else 5.0) + 2.0
+        
+        # For a 0.0 duration first step, allow a brief moment for it to appear/be skipped
+        if step_idx == 0 and min_d_orig == 0.0:
+            step_appearance_timeout = 0.5 
+        
+        # Ensure we don't exceed the overall pattern timeout
+        current_step_find_timeout_end_time = min(overall_timeout_end_time, time.time() + step_appearance_timeout)
+
+        while time.time() < current_step_find_timeout_end_time:
+            _, current_leds = self._get_current_led_state_from_camera()
+            if not current_leds:
+                time.sleep(0.001)
+                continue
+            if self._matches_state(current_leds, target_state_for_step):
+                step_seen_at = time.time()
+                break
+            time.sleep(0.001)
+
+        if step_seen_at is None:
+            # Special handling for initial 0-duration step not found
+            if step_idx == 0 and min_d_orig == 0.0:
+                self.logger.info(f"Pattern step {step_idx + 1}/{total_steps}: '{target_state_str}' (0.00s) - Not present but 0 duration. Continuing.")
+                return True, "" # Treat as a skip/pass for 0-duration first step not seen
+            return False, f"step_{step_idx+1}_not_seen_{target_state_str.replace(' ','_')}"
+        
+        self.logger.debug(f"Pattern step {step_idx + 1}/{total_steps}: '{target_state_str}' detected. Confirming duration.")
+
+        # --- Phase 2: Confirm the state holds for the required duration ---
+        held_time = None
+        while time.time() < overall_timeout_end_time:
+            current_time = time.time()
+            held_time = current_time - step_seen_at
+            
+            _, current_leds = self._get_current_led_state_from_camera()
+            if not current_leds:
+                time.sleep(0.001)
+                continue
+            
+            if self._matches_state(current_leds, target_state_for_step):
+                # Check for max duration violation first
+                if max_d_check != float('inf') and held_time > max_d_check:
+                    return False, f"step_{step_idx+1}_exceeded_max_duration_held_{held_time:.2f}s_max_{max_d_orig:.2f}s"
+                
+                # Check if minimum duration is met
+                if held_time >= min_d_check:
+                    self.logger.info(f"Pattern step {step_idx + 1}/{total_steps}: '{target_state_str}' held for {held_time:.2f}s.")
+                    return True, "" # Success for this step
+            else: # State changed early
+                if held_time >= min_d_check:
+                    self.logger.info(f"Pattern step {step_idx + 1}/{total_steps}: '{target_state_str}' held for {held_time:.2f}s (state changed but min duration met).")
+                    return True, "" # Success for this step, as minimum was met
+                elif held_time >= (min_d_orig - self.duration_tolerance_sec):
+                    self.logger.warning(f"Pattern step {step_idx + 1}/{total_steps}: '{target_state_str}' held for {held_time:.2f}s. Shorter than required {min_d_orig:.2f}s but within tolerance. Passing.")
+                    return True, "" # Pass due to tolerance
+                else:
+                    current_led_str = self._format_led_display_string(current_leds, ordered_keys)
+                    return False, f"step_{step_idx+1}_state_{target_state_str.replace(' ','_')}_changed_to_{current_led_str.replace(' ','_')}_early_held_{held_time:.2f}s_min_{min_d_orig:.2f}s"
+            
+            time.sleep(0.001) # Small sleep to prevent busy-waiting
+
+        # If the loop finishes without success or failure (i.e., hit overall_timeout_end_time), it's a timeout.
+        return False, f"timeout_hold_step_{step_idx+1}_held_{held_time:.2f}s"
+
+    def _await_state_appearance(self, target_state: Dict[str, int], timeout_end_time: float, 
+                               fail_leds: Optional[List[str]] = None, 
+                               last_state_info_for_logging: Optional[List[Any]] = None,
+                               description: str = "target state") -> Tuple[bool, Optional[float], str]:
+        """
+        Waits for a specific LED state to appear within a given timeout, optionally failing on other LEDs.
+        Manages internal state logging if last_state_info_for_logging is provided.
+
+        Args:
+            target_state: The LED state dictionary to wait for.
+            timeout_end_time: The absolute time by which the state must appear.
+            fail_leds: List of LED names that, if ON, should cause an immediate failure.
+            last_state_info_for_logging: A mutable list [state_dict, timestamp] for logging state changes.
+                                         If None, no detailed state change logging occurs.
+            description: A human-readable description of the state for logging.
+
+        Returns:
+            Tuple: (success: bool, time_state_appeared: Optional[float], failure_reason: str)
+        """
+        while time.time() < timeout_end_time:
+            current_time = time.time()
+            
+            _, current_leds = self._get_current_led_state_from_camera()
+            
+            if last_state_info_for_logging is not None:
+                self._handle_state_change_logging(current_leds, current_time, last_state_info_for_logging)
+
+            if not current_leds:
+                time.sleep(0.001) # Yield CPU if no frame is ready
+                continue
+            
+            if fail_leds:
+                for led_name in fail_leds:
+                    if current_leds.get(led_name, 0) == 1:
+                        actual_state_str = self._format_led_display_string(current_leds)
+                        self.logger.warning(f"Failed to await '{description}': Prohibited LED '{led_name}' is ON. Current: {actual_state_str}")
+                        return False, None, f"prohibited_led_{led_name}_on"
+
+            if self._matches_state(current_leds, target_state):
+                # Only log specific "target observed" message here, not state progression
+                self.logger.debug(f"Awaited '{description}': state {self._format_led_display_string(target_state)} observed.")
+                return True, current_time, "" # Success
+            
+            time.sleep(0.001) # Small sleep to prevent busy-waiting if state is not found immediately
+
+        if last_state_info_for_logging is not None:
+            self._log_final_state(last_state_info_for_logging, time.time(), reason_suffix=f" at timeout for {description}")
+        return False, None, f"timeout_await_{description.replace(' ','_')}"
 
     # --- Public methods remain unchanged ---
     def confirm_led_solid(self, state: dict, minimum: float = 2, timeout: float = 10,
@@ -800,31 +940,31 @@ class LogitechLedChecker:
         formatted_target_state = self._format_led_display_string(state)
         self.logger.info(f"Awaiting LED state {formatted_target_state}, timeout {timeout:.2f}s")
         if not self.is_camera_initialized:
-            failure_detail="camera_not_init_await"; self.logger.error(f"{method_name}: {failure_detail}")
+            failure_detail = "camera_not_init_await"
+            self.logger.error(f"{method_name}: {failure_detail}")
         else:
-            last_state_info = [None, 0.0]
             if clear_buffer: self._clear_camera_buffer()
-            _, initial_leds = self._get_current_led_state_from_camera() # Refactored call
-            initial_leds = initial_leds or {}
-            last_state_info = [initial_leds, time.time()]
-            await_start_time = time.time()
-            try:
-                while time.time() - await_start_time < timeout:
-                    current_time = time.time()
-                    _, current_leds = self._get_current_led_state_from_camera() # Refactored call
-                    if not current_leds: self._handle_state_change_logging({}, current_time, last_state_info); time.sleep(0.1); continue
-                    self._handle_state_change_logging(current_leds, current_time, last_state_info)
-                    if self._matches_state(current_leds, state, fail_leds):
-                        if last_state_info[0] == current_leds and (current_time - last_state_info[1] >= MIN_LOGGABLE_STATE_DURATION): self.logger.info(f"{self._format_led_display_string(last_state_info[0])} ({current_time - last_state_info[1]:.2f}s when target observed)")
-                        elif last_state_info[0] != current_leds: self.logger.info(f"{self._format_led_display_string(current_leds)} (0.00s+ when target observed)")
-                        self.logger.info(f"Target state {formatted_target_state} observed."); success_flag=True; break
-                    # time.sleep(1 / self.replay_fps if self.replay_fps > 0 else 0.1)
-                    time.sleep(0.001)
-                if not success_flag:
-                    self._log_final_state(last_state_info, time.time(), reason_suffix=" at timeout")
-                    failure_detail=f"timeout_await_{formatted_target_state.replace(' ','_')}"; self.logger.warning(f"Timeout: {formatted_target_state} not observed.")
-            except Exception as e_await_loop:
-                failure_detail=f"exception_await_loop_{type(e_await_loop).__name__}"; self.logger.error(f"Exception in {method_name} loop: {e_await_loop}", exc_info=True); success_flag=False
+            
+            # Initialize state logging info for the helper
+            _, initial_leds = self._get_current_led_state_from_camera()
+            last_state_info_for_logging = [initial_leds or {}, time.time()]
+
+            await_timeout_end_time = time.time() + timeout
+            success_flag, _, reason = self._await_state_appearance(
+                state,
+                await_timeout_end_time,
+                fail_leds=fail_leds,
+                last_state_info_for_logging=last_state_info_for_logging, # Pass the logging info
+                description=f"await {formatted_target_state}"
+            )
+            failure_detail = reason # If not successful, reason will contain the failure detail
+
+            if success_flag:
+                # _await_state_appearance will have already logged the transition;
+                # just log the overall success of the await call if needed.
+                self.logger.info(f"Target state {formatted_target_state} observed.")
+            else:
+                self.logger.warning(f"Timeout: {formatted_target_state} not observed. Reason: {failure_detail.replace('_', ' ')}")
 
         if manage_replay: self._stop_replay_recording(success=success_flag, failure_reason=failure_detail)
         return success_flag
@@ -836,111 +976,50 @@ class LogitechLedChecker:
         success_flag, failure_detail = False, "unknown_pattern_failure"
 
         if not pattern:
-            failure_detail="empty_pattern"
+            failure_detail = "empty_pattern"
             self.logger.warning(f"{method_name}: {failure_detail}")
         elif not self.is_camera_initialized:
-            failure_detail="camera_not_init_pattern"
+            failure_detail = "camera_not_init_pattern"
             self.logger.error(f"{method_name}: {failure_detail}")
         else:
             try:
-                if clear_buffer: self._clear_camera_buffer()
+                if clear_buffer:
+                    self._clear_camera_buffer()
                 ordered_keys = self._get_ordered_led_keys_for_display()
-                current_step_idx = 0
-                max_dur_sum = sum(p.get('duration',(0,1))[1] for p in pattern if p.get('duration',[0,0])[1]!=float('inf'))
-                inf_steps = sum(1 for p in pattern if p.get('duration',[0,0])[1]==float('inf'))
-                overall_timeout = max_dur_sum + inf_steps*10.0 + len(pattern)*5.0 + 15.0
+
+                # Calculate overall timeout for the entire pattern
+                max_dur_sum = sum(p.get('duration', (0, 1))[1] for p in pattern if p.get('duration', [0, 0])[1] != float('inf'))
+                inf_steps = sum(1 for p in pattern if p.get('duration', [0, 0])[1] == float('inf'))
+                # Add a generous buffer for each step and overall operation
+                overall_timeout = max_dur_sum + (inf_steps * 10.0) + (len(pattern) * 5.0) + 15.0
                 pattern_start_time = time.time()
+                overall_timeout_end_time = pattern_start_time + overall_timeout
+                
+                self.logger.info(f"Starting pattern confirmation of {len(pattern)} steps. Overall timeout: {overall_timeout:.2f}s")
 
-                while current_step_idx < len(pattern):
-                    if time.time()-pattern_start_time > overall_timeout:
-                        failure_detail=f"overall_timeout_step_{current_step_idx+1}"; self.logger.error(f"{method_name} Error: {failure_detail}"); success_flag=False; break
+                for current_step_idx, step_cfg in enumerate(pattern):
+                    if time.time() > overall_timeout_end_time:
+                        failure_detail = f"overall_timeout_pattern_at_step_{current_step_idx+1}"
+                        self.logger.error(f"{method_name} Error: {failure_detail}")
+                        success_flag = False
+                        break
 
-                    step_cfg = pattern[current_step_idx]; target_state_for_step = {k:v for k,v in step_cfg.items() if k!='duration'}
-                    min_d_orig, max_d_orig = step_cfg.get('duration', (0, float('inf')))
-                    min_d_check = min_d_orig
-                    max_d_check = max_d_orig + self.duration_tolerance_sec if max_d_orig != float('inf') else float('inf')
-                    target_state_str = self._format_led_display_string(target_state_for_step, ordered_keys)
+                    step_success, step_failure_reason = self._process_pattern_step(
+                        step_cfg, ordered_keys, overall_timeout_end_time, current_step_idx, len(pattern)
+                    )
 
-                    step_seen_at = None; step_loop_start_time = time.time()
-                    while True:
-                        if time.time()-pattern_start_time > overall_timeout:
-                            failure_detail=f"timeout_find_step_{current_step_idx+1}"; success_flag=False; break
+                    if not step_success:
+                        failure_detail = step_failure_reason
+                        success_flag = False
+                        break # Break from pattern loop on first step failure
+                else: # All steps completed successfully
+                    success_flag = True
+                    self.logger.info(f"{method_name}: LED pattern confirmed successfully.")
 
-                        _, current_leds = self._get_current_led_state_from_camera()
-
-                        if not current_leds:
-                            time.sleep(0.001) # Tiny sleep to yield CPU if no frame is ready
-                            continue
-                        if self._matches_state(current_leds, target_state_for_step): step_seen_at=time.time(); break
-                        if current_step_idx==0 and min_d_orig==0.0 and (time.time()-step_loop_start_time > 0.25): break
-                        step_app_timeout = max(1.0, max_d_orig/2 if max_d_orig!=float('inf') else 5.0) + 2.0
-                        if time.time()-step_loop_start_time > step_app_timeout:
-                            failure_detail=f"step_{current_step_idx+1}_not_seen_{target_state_str.replace(' ','_')}"; success_flag=False; break
-
-                        time.sleep(0.001) # 1ms sleep to prevent 100% CPU usage.
-
-                    if success_flag is False and failure_detail != "unknown_pattern_failure": break
-
-                    if step_seen_at is None:
-                        if current_step_idx==0 and min_d_orig==0.0:
-                            self.logger.info(f"{target_state_str} 0.00s ({current_step_idx + 1:02d}/{len(pattern):02d}) - Skipped (0 dur)"); current_step_idx+=1; continue
-                        failure_detail=f"step_{current_step_idx+1}_never_detected_logic_{target_state_str.replace(' ','_')}"; success_flag=False; break
-
-                    while True:
-                        if time.time()-pattern_start_time > overall_timeout:
-                            failure_detail=f"timeout_hold_step_{current_step_idx+1}"; success_flag=False; break
-
-                        _, current_leds = self._get_current_led_state_from_camera()
-
-                        if not current_leds:
-                            time.sleep(0.001)
-                            continue
-                        held_time = time.time() - step_seen_at
-                        if self._matches_state(current_leds, target_state_for_step):
-                            # 1. Prioritize check for max_duration failure FIRST.
-                            if max_d_check!=float('inf') and held_time > max_d_check:
-                                # Start of Part 1 Change
-                                # Use direct string concatenation for robustness in unusual f-string scenarios
-                                failure_detail = "Failure to detect: " + str(target_state_str) + \
-                                                 " exceeded max duration " + f"{max_d_check:.2f}s"
-                                # End of Part 1 Change
-                                success_flag=False
-                                break # Break from inner (hold) loop on failure
-                            # 2. If max_duration not exceeded, then check for successful step completion.
-                            elif held_time >= min_d_check:
-                                # Log and advance only if minimum duration is met and max duration was not exceeded
-                                if current_step_idx==len(pattern)-1:
-                                    self.logger.info(f"{target_state_str}  {held_time:.2f}s+ ({current_step_idx + 1:02d}/{len(pattern):02d})")
-                                else:
-                                    self.logger.info(f"{target_state_str}  {held_time:.2f}s ({current_step_idx + 1:02d}/{len(pattern):02d})")
-                                current_step_idx+=1
-                                break # Break from inner (hold) loop on success
-                        else: # current_leds does NOT match target_state_for_step
-                            if held_time >= min_d_check:
-                                self.logger.info(f"{target_state_str}  {held_time:.2f}s ({current_step_idx + 1:02d}/{len(pattern):02d})")
-                                current_step_idx += 1
-                                break
-                            elif held_time >= (min_d_orig - self.duration_tolerance_sec):
-                                self.logger.warning(f"{target_state_str} held for {held_time:.2f}s. Shorter than required {min_d_orig:.2f}s but within tolerance. Passing.")
-                                current_step_idx += 1
-                                break
-                            else:
-                                current_led_str = self._format_led_display_string(current_leds, ordered_keys)
-                                failure_detail=f"step_{current_step_idx+1}_state_{target_state_str.replace(' ','_')}_changed_to_{current_led_str.replace(' ','_')}_early_held_{held_time:.2f}s_min_{min_d_check:.2f}s"; success_flag=False; break
-
-                        time.sleep(0.001)
-                    if success_flag is False and failure_detail != "unknown_pattern_failure": break
-
-                if current_step_idx == len(pattern) and (failure_detail == "unknown_pattern_failure" or success_flag is True):
-                    success_flag = True; self.logger.info(f"{method_name}: LED pattern confirmed")
-                elif failure_detail == "unknown_pattern_failure":
-                    failure_detail = f"pattern_ended_inconclusively_step_{current_step_idx}"
-                    self.logger.warning(f"{method_name}: Pattern ended inconclusively. Processed {current_step_idx}/{len(pattern)} steps. Reason: {failure_detail}")
-                    success_flag = False
             except Exception as e_pattern_loop:
-                failure_detail=f"exception_pattern_loop_{type(e_pattern_loop).__name__}"
+                failure_detail = f"exception_pattern_loop_{type(e_pattern_loop).__name__}"
                 self.logger.error(f"Exception in {method_name} loop: {e_pattern_loop}", exc_info=True)
-                success_flag=False
+                success_flag = False
 
         if manage_replay: self._stop_replay_recording(success=success_flag, failure_reason=failure_detail)
         return success_flag
