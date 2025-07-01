@@ -176,6 +176,45 @@ class TestLogitechLedCheckerInit:
             assert checker.replay_output_dir is None
             mock_logger.error.assert_called_with(ANY, exc_info=True)
         checker.release_camera()
+
+    def test_init_instant_replay_disabled_via_config(self, mock_cv2_videocapture, mock_logger, tmp_path, caplog):
+        """
+        Tests that if instant replay is explicitly disabled via configuration,
+        the output directory is set to None and an info message is logged.
+        """
+        # ARRANGE
+        # Ensure that replay_output_dir would initially be set if not for the disable flag
+        test_replay_dir = str(tmp_path / "replays")
+
+        # To ensure the __init__ doesn't fail on LED config validation
+        dummy_led_configs = {
+            "test_led": {"name": "Test LED", "roi": (0, 0, 1, 1), "hsv_lower": (0, 0, 0),
+                         "hsv_upper": (1, 1, 1), "min_match_percentage": 0.1}
+        }
+
+        with caplog.at_level(logging.INFO, logger="controllers.logitech_webcam"):
+            # ACT
+            checker = LogitechLedChecker(
+                camera_id=0,
+                # REMOVE THIS LINE: logger_instance=mock_logger,
+                enable_instant_replay=False,  # <--- This is the key setting for this test
+                replay_output_dir=test_replay_dir, # This should be overridden to None
+                led_configs=dummy_led_configs
+            )
+
+        # ASSERT
+        # 1. Verify that the enable_instant_replay flag itself is correctly set
+        assert checker.enable_instant_replay is False
+
+        # 2. Verify that replay_output_dir was set to None
+        assert checker.replay_output_dir is None
+
+        # 3. Verify that the correct info message was logged via caplog (as checker now uses global logger)
+        # REMOVE THIS LINE: mock_logger.info.assert_any_call("Instant replay is disabled via configuration.")
+        assert "Instant replay is disabled via configuration." in caplog.text
+
+        # Cleanup
+        checker.release_camera()
         
 class TestLogitechLedCheckerMethods:
     """Tests the various methods of LogitechLedChecker."""
@@ -257,6 +296,1107 @@ class TestLogitechLedCheckerMethods:
         checker.led_configs = {"blue": {}, "amber": {}, "red": {}}
         # 'amber' should be sorted and appended
         assert checker._get_ordered_led_keys_for_display() == ["red", "blue", "amber"]
+
+    @pytest.mark.filterwarnings("ignore:Exception in thread")
+    def test_update_frame_thread_handles_failed_read(self, mock_cv2_videocapture, mock_logger, default_configs, tmp_path):
+        """
+        Tests that the running _update_frame_thread correctly handles a failed
+        frame read by hitting the `continue` statement and not processing the frame.
+        """
+        # ARRANGE
+        good_frame = np.zeros((480, 640, 3), dtype=np.uint8)
+
+        # Use an exception to controllably stop the thread's loop.
+        class StopThread(Exception):
+            pass
+
+        mock_cv2_videocapture.return_value.read.side_effect = [
+            (False, None),      # 1. This triggers `if not ret: continue`
+            (True, good_frame), # 2. This is processed normally.
+            StopThread          # 3. This will break the loop and stop the thread.
+        ]
+
+        # ACT & ASSERT
+        # Patch the method on the CLASS before the instance is created to avoid a race condition.
+        with patch.object(camera_module.LogitechLedChecker, '_check_roi_for_color', return_value=True) as mock_check_roi:
+            # The `with` statement ensures `release_camera()` is also called.
+            with LogitechLedChecker(
+                camera_id=0,
+                logger_instance=mock_logger,
+                led_configs=default_configs,
+                replay_output_dir=str(tmp_path)
+            ) as checker:
+                # Wait for the thread to run through the side_effect list and terminate.
+                checker.thread.join(timeout=1.0)
+
+                # The buffer should only contain the single frame from the successful read.
+                assert len(checker.replay_buffer) == 1
+
+                # The mock that was patched onto the class should have been called for the successful frame.
+                assert mock_check_roi.call_count == 2
+
+        # Assert that read() was called 3 times: fail, success, and the one that raised the exception.
+        assert mock_cv2_videocapture.return_value.read.call_count == 3
+
+    @pytest.mark.filterwarnings("ignore:Exception in thread")
+    def test_update_frame_thread_sleeps_when_camera_not_open(self, mock_cv2_videocapture, mock_logger, default_configs, tmp_path):
+        """
+        Tests that the `else` block in the `_update_frame_thread` is covered by
+        correctly calling `time.sleep(0.1)` when the camera is not opened.
+        """
+        # ARRANGE
+        class StopThread(Exception): pass
+
+        # Configure a sequence for isOpened() to control all calls throughout the
+        # checker's lifecycle: initialization, thread loop, and cleanup.
+        mock_cv2_videocapture.return_value.isOpened.side_effect = [
+            False,      # 1. First call in _initialize_camera (triggers retry)
+            True,       # 2. Second call in _initialize_camera (succeeds)
+            False,      # 3. Thread loop 1: enters 'else' block and calls sleep
+            True,       # 4. Thread loop 2: enters 'if' block and processes frame
+            StopThread, # 5. Thread loop 3: crashes thread to end the test
+            False       # 6. Final call from release_camera() during __exit__
+        ]
+
+        # Configure `read()` to be called only on the successful path.
+        good_frame = np.zeros((480, 640, 3), dtype=np.uint8)
+        mock_cv2_videocapture.return_value.read.return_value = (True, good_frame)
+
+        # ACT & ASSERT
+        # Patch `time.sleep` where it is imported and used: in `controllers.logitech_webcam`.
+        with patch('controllers.logitech_webcam.time.sleep') as mock_sleep:
+            # Patch the ROI check on the class to avoid a race condition.
+            with patch.object(camera_module.LogitechLedChecker, '_check_roi_for_color', return_value=True):
+                # Instantiate the checker, which starts the thread.
+                with LogitechLedChecker(
+                    camera_id=0,
+                    logger_instance=mock_logger,
+                    led_configs=default_configs,
+                    replay_output_dir=str(tmp_path)
+                ) as checker:
+                    # Wait for the thread to complete its sequence and stop.
+                    checker.thread.join(timeout=1.0)
+
+                    # Assert that the `else` block was executed once, calling sleep.
+                    mock_sleep.assert_called_once_with(0.1)
+
+                    # Assert that the `if` block was also executed once by checking the buffer.
+                    assert len(checker.replay_buffer) == 1
+
+        # Final check on how many times the mocked camera methods were called.
+        assert mock_cv2_videocapture.return_value.isOpened.call_count == 6
+        assert mock_cv2_videocapture.return_value.read.call_count == 1
+
+    def test_initialize_camera_with_no_preferred_backend(self, mock_cv2_videocapture, mock_logger, tmp_path):
+        """
+        Tests the `_initialize_camera` `else` branch for when no preferred
+        backend is available, ensuring cv2.VideoCapture is called with one argument.
+        """
+        # ARRANGE
+        # Configure the mock camera to succeed on all operations to isolate the test case.
+        mock_cap = mock_cv2_videocapture.return_value
+        mock_cap.isOpened.return_value = True
+        mock_cap.set.return_value = True
+        mock_cap.get.return_value = 30.0
+
+        # ACT & ASSERT
+        # Patch the helper function to simulate having no preferred backend (returns None).
+        with patch('controllers.logitech_webcam.get_capture_backend', return_value=None):
+            # The 'with' block ensures checker.release_camera() is called.
+            with LogitechLedChecker(
+                camera_id=0,
+                logger_instance=mock_logger,
+                replay_output_dir=str(tmp_path) # Prevent replay warning
+            ) as checker:
+                # 1. Assert the "no backend" path was taken by checking the call signature.
+                #    This is the key assertion for the line under test.
+                mock_cv2_videocapture.assert_called_once_with(0)
+
+                # 2. Assert no warnings were logged about a failing backend, since none was tried.
+                for call_obj in mock_logger.warning.call_args_list:
+                    assert "Preferred backend" not in call_obj.args[0]
+
+                # 3. Assert the rest of the initialization succeeded.
+                assert mock_cap.set.call_count == 3
+                mock_cap.get.assert_called_once_with(cv2.CAP_PROP_FPS)
+                assert checker.is_camera_initialized is True
+
+    @patch('threading.Thread') # This decorator prevents the thread from starting
+    def test_initialize_camera_handles_backend_retry_and_set_failures(self, mock_thread, mock_cv2_videocapture, mock_logger, tmp_path):
+        """
+        Tests the `_initialize_camera` method's `else` branches for when the
+        preferred backend fails (triggering a retry) and when setting
+        camera properties fails.
+        """
+        # ARRANGE
+        # Simulate a two-step camera open process:
+        # 1. First attempt fails (for the preferred backend)
+        # 2. Second attempt succeeds (for the default backend)
+        mock_cap_fail = MagicMock()
+        mock_cap_fail.isOpened.return_value = False
+
+        mock_cap_success = MagicMock()
+        mock_cap_success.isOpened.return_value = True
+        # Configure the `set` method on the *successful* capture object to fail
+        mock_cap_success.set.return_value = False
+        # Configure the `get` method to return a valid number to prevent a TypeError
+        mock_cap_success.get.return_value = 30.0
+
+        # Make the VideoCapture mock return the fail, then success objects
+        mock_cv2_videocapture.side_effect = [mock_cap_fail, mock_cap_success]
+
+        # Define the expected warning calls in the correct order
+        preferred_backend_val = cv2.CAP_DSHOW # A real backend value
+        expected_warnings = [
+            call(f"Preferred backend ({preferred_backend_val}) failed for camera ID 0. Trying default."),
+            call("Failed to set camera width to 640."),
+            call("Failed to set camera height to 480."),
+            call(f"Could not set FPS {camera_module.DEFAULT_FPS} for camera ID 0.")
+        ]
+
+        # ACT & ASSERT
+        # Patch the helper function to *provide* a preferred backend
+        with patch('controllers.logitech_webcam.get_capture_backend', return_value=preferred_backend_val):
+            # The 'with' block ensures checker.release_camera() is called
+            with LogitechLedChecker(
+                camera_id=0,
+                logger_instance=mock_logger,
+                replay_output_dir=str(tmp_path)
+            ) as checker:
+                # 1. Assert that VideoCapture was called twice (initial + retry)
+                assert mock_cv2_videocapture.call_count == 2
+                mock_cv2_videocapture.assert_has_calls([
+                    call(0, preferred_backend_val), # First call with backend
+                    call(0)                         # Second call without (default)
+                ])
+
+                # 2. Assert the `set` and `get` methods were called correctly
+                assert mock_cap_success.set.call_count == 3
+                mock_cap_success.get.assert_called_once_with(cv2.CAP_PROP_FPS)
+
+                # 3. Assert all *four* warning messages were logged correctly
+                mock_logger.warning.assert_has_calls(expected_warnings, any_order=False)
+                assert mock_logger.warning.call_count == 4
+
+                # 4. Assert initialization is now considered successful
+                assert checker.is_camera_initialized is True
+
+    def test_clear_camera_buffer_handles_exception(self, checker, mock_logger):
+        """
+        Tests that the `except` block in _clear_camera_buffer is hit when
+        cap.read() raises an exception, and the error is logged correctly.
+        """
+        # ARRANGE
+        # The `checker` fixture provides an initialized instance with a mocked `cap`.
+        # We configure its `read` method to raise an exception on the first call.
+        error_message = "Simulated hardware read failure"
+        checker.cap.read.side_effect = Exception(error_message)
+
+        # ACT
+        # Call the method under test.
+        checker._clear_camera_buffer()
+
+        # ASSERT
+        # Verify that the logger's error method was called exactly once.
+        mock_logger.error.assert_called_once()
+        
+        # Unpack the call arguments to inspect them individually.
+        # call_args is a tuple: (positional_args, keyword_args)
+        call_args, call_kwargs = mock_logger.error.call_args
+        
+        # Check that the log message is correct.
+        assert f"Exception while clearing camera buffer: {error_message}" in call_args[0]
+        
+        # Check that the exception info was included for debugging.
+        assert call_kwargs.get('exc_info') is True
+
+    def test_get_current_led_state_from_camera_empty_buffer(self, checker):
+        """
+        Tests that _get_current_led_state_from_camera returns (None, {})
+        when the replay buffer is empty.
+        """
+        # ARRANGE
+        # The `checker` fixture provides an initialized instance.
+        # Ensure its replay buffer is empty.
+        checker.replay_buffer.clear()
+
+        # ACT
+        # Call the method under test.
+        frame, states = checker._get_current_led_state_from_camera()
+
+        # ASSERT
+        # Verify that the returned values match the expected empty state.
+        assert frame is None
+        assert states == {}
+
+    @patch('cv2.rectangle')
+    def test_draw_overlays_skips_invalid_led_key(self, mock_rectangle, checker):
+        """
+        Tests that _draw_overlays safely handles and skips a key that is in the
+        display order but not in the led_configs dictionary, hitting the `continue`
+        statement.
+        """
+        # ARRANGE
+        frame = np.zeros((480, 640, 3), dtype=np.uint8)
+        led_states = {"red": 1} # One valid LED state
+        active_keys = set()
+
+        # Patch the helper method to return an order with a non-existent key.
+        # "red" is valid in `default_configs`, "amber" is not.
+        checker._get_ordered_led_keys_for_display = MagicMock(return_value=["red", "amber"])
+
+        # ACT
+        # Call the function. If the `continue` works, this will not raise a KeyError.
+        try:
+            checker._draw_overlays(frame, 1.23, led_states, active_keys)
+        except KeyError:
+            pytest.fail("KeyError was raised. The 'continue' statement was not effective.")
+
+        # ASSERT
+        # The drawing logic for ROIs uses cv2.rectangle.
+        # It should have been called only ONCE for the valid "red" key.
+        # The invalid "amber" key should have been skipped.
+        assert mock_rectangle.call_count == 1
+        
+        # Verify the call was for the 'red' ROI box
+        red_config = checker.led_configs["red"]
+        x, y, w, h = red_config["roi"]
+        mock_rectangle.assert_called_once_with(ANY, (x, y), (x + w, y + h), ANY, 1)
+
+    def test_set_keypad_layout(self, checker, mock_logger):
+        """
+        Tests that set_keypad_layout correctly updates the keypad_layout
+        attribute and logs an informational message.
+        """
+        # ARRANGE
+        sample_layout = [
+            ["Q", "W", "E"],
+            ["A", "S", "D"]
+        ]
+        # The `checker` fixture is already initialized here.
+
+        # Ensure the layout is not set initially. The __init__ sets it to None.
+        assert checker.keypad_layout is None
+
+        # Clear any previous calls made to the mock logger during initialization.
+        mock_logger.reset_mock()
+
+        # ACT
+        checker.set_keypad_layout(sample_layout)
+
+        # ASSERT
+        # 1. Verify the attribute was updated correctly.
+        assert checker.keypad_layout == sample_layout
+
+        # 2. Verify that the correct info message was logged (and only once since we reset).
+        mock_logger.info.assert_called_once_with(
+            "Keypad layout for replay overlays has been set."
+        )
+
+    def test_add_key_to_replay(self, checker):
+        """
+        Tests that _add_key_to_replay correctly adds a key to the
+        active_keys_for_replay set.
+        """
+        # ARRANGE
+        key_to_add = "test_key"
+        # Ensure the key is not in the set initially
+        assert key_to_add not in checker.active_keys_for_replay
+
+        # ACT
+        checker._add_key_to_replay(key_to_add)
+
+        # ASSERT
+        assert key_to_add in checker.active_keys_for_replay
+
+    def test_remove_key_from_replay(self, checker):
+        """
+        Tests that _remove_key_from_replay correctly removes a key from the
+        active_keys_for_replay set.
+        """
+        # ARRANGE
+        key_to_remove = "test_key"
+        # Add the key to the set first so we can test its removal
+        checker.active_keys_for_replay.add(key_to_remove)
+        assert key_to_remove in checker.active_keys_for_replay
+
+        # ACT
+        checker._remove_key_from_replay(key_to_remove)
+
+        # ASSERT
+        assert key_to_remove not in checker.active_keys_for_replay
+        
+        # Test that calling discard on a non-existent key doesn't raise an error
+        try:
+            checker._remove_key_from_replay("non_existent_key")
+        except Exception:
+            pytest.fail("_remove_key_from_replay raised an unexpected exception for a non-existent key.")
+
+    def test_log_key_press_for_replay_disabled(self, checker, monkeypatch):
+        """
+        Tests that log_key_press_for_replay returns early and does not start
+        any timers when the instant replay feature is disabled.
+        """
+        # ARRANGE
+        # Disable the instant replay feature on the checker instance.
+        checker.enable_instant_replay = False
+
+        # Mock threading.Timer to detect if it gets called.
+        mock_timer = MagicMock()
+        monkeypatch.setattr(threading, 'Timer', mock_timer)
+
+        # ACT
+        # Call the function under test.
+        checker.log_key_press_for_replay("some_key", duration_s=1.0)
+
+        # ASSERT
+        # Verify that no Timer was created or started, because the function
+        # should have returned at the initial check.
+        mock_timer.assert_not_called()
+
+    def test_start_key_press_for_replay_disabled(self, checker):
+        """
+        Tests that start_key_press_for_replay returns early and does not add
+        a key when the instant replay feature is disabled.
+        """
+        # ARRANGE
+        # Disable the instant replay feature.
+        checker.enable_instant_replay = False
+        key_name = "test_key"
+
+        # Ensure the set is empty to start with.
+        checker.active_keys_for_replay.clear()
+        
+        # ACT
+        # Call the function under test.
+        checker.start_key_press_for_replay(key_name)
+
+        # ASSERT
+        # Verify that the key was not added to the set, because the function
+        # should have returned at the initial check.
+        assert key_name not in checker.active_keys_for_replay
+
+    def test_stop_key_press_for_replay_disabled(self, checker):
+        """
+        Tests that stop_key_press_for_replay returns early and does not remove
+        a key when the instant replay feature is disabled.
+        """
+        # ARRANGE
+        key_name = "test_key"
+        # Manually add a key to the active set.
+        checker.active_keys_for_replay.add(key_name)
+        assert key_name in checker.active_keys_for_replay
+
+        # Disable the instant replay feature.
+        checker.enable_instant_replay = False
+        
+        # ACT
+        # Call the function under test.
+        checker.stop_key_press_for_replay(key_name)
+
+        # ASSERT
+        # Verify that the key was NOT removed from the set, because the
+        # function should have returned at the initial check.
+        assert key_name in checker.active_keys_for_replay
+
+    @pytest.mark.parametrize("current_state, target_state, fail_leds, expected_result, description", [
+        (
+            {"red": 1, "green": 0},
+            {"green": 0},
+            ["red"],
+            False,
+            "Should fail because 'red' is a fail_led and is ON."
+        ),
+        (
+            {"red": 0, "green": 1},
+            {"green": 1},
+            ["red"],
+            True,
+            "Should succeed because fail_led 'red' is OFF."
+        ),
+        (
+            {"green": 1},
+            {"green": 1},
+            ["red"],
+            True,
+            "Should succeed because fail_led 'red' is not present (defaults to OFF)."
+        ),
+        (
+            {"red": 1, "blue": 1},
+            {"blue": 1},
+            ["green", "red"],
+            False,
+            "Should fail on the second item in the fail_leds list."
+        )
+    ])
+    def test_matches_state_with_fail_leds(self, checker, current_state, target_state, fail_leds, expected_result, description):
+        """
+        Tests the fail_leds logic within the _matches_state helper method.
+        """
+        # ACT
+        result = checker._matches_state(current_state, target_state, fail_leds)
+
+        # ASSERT
+        assert result is expected_result, description
+
+    def test_handle_state_change_logging_initial_state(self, checker, mock_logger):
+        """
+        Tests the initial state handling in _handle_state_change_logging where
+        the previous state is None.
+        """
+        # ARRANGE
+        current_state = {"red": 1, "green": 0}
+        current_time = 1000.0
+        # This is the key part of the setup: the previous state is None.
+        last_state_info = [None, 0.0]
+
+        # FIX: Reset the mock to ignore calls from the fixture's setup.
+        mock_logger.reset_mock()
+
+        # ACT
+        # Call the function under test.
+        result = checker._handle_state_change_logging(current_state, current_time, last_state_info)
+
+        # ASSERT
+        # 1. The function should return False as no state change was "logged".
+        assert result is False
+
+        # 2. The last_state_info list should be updated with the current state and time.
+        assert last_state_info[0] == current_state
+        assert last_state_info[1] == current_time
+
+        # 3. No logging should occur on the first call.
+        mock_logger.info.assert_not_called()
+
+    def test_process_pattern_step_handles_empty_frames(self, checker, mock_logger):
+        """
+        Tests that _process_pattern_step handles empty frames gracefully in both
+        the 'find' and 'hold' phases by hitting the `continue` statements.
+        """
+        # ARRANGE
+        step_config = {"red": 1, "duration": (0.1, 0.5)}
+        ordered_keys = ["red", "green"]
+        timeout = time.time() + 5.0
+
+        # Mock `_get_current_led_state_from_camera` to inject empty frames.
+        empty_state = (None, {})
+        target_state = (None, {"red": 1})
+        checker._get_current_led_state_from_camera = MagicMock(side_effect=[
+            empty_state,    # 1. Skipped in 'find' loop, calls sleep
+            target_state,   # 2. Found, enters 'hold' loop
+            target_state,   # 3. Held, calls loop-end sleep
+            empty_state,    # 4. Skipped in 'hold' loop, calls sleep
+            target_state,   # 5. Held, duration is met, function returns
+        ])
+
+        # Use a generator to provide a continuous stream of time values.
+        start_time = 1000.0
+        time_generator = (start_time + i * 0.05 for i in range(100))
+
+        # Patch time.sleep to verify it's called for the empty frames and loop-ends.
+        with patch('controllers.logitech_webcam.time.sleep') as mock_sleep, \
+             patch('controllers.logitech_webcam.time.time', side_effect=time_generator):
+
+            # ACT
+            success, reason = checker._process_pattern_step(step_config, ordered_keys, timeout, 0, 1)
+
+        # ASSERT
+        assert success is True, f"Step should have succeeded, but failed with: {reason}"
+        assert reason == ""
+
+        # FIX: The correct count is 3 based on the code's execution path.
+        assert mock_sleep.call_count == 3
+        mock_sleep.assert_has_calls([call(0.001)] * 3)
+
+        # Verify the logger was not spammed with warnings or errors.
+        mock_logger.warning.assert_not_called()
+
+    @pytest.mark.parametrize("held_time, min_duration, tolerance, expected_log_level, description", [
+        (1.1, 1.0, 0.2, "info", "State changed AFTER min duration was met"),
+        (0.9, 1.0, 0.2, "warning", "State changed WITHIN tolerance window")
+    ])
+    def test_process_pattern_step_state_changes_after_hold(self, checker, mock_logger,
+                                                         held_time, min_duration, tolerance,
+                                                         expected_log_level, description):
+        """
+        Tests successful outcomes in _process_pattern_step when the state changes
+        after being held, covering both the main success and tolerance success paths.
+        """
+        # ARRANGE
+        step_config = {"red": 1, "duration": (min_duration, 2.0)}
+        ordered_keys = ["red"]
+        overall_timeout = time.time() + 5.0
+        checker.duration_tolerance_sec = tolerance
+
+        # This mock controls the state sequence precisely.
+        target_state = (None, {"red": 1})
+        changed_state = (None, {"red": 0})
+        # We need a generator here too to prevent StopIteration on this mock
+        state_generator = itertools.chain(
+            [target_state],  # To find the state initially
+            itertools.repeat(target_state, 10), # Hold the state for several cycles
+            itertools.repeat(changed_state) # Then change the state indefinitely
+        )
+        checker._get_current_led_state_from_camera = MagicMock(side_effect=state_generator)
+
+        # FIX: Use a time generator to prevent StopIteration on the time mock.
+        start_time = 1000.0
+        # This generator will provide a new, slightly later time on every call.
+        time_generator = itertools.count(start=start_time, step=0.1)
+
+        # We will manually control the time of the crucial "state seen" event
+        # by patching the mock inside the test.
+        time_seen = start_time + 1.0
+        # And the time of the state change
+        time_changed = time_seen + held_time
+
+        # Create a new generator that injects our specific event times.
+        def controlled_time_generator():
+            yield next(time_generator) # step_find_start_time
+            yield next(time_generator) # current_step_find_timeout_end_time calc
+            yield next(time_generator) # 'find' loop time check
+            yield time_seen            # 'find' loop -> step_seen_at = 1001.0
+            
+            # Now, in the 'hold' loop, let time advance until it's time for the change
+            current_time = time_seen
+            while current_time < time_changed:
+                current_time += 0.1
+                yield current_time
+            
+            # Yield the change time and continue indefinitely from there
+            while True:
+                yield time_changed
+        
+        with patch('controllers.logitech_webcam.time.time', side_effect=controlled_time_generator()), \
+             patch('controllers.logitech_webcam.time.sleep'):
+            
+            mock_logger.reset_mock()
+            # ACT
+            success, reason = checker._process_pattern_step(step_config, ordered_keys, overall_timeout, 0, 1)
+
+        # ASSERT
+        assert success is True, description
+        assert reason == "", description
+        
+        # Check that the correct log (info or warning) was called
+        log_method = getattr(mock_logger, expected_log_level)
+        log_method.assert_called_once()
+
+    def test_process_pattern_step_succeeds_when_state_changes_after_min_duration(self, checker, mock_logger):
+        """
+        Tests the specific path where a state is held for the minimum required
+        duration, then changes, which should still result in a success. This
+        specifically covers the `else` block in the 'hold' phase.
+        """
+        # ARRANGE
+        min_duration = 0.5
+        step_config = {"red": 1, "duration": (min_duration, 2.0)}
+        ordered_keys = ["red"]
+        overall_timeout = time.time() + 5.0
+
+        # Control the state sequence: find -> then immediately change
+        target_state = (None, {"red": 1})
+        changed_state = (None, {"red": 0})
+        checker._get_current_led_state_from_camera = MagicMock(side_effect=[
+            target_state,   # 1. State is found in the 'find' loop
+            changed_state,  # 2. State has changed for the first 'hold' loop iteration
+        ])
+
+        # FIX: Use a generator for most time calls, but inject specific values
+        # for the two critical moments to ensure the duration calculation is exact.
+        time_state_seen = 1001.0
+        time_state_changed = time_state_seen + min_duration # 1001.5
+        
+        # This generator handles all background time.time() calls
+        time_generator = itertools.count(start=1000.0, step=0.01)
+        
+        # The side_effect list will precisely control the critical calls.
+        time_side_effect = [
+            next(time_generator),   # for step_find_start_time
+            next(time_generator),   # for current_step_find_timeout_end_time calc
+            next(time_generator),   # for 'find' loop while condition
+            time_state_seen,        # CRITICAL: set the exact time the state was seen
+            next(time_generator),   # for 'hold' loop while condition
+            time_state_changed,     # CRITICAL: set the exact time the state changed
+        ]
+
+        checker._format_led_display_string = MagicMock(return_value="[RED ON]")
+
+        with patch('controllers.logitech_webcam.time.time', side_effect=time_side_effect), \
+             patch('controllers.logitech_webcam.time.sleep'):
+            
+            mock_logger.reset_mock()
+            # ACT
+            success, reason = checker._process_pattern_step(step_config, ordered_keys, overall_timeout, 0, 1)
+
+        # ASSERT
+        assert success is True, "The step should have succeeded"
+        assert reason == "", "There should be no failure reason"
+
+        # Verify the specific info log for this success path was called.
+        mock_logger.info.assert_called_once_with(
+            f"Pattern step 1/1: '[RED ON]' held for {min_duration:.2f}s (state changed but min duration met)."
+        )
+
+    def test_confirm_led_solid_success_path_and_state_reset(self, checker, mock_logger):
+        """
+        Tests the primary success path for confirm_led_solid and that the
+        hold timer is correctly reset when the state changes.
+        """
+        # ARRANGE
+        target_state = {"green": 1}
+        other_state = {"green": 0}
+        minimum_duration = 0.5
+        timeout = 2.0
+
+        # Sequence: Wrong state -> Target -> Wrong (resets) -> Target -> Held long enough
+        checker._get_current_led_state_from_camera = MagicMock(side_effect=[
+            (None, other_state),
+            (None, target_state),
+            (None, other_state),
+            (None, target_state),
+            (None, target_state), # This is the call that will pass the duration check
+        ])
+
+        # FIX: Use a robust generator for time to prevent StopIteration
+        time_generator = itertools.count(start=1000.0, step=0.3)
+
+        # Mock internal helpers
+        checker._start_replay_recording = MagicMock()
+        checker._stop_replay_recording = MagicMock()
+        checker._clear_camera_buffer = MagicMock()
+        checker._format_led_display_string = MagicMock(return_value="[TARGET]")
+        checker._handle_state_change_logging = MagicMock() # Prevent noisy logs
+        mock_logger.reset_mock()
+
+        with patch('controllers.logitech_webcam.time.time', side_effect=time_generator):
+            # ACT
+            result = checker.confirm_led_solid(target_state, minimum=minimum_duration, timeout=timeout)
+
+        # ASSERT
+        assert result is True
+        mock_logger.info.assert_called_once()
+        logged_message = mock_logger.info.call_args[0][0]
+        assert "[TARGET]" in logged_message and "Solid Confirmed" in logged_message
+        checker._start_replay_recording.assert_called_once()
+        checker._stop_replay_recording.assert_called_once_with(success=True, failure_reason=ANY)
+
+    def test_confirm_led_solid_handles_empty_frame(self, checker, mock_logger):
+        """
+        Tests that confirm_led_solid correctly handles an empty frame from the
+        camera, resets the hold timer, and calls time.sleep.
+        """
+        # ARRANGE
+        target_state = {"green": 1}
+        empty_state = (None, {})
+        minimum_duration = 0.5
+        timeout = 1.0
+
+        checker._get_current_led_state_from_camera = MagicMock(side_effect=[
+            (None, target_state),
+            empty_state,
+            (None, target_state),
+            (None, target_state), # Hold to succeed
+            (None, target_state),
+        ])
+
+        time_generator = itertools.count(start=1000.0, step=0.2)
+        mock_logger.reset_mock()
+
+        with patch('controllers.logitech_webcam.time.time', side_effect=time_generator), \
+             patch('controllers.logitech_webcam.time.sleep') as mock_sleep:
+            # ACT
+            result = checker.confirm_led_solid(target_state, minimum=minimum_duration, timeout=timeout)
+
+        # ASSERT
+        assert result is True
+        mock_sleep.assert_called_once_with(0.01)
+
+    def test_confirm_led_solid_handles_exception_in_loop(self, checker, mock_logger):
+        """
+        Tests that confirm_led_solid's main loop correctly catches exceptions
+        and that the failure reason is handled, even though it gets overwritten
+        by the subsequent timeout logic.
+        """
+        # ARRANGE
+        error_message = "A simulated error"
+        checker._get_current_led_state_from_camera = MagicMock(side_effect=[
+            (None, {"green": 0}),      # Successful call for initialization
+            ValueError(error_message)  # Exception raised inside the while loop
+        ])
+        checker._start_replay_recording = MagicMock()
+        checker._stop_replay_recording = MagicMock()
+        # Mock the formatter to prevent an extra failure if it's called
+        checker._format_led_display_string = MagicMock(return_value="[TARGET]")
+        mock_logger.reset_mock()
+
+        # Use a time generator so time can advance and the loop can run.
+        time_generator = itertools.count(start=1000.0, step=0.1)
+
+        with patch('controllers.logitech_webcam.time.time', side_effect=time_generator):
+            # ACT
+            # The default `minimum` is 2.0s
+            result = checker.confirm_led_solid({"green": 1}, timeout=1.0)
+
+        # ASSERT
+        assert result is False
+
+        # 1. Verify the `except` block was indeed hit and logged the correct error.
+        mock_logger.error.assert_called_once()
+        call_args, _ = mock_logger.error.call_args
+        assert f"Exception in confirm_led_solid loop: {error_message}" in call_args[0]
+
+        # 2. Verify the `if not success_flag:` block was ALSO hit and logged a timeout warning.
+        mock_logger.warning.assert_called_once()
+
+        # 3. FIX: Assert that the failure reason passed to the replay recorder is the
+        #    *overwritten* value from the timeout logic, not the exception one.
+        checker._stop_replay_recording.assert_called_once()
+        stop_call_kwargs = checker._stop_replay_recording.call_args.kwargs
+        assert stop_call_kwargs['success'] is False
+
+        # The default `minimum` is 2.0, which is used to generate the timeout message.
+        expected_overwritten_reason = "timeout_target_not_solid_for_2.00s"
+        assert stop_call_kwargs['failure_reason'] == expected_overwritten_reason
+
+    @pytest.mark.parametrize("initial_state, final_state, expected_reason, description", [
+        (
+            {"green": 1}, {"green": 1},
+            "timeout_target_active_for_0.30s_needed_1.00s",
+            "Timeout while holding target, but duration not met."
+        ),
+        (
+            {"green": 0}, {"green": 0},
+            "timeout_target_not_solid_for_1.00s",
+            "Timeout while never holding the target."
+        )
+    ])
+    def test_confirm_led_solid_timeout_scenarios(self, checker, mock_logger, initial_state, 
+                                                 final_state, expected_reason, description):
+        """
+        Tests different timeout failure paths for confirm_led_solid.
+        """
+        # ARRANGE
+        target_state = {"green": 1}
+        minimum_duration = 1.0
+        timeout = 0.2  # A very short timeout to force failure
+
+        checker._get_current_led_state_from_camera = MagicMock(side_effect=[
+             (None, {"green": 0}),  # For initialization call
+             (None, initial_state), # For first loop iteration
+             (None, final_state)    # For second loop iteration
+        ])
+
+        # Use a precise list of time values to control the logic flow exactly.
+        time_side_effect = [
+            1000.0, # initial_capture_time
+            1000.0, # overall_start_time
+            1000.0, # first loop time check and current_time
+            1000.0, # first loop current_time again for handle_state_change
+            1000.3, # loop 2 time check (FAILS timeout > 0.2)
+            1000.3, # final log time
+            1000.3, # final duration check time
+            1000.3, # final duration check time again
+        ]
+
+        checker._start_replay_recording = MagicMock()
+        checker._stop_replay_recording = MagicMock()
+        checker._format_led_display_string = MagicMock(return_value="[TARGET]")
+        checker._handle_state_change_logging = MagicMock() # Prevent noisy logs
+        mock_logger.reset_mock()
+
+        with patch('controllers.logitech_webcam.time.time', side_effect=time_side_effect):
+            # ACT
+            result = checker.confirm_led_solid(target_state, minimum=minimum_duration, timeout=timeout)
+
+        # ASSERT
+        assert result is False, description
+        
+        # FIX: The log message uses the `failure_detail` string directly, which contains underscores.
+        # Do NOT replace them with spaces for this assertion.
+        mock_logger.warning.assert_called_once_with(
+            f"Timeout for confirm_led_solid: Target [TARGET] not solid. Reason: {expected_reason}"
+        )
+        # The replay failure reason is the same string with underscores.
+        checker._stop_replay_recording.assert_called_with(success=False, failure_reason=expected_reason)
+
+    def test_process_pattern_step_times_out_during_hold(self, checker):
+        """
+        Tests that _process_pattern_step correctly times out and returns a
+        failure if the overall_timeout is reached during the hold phase.
+        """
+        # ARRANGE
+        # Use a long duration that can't possibly be met in the short timeout.
+        step_config = {"red": 1, "duration": (5.0, 10.0)}
+        ordered_keys = ["red"]
+        
+        # Mock the camera to always return the target state. The state never changes.
+        target_state = (None, {"red": 1})
+        checker._get_current_led_state_from_camera = MagicMock(return_value=target_state)
+
+        start_time = 1000.0
+        # Set a very short overall timeout that will be reached quickly.
+        overall_timeout = start_time + 0.5
+
+        # Use a generator for time so it never runs out.
+        time_generator = (start_time + i * 0.1 for i in range(100))
+
+        with patch('controllers.logitech_webcam.time.time', side_effect=time_generator), \
+             patch('controllers.logitech_webcam.time.sleep'):
+            
+            # ACT
+            success, reason = checker._process_pattern_step(step_config, ordered_keys, overall_timeout, 0, 1)
+
+        # ASSERT
+        assert success is False
+        assert "timeout_hold_step" in reason
+
+    def test_confirm_led_solid_strict_fails_on_initial_mismatch(self, checker, mock_logger):
+        """
+        Tests that confirm_led_solid_strict fails immediately if the initial
+        state read from the camera does not match the target state.
+        """
+        # ARRANGE
+        target_state = {"green": 1}
+        initial_wrong_state = {"green": 0}
+        method_name = "confirm_led_solid_strict"
+        failure_detail = "initial_state_not_target_strict"
+
+        # Mock the camera to return the wrong state initially.
+        checker._get_current_led_state_from_camera = MagicMock(return_value=(None, initial_wrong_state))
+        
+        # Mock internal helpers to isolate the test.
+        checker._start_replay_recording = MagicMock()
+        checker._stop_replay_recording = MagicMock()
+        mock_logger.reset_mock()
+
+        # ACT
+        result = checker.confirm_led_solid_strict(target_state, minimum=1.0)
+
+        # ASSERT
+        assert result is False
+
+        # Verify the specific warning was logged.
+        mock_logger.warning.assert_called_once_with(f"{method_name} FAILED: {failure_detail}")
+
+        # Verify that replay was stopped with the correct failure reason.
+        checker._stop_replay_recording.assert_called_once_with(success=False, failure_reason=failure_detail)
+
+    def test_confirm_led_solid_strict_fails_on_op_timeout(self, checker, mock_logger):
+        """
+        Tests that confirm_led_solid_strict fails if the operation takes
+        too long, hitting the internal operation timeout.
+        """
+        # ARRANGE
+        target_state = {"green": 1}
+        minimum = 1.0
+        method_name = "confirm_led_solid_strict"
+        failure_detail = f"op_timeout_strict_aiming_{minimum:.2f}s"
+
+        # The camera always returns the correct state, so failure is not due to state change.
+        checker._get_current_led_state_from_camera = MagicMock(return_value=(None, target_state))
+        
+        # Control time to trigger the specific timeout.
+        start_time = 1000.0
+        op_timeout_time = start_time + minimum + 5.1 # Time when op timeout is exceeded
+
+        def time_generator():
+            # Initial calls for setup
+            yield start_time  # For last_state_info and target_state_began_at
+            yield start_time  # For strict_op_start_time
+            
+            # First loop iteration: time hasn't advanced much for the main duration check
+            yield start_time + 0.1 # For main `while` condition
+            
+            # But for the op timeout check, time has advanced significantly
+            yield op_timeout_time # For `current_time` inside the loop
+            
+            # Extra values in case they are needed after the loop breaks
+            while True:
+                yield op_timeout_time + 1
+
+        checker._start_replay_recording = MagicMock()
+        checker._stop_replay_recording = MagicMock()
+        mock_logger.reset_mock()
+        
+        with patch('controllers.logitech_webcam.time.time', side_effect=time_generator()):
+            # ACT
+            result = checker.confirm_led_solid_strict(target_state, minimum=minimum)
+
+        # ASSERT
+        assert result is False
+
+        # Verify the specific timeout warning was logged.
+        mock_logger.warning.assert_called_once_with(f"{method_name} FAILED: {failure_detail}")
+        
+        # Verify replay was stopped with the correct failure reason.
+        checker._stop_replay_recording.assert_called_once_with(success=False, failure_reason=failure_detail)
+
+    def test_confirm_led_solid_strict_fails_on_empty_frame(self, checker, mock_logger):
+        """
+        Tests that confirm_led_solid_strict fails if an empty frame/state
+        is detected during the hold check.
+        """
+        # ARRANGE
+        target_state = {"green": 1}
+        minimum = 1.0
+        method_name = "confirm_led_solid_strict"
+        failure_detail = "frame_capture_err_strict"
+
+        # Sequence: Good initial frame, then an empty frame inside the loop
+        checker._get_current_led_state_from_camera = MagicMock(side_effect=[
+            (None, target_state), # Passes initial check
+            (None, {})            # Fails inside the loop
+        ])
+        
+        # Mock internal helpers to isolate the test.
+        checker._start_replay_recording = MagicMock()
+        checker._stop_replay_recording = MagicMock()
+        mock_logger.reset_mock()
+
+        # ACT
+        result = checker.confirm_led_solid_strict(target_state, minimum=minimum)
+
+        # ASSERT
+        assert result is False
+
+        # Verify the specific warning was logged.
+        mock_logger.warning.assert_called_once_with(f"{method_name} FAILED: {failure_detail}")
+
+        # Verify that replay was stopped with the correct failure reason.
+        checker._stop_replay_recording.assert_called_once_with(success=False, failure_reason=failure_detail)
+
+    def test_confirm_led_solid_strict_fails_on_state_change(self, checker, mock_logger):
+        """
+        Tests that confirm_led_solid_strict fails if the state changes
+        before the minimum duration is met (and outside the tolerance window).
+        """
+        # ARRANGE
+        target_state = {"green": 1}
+        changed_state = {"green": 0}
+        minimum = 1.0
+        held_for = 0.5 # A duration shorter than the minimum
+        method_name = "confirm_led_solid_strict"
+        failure_detail = f"state_broke_strict_held_{held_for:.2f}s_needed_{minimum:.2f}s"
+        
+        # Sequence: Good initial frame, then a different frame inside the loop
+        checker._get_current_led_state_from_camera = MagicMock(side_effect=[
+            (None, target_state),   # Passes initial check
+            (None, changed_state)   # Fails inside the loop
+        ])
+
+        # Control time to get the exact `held_for` duration
+        start_time = 1000.0
+        change_time = start_time + held_for
+        time_side_effect = [
+            start_time,     # For last_state_info and target_state_began_at
+            start_time,     # For strict_op_start_time
+            change_time,    # For main `while` condition
+            change_time,    # For op timeout check
+            change_time,    # For `current_time` inside the loop
+            change_time,    # For final `held_for` calculation
+        ]
+
+        checker._start_replay_recording = MagicMock()
+        checker._stop_replay_recording = MagicMock()
+        # Mock this to prevent it from logging and interfering with our assertion
+        checker._handle_state_change_logging = MagicMock(return_value=True)
+        mock_logger.reset_mock()
+        
+        with patch('controllers.logitech_webcam.time.time', side_effect=time_side_effect):
+            # ACT
+            result = checker.confirm_led_solid_strict(target_state, minimum=minimum)
+
+        # ASSERT
+        assert result is False
+
+        # Verify the specific warning was logged.
+        mock_logger.warning.assert_called_once_with(f"{method_name} FAILED: {failure_detail}")
+
+        # Verify that replay was stopped with the correct failure reason.
+        checker._stop_replay_recording.assert_called_once_with(success=False, failure_reason=failure_detail)
+
+    def test_confirm_led_solid_strict_success_path(self, checker, mock_logger):
+        """
+        Tests the primary success path for confirm_led_solid_strict where the
+        state is held for the entire minimum duration.
+        """
+        # ARRANGE
+        target_state = {"green": 1}
+        minimum = 0.5
+        method_name = "confirm_led_solid_strict"
+        
+        # Camera always returns the correct state
+        checker._get_current_led_state_from_camera = MagicMock(return_value=(None, target_state))
+        
+        # Control time to satisfy the duration check
+        start_time = 1000.0
+        end_time = start_time + minimum + 0.1 # A time after the duration is met
+        
+        time_generator = itertools.count(start_time, step=0.1)
+
+        checker._start_replay_recording = MagicMock()
+        checker._stop_replay_recording = MagicMock()
+        checker._log_final_state = MagicMock()
+        checker._format_led_display_string = MagicMock(return_value="[TARGET]")
+        mock_logger.reset_mock()
+        
+        with patch('controllers.logitech_webcam.time.time', side_effect=time_generator), \
+             patch('controllers.logitech_webcam.time.sleep') as mock_sleep:
+            # ACT
+            result = checker.confirm_led_solid_strict(target_state, minimum=minimum)
+
+        # ASSERT
+        assert result is True
+        
+        # Verify the success logs
+        checker._log_final_state.assert_called_once()
+        mock_logger.info.assert_any_call(f"{method_name}: LED strictly solid confirmed: [TARGET]")
+        
+        # Verify the loop ran and called sleep
+        assert mock_sleep.call_count > 0
+
+        # Verify replay was stopped with success
+        checker._stop_replay_recording.assert_called_once_with(success=True, failure_reason=ANY)
+
+    def test_confirm_led_solid_strict_handles_exception(self, checker, mock_logger):
+        """
+        Tests that the try...except block in confirm_led_solid_strict correctly
+        handles an unexpected exception.
+        """
+        # ARRANGE
+        target_state = {"green": 1}
+        minimum = 1.0
+        method_name = "confirm_led_solid_strict"
+        error_message = "Simulated read error"
+        
+        # Sequence: Good initial frame, then an exception inside the loop
+        checker._get_current_led_state_from_camera = MagicMock(side_effect=[
+            (None, target_state), # Passes initial check
+            RuntimeError(error_message)
+        ])
+        
+        checker._start_replay_recording = MagicMock()
+        checker._stop_replay_recording = MagicMock()
+        mock_logger.reset_mock()
+        
+        # ACT
+        result = checker.confirm_led_solid_strict(target_state, minimum=minimum)
+        
+        # ASSERT
+        assert result is False
+        
+        # Verify the error log
+        mock_logger.error.assert_called_once()
+        call_args, call_kwargs = mock_logger.error.call_args
+        assert f"Exception in {method_name} loop: {error_message}" in call_args[0]
+        assert call_kwargs.get('exc_info') is True
+        
+        # Verify replay was stopped with the correct failure reason
+        checker._stop_replay_recording.assert_called_once_with(
+            success=False,
+            failure_reason="exception_strict_loop_RuntimeError"
+        )
 
     def test_log_key_press_for_replay(self, checker, monkeypatch):
         """Test that timers are started to add and remove keys for replay."""
