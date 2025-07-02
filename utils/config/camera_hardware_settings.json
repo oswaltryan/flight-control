@@ -1,0 +1,27 @@
+{
+    "camera_properties": {
+        "focus": 70,
+        "brightness": 122,
+        "exposure": 5
+    },
+    "roi_settings": {
+        "red": [
+            188,
+            165,
+            40,
+            40
+        ],
+        "green": [
+            302,
+            166,
+            40,
+            40
+        ],
+        "blue": [
+            417,
+            165,
+            40,
+            40
+        ]
+    }
+}

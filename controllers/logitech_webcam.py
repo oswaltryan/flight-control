@@ -4,7 +4,9 @@
 
 import time
 import logging # Standard library logging
+import copy
 import cv2
+import json
 import sys # Import sys to check platform
 import numpy as np # Import numpy for array operations
 import collections # For deque, for instant replay
@@ -48,6 +50,9 @@ OVERLAY_LED_INDICATOR_RADIUS = 7
 OVERLAY_LED_INDICATOR_ON_COLOR_FALLBACK = (0, 255, 0) # Bright Green
 OVERLAY_LED_INDICATOR_OFF_COLOR = (80, 80, 80) # Dark Grey for OFF
 
+# --- Path to external camera settings file ---
+_CONFIG_DIR = os.path.join(_PROJECT_ROOT_FROM_CAMERA, 'utils', 'config')
+_CAMERA_SETTINGS_FILE = os.path.join(_CONFIG_DIR, 'camera_hardware_settings.json')
 
 # --- PRIMARY (USER-TUNED) LED CONFIGURATIONS ---
 PRIMARY_LED_CONFIGURATIONS = {
@@ -94,6 +99,16 @@ _FALLBACK_LED_DEFINITIONS = {
 # Define a default display order for common LED keys for logging.
 DEFAULT_LED_DISPLAY_ORDER = ["red", "green", "blue"]
 
+# --- Camera Hardware Settings (Default Fallback) ---
+DEFAULT_CAMERA_HARDWARE_SETTINGS = {
+    cv2.CAP_PROP_AUTO_EXPOSURE: 0,
+    cv2.CAP_PROP_EXPOSURE: -6, # UI exposure 7 maps to -6, UI exposure 2 maps to -2 etc.
+    cv2.CAP_PROP_AUTOFOCUS: 0,
+    cv2.CAP_PROP_FOCUS: 30, 
+    cv2.CAP_PROP_AUTO_WB: 0,
+    cv2.CAP_PROP_WB_TEMPERATURE: 4500,
+}
+# --- End of Camera Hardware Settings ---
 
 def get_capture_backend():
     if sys.platform.startswith('win'):
@@ -102,7 +117,65 @@ def get_capture_backend():
         return cv2.CAP_AVFOUNDATION
     return None # Let OpenCV choose default
 
+def _load_all_camera_settings() -> Tuple[Dict[int, Any], Dict[str, Tuple[int, int, int, int]]]:
+    """
+    Attempts to load camera hardware settings and ROI definitions from a JSON file.
+    Falls back to defaults if file not found or invalid.
 
+    Returns:
+        A tuple: (camera_properties: Dict[cv2.CAP_PROP, Any], roi_settings: Dict[str, Tuple[int, int, int, int]])
+    """
+    if not os.path.exists(_CAMERA_SETTINGS_FILE):
+        logger.info(f"Camera settings file not found at '{_CAMERA_SETTINGS_FILE}'. Using default settings.")
+        return DEFAULT_CAMERA_HARDWARE_SETTINGS.copy(), {}
+
+    loaded_camera_props = {} # This is the target dictionary for camera properties
+    loaded_roi_settings = {}
+
+    try:
+        with open(_CAMERA_SETTINGS_FILE, 'r') as f:
+            loaded_data = json.load(f)
+        
+        logger.debug(f"Loaded raw data from config file: {loaded_data}") # ADDED DEBUG LOG
+        
+        # Load camera properties (focus, brightness, exposure)
+        for key_str, value in loaded_data.get('camera_properties', {}).items():
+            try:
+                if key_str == 'exposure': # UI exposure (positive) to cv2 exposure (negative)
+                    loaded_camera_props[cv2.CAP_PROP_EXPOSURE] = -value
+                elif key_str == 'focus': # Assign to loaded_camera_props
+                    loaded_camera_props[cv2.CAP_PROP_FOCUS] = value
+                elif key_str == 'brightness': # Assign to loaded_camera_props
+                    loaded_camera_props[cv2.CAP_PROP_BRIGHTNESS] = value
+                logger.debug(f"Parsed setting from file: '{key_str}'={value} -> CAP_PROP_{key_str.upper()}={loaded_camera_props.get(getattr(cv2, f'CAP_PROP_{key_str.upper()}', None))}") # ADDED DEBUG LOG
+            except ValueError:
+                logger.warning(f"Skipping invalid setting '{key_str}' from config file: value is not an integer.")
+                continue
+
+        # Merge with defaults to ensure all required settings are present,
+        # giving preference to loaded settings if they exist.
+        merged_camera_properties = DEFAULT_CAMERA_HARDWARE_SETTINGS.copy()
+        merged_camera_properties.update(loaded_camera_props)
+        logger.debug(f"Merged camera properties for application: {merged_camera_properties}") # ADDED DEBUG LOG
+
+
+        # Load ROI settings
+        for led_name, roi_list in loaded_data.get('roi_settings', {}).items():
+            if isinstance(roi_list, list) and len(roi_list) == 4 and all(isinstance(n, int) for n in roi_list):
+                loaded_roi_settings[led_name] = tuple(roi_list)
+            else:
+                logger.warning(f"Skipping invalid ROI setting for '{led_name}' from config file: expected list of 4 ints.")
+
+        logger.info(f"Successfully loaded camera and ROI settings from '{_CAMERA_SETTINGS_FILE}'.")
+        return merged_camera_properties, loaded_roi_settings # Return the merged properties
+
+    except json.JSONDecodeError as e:
+        logger.error(f"Error decoding camera settings JSON from '{_CAMERA_SETTINGS_FILE}': {e}. Using default settings.", exc_info=True)
+        return DEFAULT_CAMERA_HARDWARE_SETTINGS.copy(), {}
+    except Exception as e:
+        logger.error(f"An unexpected error occurred while loading camera settings from '{_CAMERA_SETTINGS_FILE}': {e}. Using default settings.", exc_info=True)
+        return DEFAULT_CAMERA_HARDWARE_SETTINGS.copy(), {}
+ 
 class LogitechLedChecker:
     def __init__(self, camera_id: int, logger_instance=None, led_configs=None,
                  display_order: Optional[List[str]] = None, duration_tolerance_sec: float = DEFAULT_DURATION_TOLERANCE_SEC,
@@ -158,21 +231,31 @@ class LogitechLedChecker:
             self.logger.warning("Replay output directory is not set. Replays will not be saved.")
         
         # --- LED Config Loading ---
-        if led_configs is not None:
-            self.led_configs = led_configs
-        elif PRIMARY_LED_CONFIGURATIONS:
-            self.led_configs = PRIMARY_LED_CONFIGURATIONS
-        else:
-            self.led_configs = _FALLBACK_LED_DEFINITIONS
+        # 1. Start with a deep copy of the base primary configurations
+        if led_configs is not None: # If custom led_configs are passed, use them as base
+            self.led_configs = copy.deepcopy(led_configs)
+        elif PRIMARY_LED_CONFIGURATIONS: # Otherwise, use the module's default primary config
+            self.led_configs = copy.deepcopy(PRIMARY_LED_CONFIGURATIONS)
+        else: # Fallback if even PRIMARY_LED_CONFIGURATIONS is empty (shouldn't happen in production)
+            self.led_configs = copy.deepcopy(_FALLBACK_LED_DEFINITIONS)
             self.logger.error("PRIMARY_LED_CONFIGURATIONS empty/invalid. Using _FALLBACK_LED_DEFINITIONS.")
 
-        if not isinstance(self.led_configs, dict) or not self.led_configs:
-             raise ValueError("LED configurations are missing or invalid.")
+        # 2. Load settings from external file, including potentially updated ROIs
+        # camera_settings_to_apply will be the actual values for cv2.CAP_PROP
+        # loaded_roi_coordinates will be { 'red': (x,y,w,h), 'green': (x,y,w,h) }
+        self._camera_settings_to_apply, self._loaded_roi_coordinates = _load_all_camera_settings()
 
-        if self.explicit_display_order:
-            for key in self.explicit_display_order:
-                if key not in self.led_configs:
-                    raise ValueError(f"Key '{key}' in display_order not found in LED configs.")
+        # 3. Overwrite ROIs in self.led_configs with loaded values if present
+        for led_name, roi_coords in self._loaded_roi_coordinates.items():
+            if led_name in self.led_configs:
+                self.led_configs[led_name]["roi"] = roi_coords
+                self.logger.debug(f"Overwrote ROI for '{led_name}' with loaded value: {roi_coords}")
+            else:
+                self.logger.warning(f"ROI for '{led_name}' found in config file but not defined in PRIMARY_LED_CONFIGURATIONS. Skipping.")
+
+        # 4. Final validation of LED configs (ensure all required keys are present and types are correct)
+        if not isinstance(self.led_configs, dict) or not self.led_configs:
+             raise ValueError("LED configurations are missing or invalid after loading.")
 
         core_keys = ["name", "roi", "hsv_lower", "hsv_upper", "min_match_percentage"]
         for key, config_item in self.led_configs.items():
@@ -183,13 +266,15 @@ class LogitechLedChecker:
                     all(isinstance(n, int) for n in config_item["roi"])):
                 raise ValueError(f"ROI for LED '{key}' must be tuple of 4 ints.")
             
+        if self.explicit_display_order:
+            for key in self.explicit_display_order:
+                if key not in self.led_configs:
+                    raise ValueError(f"Key '{key}' in display_order not found in final LED configs.")
+            
         self.stopped = False
-        # CORRECTED: One lock for the replay buffer, which now contains all data.
+        # One lock for the replay buffer, which now contains all data.
         self.buffer_lock = threading.Lock()
-        
-        # The latest_frame and frame_read_ok attributes are no longer needed
-        # as all access will go through the locked buffer.
-        
+
         if self.camera_id is None: self.logger.error("Camera ID cannot be None."); return 
         self._initialize_camera()
 
@@ -245,14 +330,51 @@ class LogitechLedChecker:
                     backend_name_str = f" with backend {cv2.videoio_registry.getBackendName(self.preferred_backend)}" if self.preferred_backend and hasattr(cv2.videoio_registry, 'getBackendName') else ""
                     raise IOError(f"Cannot open webcam {self.camera_id}{backend_name_str} or with default backend.")
                 
-            if self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640):
-                self.logger.info("Successfully set camera width to 640.")
-            else:
+            self.logger.info("Applying hard-coded camera hardware settings...")
+            prop_names = {
+                cv2.CAP_PROP_AUTO_EXPOSURE: "Auto Exposure",
+                cv2.CAP_PROP_EXPOSURE: "Exposure",
+                cv2.CAP_PROP_AUTOFOCUS: "Autofocus",
+                cv2.CAP_PROP_FOCUS: "Focus",
+                cv2.CAP_PROP_AUTO_WB: "Auto White Balance",
+                cv2.CAP_PROP_WB_TEMPERATURE: "White Balance Temp",
+                cv2.CAP_PROP_GAIN: "Gain",
+                cv2.CAP_PROP_BRIGHTNESS: "Brightness",
+                cv2.CAP_PROP_CONTRAST: "Contrast",
+                cv2.CAP_PROP_SATURATION: "Saturation",
+            }
+            # Iterate through the LOADED settings (which might be defaults or from file)
+            for prop, value in self._camera_settings_to_apply.items():
+                prop_name = prop_names.get(prop, f"Property_ID_{prop}")
+                
+                # ADDED: Log the value of relevant properties BEFORE attempting to set
+                if prop == cv2.CAP_PROP_EXPOSURE:
+                    current_val = self.cap.get(cv2.CAP_PROP_EXPOSURE)
+                    self.logger.debug(f"  [Init] Before setting {prop_name}, current value is: {current_val}")
+                elif prop == cv2.CAP_PROP_FOCUS:
+                    current_val = self.cap.get(cv2.CAP_PROP_FOCUS)
+                    self.logger.debug(f"  [Init] Before setting {prop_name}, current value is: {current_val}")
+                elif prop == cv2.CAP_PROP_AUTOFOCUS:
+                    current_val = self.cap.get(cv2.CAP_PROP_AUTOFOCUS)
+                    self.logger.debug(f"  [Init] Before setting {prop_name}, current value is: {current_val}")
+                elif prop == cv2.CAP_PROP_AUTO_EXPOSURE:
+                    current_val = self.cap.get(cv2.CAP_PROP_AUTO_EXPOSURE)
+                    self.logger.debug(f"  [Init] Before setting {prop_name}, current value is: {current_val}")
+
+                self.logger.debug(f"Attempting to set {prop_name} ({prop}) to {value}.")
+                if self.cap.set(prop, value):
+                    actual_value = self.cap.get(prop)
+                    self.logger.info(f"Successfully set {prop_name} to {value} (read back: {actual_value}).")
+                    if actual_value != value and prop not in [cv2.CAP_PROP_AUTO_EXPOSURE, cv2.CAP_PROP_AUTOFOCUS, cv2.CAP_PROP_AUTO_WB]:
+                         # Warning if the camera didn't take the exact value, common for some props
+                        self.logger.warning(f"  Note: {prop_name} read back value ({actual_value}) differs from set value ({value}). Camera likely applied closest supported value.")
+                else:
+                    self.logger.warning(f"FAILED to set {prop_name} to {value}. The camera/driver may not support this property or it's being overridden.")
+                
+            if not self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640):
                 self.logger.warning("Failed to set camera width to 640.")
 
-            if self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480):
-                self.logger.info("Successfully set camera height to 480.")
-            else:
+            if not self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480):
                 self.logger.warning("Failed to set camera height to 480.")
 
             self.is_camera_initialized = True

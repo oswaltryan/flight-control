@@ -58,48 +58,56 @@ class UnifiedController:
                  replay_output_dir: Optional[str] = None,
                  enable_instant_replay: Optional[bool] = None,
                  keypad_layout: Optional[Dict[str, Any]] = None):
+
         self.logger = logger_instance if logger_instance else module_logger
+        
+        # Initialize attributes early to guarantee their existence, even if None
+        self._phidget_controller: Optional[PhidgetController] = None
+        self._camera_checker: Optional[LogitechLedChecker] = None
+        self._barcode_scanner: Optional[BarcodeScanner] = None
+        self.scanned_serial_number: Optional[str] = None # Guaranteed to exist from the start
+        self.is_fully_initialized: bool = False # Overall success flag
+
+        phidget_init_successful = False
+        camera_init_successful = False
+
         effective_replay_output_dir = replay_output_dir
         self.phidget_config_to_use = script_map_config if script_map_config is not None else DEFAULT_SCRIPT_CHANNEL_MAP_CONFIG
         phidget_ctrl_logger = self.logger.getChild("Phidget")
         camera_ctrl_logger = self.logger.getChild("Camera")
 
-        # --- Initialize Phidget --- #
-        self._phidget_controller = None
+        # --- Initialize Phidget ---
         try:
             self._phidget_controller = PhidgetController(
                 script_map_config=self.phidget_config_to_use, logger_instance=phidget_ctrl_logger)
+            phidget_init_successful = True
         except Exception as e_phidget_init:
             self.logger.error(f"Failed to initialize PhidgetController: {e_phidget_init}", exc_info=True)
 
-        # --- Initialize Camera --- #
-        self._camera_checker = None
+        # --- Initialize Camera ---
         self.effective_led_duration_tolerance = led_duration_tolerance_sec if led_duration_tolerance_sec is not None else CAMERA_DEFAULT_TOLERANCE
         effective_replay_duration = replay_post_failure_duration_sec if replay_post_failure_duration_sec is not None else CAMERA_DEFAULT_REPLAY_DURATION
-        effective_replay_output_dir = replay_output_dir
 
         try:
             self._camera_checker = LogitechLedChecker(
                 camera_id=camera_id, led_configs=led_configs, display_order=display_order,
                 logger_instance=camera_ctrl_logger, duration_tolerance_sec=self.effective_led_duration_tolerance,
                 replay_post_failure_duration_sec=effective_replay_duration, replay_output_dir=effective_replay_output_dir, enable_instant_replay=enable_instant_replay, keypad_layout=keypad_layout)
-            if not self._camera_checker.is_camera_initialized:
+            if self._camera_checker.is_camera_initialized:
+                camera_init_successful = True
+            else:
                 self.logger.error(f"LogitechLedChecker FAILED to initialize camera {camera_id}.")
         except Exception as e_camera_init:
             self.logger.error(f"Failed to initialize LogitechLedChecker for camera {camera_id}: {e_camera_init}", exc_info=True)
 
+        # --- Initialize Barcode Scanner (no automatic scan on init) ---
+        # Barcode scanner requires a phidget_press_callback, which uses self.press
+        # If _phidget_controller failed, self.press will log an error.
         self._barcode_scanner = BarcodeScanner(phidget_press_callback=self.press)
-        self.scanned_serial_number = self._barcode_scanner.await_scan()
-        if not self.scanned_serial_number:
-            self.logger.error("Initialization scan failed. No serial number captured!")
-            sys.exit(1)
+        # self.scanned_serial_number remains None by default from early assignment.
 
-    def set_keypad_layout(self, layout: list[list[str]]):
-        """
-        Delegates setting the keypad layout to the camera controller.
-        """
-        if self._camera_checker:
-            self._camera_checker.set_keypad_layout(layout)
+        # Overall initialization status
+        self.is_fully_initialized = phidget_init_successful and camera_init_successful
 
     # --- PhidgetController Method Delegation ---
     def on(self, *channel_names: str):
@@ -144,6 +152,28 @@ class UnifiedController:
     def wait_for_input(self, channel_name: str, expected_state: bool, timeout_s: float = 5, poll_interval_s: float = 0.05) -> bool:
         if not self._phidget_controller: self.logger.error("Phidget not init for 'wait_for_input'."); return False
         return self._phidget_controller.wait_for_input(channel_name, expected_state, timeout_s, poll_interval_s)
+    
+    def scan_barcode(self) -> Optional[str]:
+        """
+        Triggers a new barcode scan and updates the controller's serial number.
+        
+        Returns:
+            The scanned serial number string, or None if the scan failed or timed out.
+        """
+        if not self._barcode_scanner:
+            self.logger.error("Barcode scanner not available.")
+            return None
+        
+        self.logger.info("Triggering on-demand barcode scan...")
+        scanned_data = self._barcode_scanner.await_scan()
+        
+        if scanned_data:
+            self.logger.info(f"Successfully scanned new serial: {scanned_data}")
+            self.scanned_serial_number = scanned_data
+        else:
+            self.logger.warning("On-demand barcode scan did not return data.")
+            
+        return scanned_data
 
     # --- LogitechLedChecker Method Delegation ---
     @property
