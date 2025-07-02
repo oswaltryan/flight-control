@@ -134,7 +134,9 @@ class App:
         self.root.bind('<KeyPress-Shift_R>', self._on_shift_press)
         self.root.bind('<KeyRelease-Shift_L>', self._on_shift_release)
         self.root.bind('<KeyRelease-Shift_R>', self._on_shift_release)
-        self.root.bind("<Button-1>", self._on_video_click)
+        self.root.bind("<ButtonPress-1>", self._on_drag_start)
+        self.root.bind("<B1-Motion>", self._on_drag_move)
+        self.root.bind("<ButtonRelease-1>", self._on_drag_end)
         self.root.protocol("WM_DELETE_WINDOW", self._on_closing)
         threading.Thread(target=self.initialize_hardware, daemon=True).start()
 
@@ -248,47 +250,93 @@ class App:
         self.tuning_status_label = tk.Label(self.left_panel, textvariable=self.tuning_status_var, font=self.label_font, fg="blue")
         self.tuning_status_label.pack(side=tk.BOTTOM, pady=5)
 
-    def _on_video_click(self, event):
-        """Callback for when the user clicks on the video feed during ROI tuning."""
-        # --- FIX: Drastically simplify coordinate handling ---
-        # Since the event is bound to the parent panel that the video label fills,
-        # event.x and event.y are already the correct coordinates relative to the video feed.
-        relative_x = event.x
-        relative_y = event.y
-        logger.debug(f"Video panel click event at: x={relative_x}, y={relative_y}")
-        # --- END FIX ---
-        if not self.is_tuning:
+    def _get_relative_coords(self, event) -> tuple[Optional[int], Optional[int]]:
+        """
+        Translates a root window event to coordinates relative to the video label.
+        Returns (None, None) if the click is outside the video label.
+        """
+        # We must call update_idletasks to ensure all geometry calculations are current.
+        self.root.update_idletasks()
+        
+        # Get absolute screen coordinates of the video label's top-left corner and its size.
+        label_x_abs = self.video_label.winfo_rootx()
+        label_y_abs = self.video_label.winfo_rooty()
+        label_width = self.video_label.winfo_width()
+        label_height = self.video_label.winfo_height()
+
+        # Get the absolute screen coordinates of the mouse click from the event object.
+        click_x_abs = event.x_root
+        click_y_abs = event.y_root
+
+        # Check if the click is within the video label's bounds.
+        if not (label_x_abs <= click_x_abs < label_x_abs + label_width and
+                label_y_abs <= click_y_abs < label_y_abs + label_height):
+            return None, None # Click was outside the video feed.
+
+        # If inside, calculate and return the coordinates relative to the video label.
+        relative_x = click_x_abs - label_x_abs
+        relative_y = click_y_abs - label_y_abs
+        return relative_x, relative_y
+
+    def _on_drag_start(self, event):
+        """Initiates the ROI placement when the mouse is first clicked."""
+        relative_x, relative_y = self._get_relative_coords(event)
+        
+        # --- FIX: Check for None and tuning status BEFORE calling the update method ---
+        if self.is_tuning and relative_x is not None and relative_y is not None:
+            logger.debug(f"Drag start detected at relative coords: x={relative_x}, y={relative_y}")
+            self._update_roi_position(relative_x, relative_y)
+
+    def _on_drag_move(self, event):
+        """Updates the ROI box position as the mouse is dragged."""
+        relative_x, relative_y = self._get_relative_coords(event)
+        
+        # --- FIX: Check for None and tuning status BEFORE calling the update method ---
+        if self.is_tuning and relative_x is not None and relative_y is not None:
+            self._update_roi_position(relative_x, relative_y)
+
+    def _on_drag_end(self, event):
+        """Finalizes the ROI position and advances to the next tuning step."""
+        relative_x, relative_y = self._get_relative_coords(event)
+        
+        # --- FIX: Check for None and tuning status BEFORE proceeding ---
+        if not (self.is_tuning and relative_x is not None and relative_y is not None):
             return
 
+        # Safeguard against advancing past the end of the list
         if self.tuning_step >= len(self.tuning_leds):
-            return  # Safeguard against extra clicks
+            return
 
         led_key = self.tuning_leds[self.tuning_step]
-        logger.info(f"Tuning '{led_key}': Click received at ({event.x}, {event.y}).")
+        final_coords = self.new_rois.get(led_key, "N/A")
+        logger.info(f"Tuning for '{led_key}' finalized at ROI: {final_coords}")
 
-        # Use a fixed size for the new ROI
-        roi_width, roi_height = 40, 40
-        
-        # User clicks the center, so calculate the top-left corner
-        new_x = event.x - (roi_width // 2) - 2
-        new_y = event.y - (roi_height // 2) - 160
-        
-        # Update the temporary ROI dictionary. This is the only state that changes here.
-        self.new_rois[led_key] = (new_x, new_y, roi_width, roi_height)
-        
-        # Move to the next step
+        # Advance to the next step
         self.tuning_step += 1
         
         if self.tuning_step < len(self.tuning_leds):
-            # --- FIX: Set text and color for the NEXT step ---
+            # Update UI for the next LED
             next_led_key = self.tuning_leds[self.tuning_step]
-            self.tuning_status_var.set(f"Click on the {next_led_key.upper()} LED")
+            self.tuning_status_var.set(f"Click and drag to place {next_led_key.upper()} LED")
             if self.tuning_status_label:
-                # The color name (e.g., "green") is a valid Tkinter color.
                 self.tuning_status_label.config(fg=next_led_key)
         else:
             # Finished tuning all LEDs
             self._finish_tuning()
+
+    def _update_roi_position(self, x: int, y: int):
+        """Calculates and updates the current ROI based on mouse coordinates."""
+        if self.tuning_step >= len(self.tuning_leds):
+            return
+
+        led_key = self.tuning_leds[self.tuning_step]
+        roi_width, roi_height = 40, 40
+        
+        # The offset is still needed based on your last successful test
+        new_x = x - (roi_width // 2) - 2
+        new_y = y - (roi_height // 2) - 160
+        
+        self.new_rois[led_key] = (new_x, new_y, roi_width, roi_height)
 
     def _start_tuning_action(self):
         """Begins the interactive ROI tuning process."""
@@ -314,10 +362,12 @@ class App:
         
         # Set initial instruction
         first_led = self.tuning_leds[0]
-        self.tuning_status_var.set(f"Click on the {first_led.upper()} LED")
+        # --- FIX: Update the instruction text ---
+        self.tuning_status_var.set(f"Click and drag to place {first_led.upper()} LED")
+        
         if self.tuning_status_label:
             self.tuning_status_label.config(fg=first_led)
-        logger.info(f"Starting ROI tuning. Please click on the {first_led.upper()} LED.")
+        logger.info(f"Starting ROI tuning. Please click and drag to place the {first_led.upper()} LED.")
 
     def _finish_tuning(self):
         """Finalizes the ROI tuning process, saves settings, and re-enables controls."""
@@ -754,18 +804,18 @@ class App:
         logger.info("Closing application...")
         self._save_settings() # Save the UI state first
 
-        if self.cap and self.cap.isOpened():
-            print("\n--- Final Target Values ---")
-            # CORRECTED: Read from the UI variables, which are the source for the saved file,
-            # ensuring the final printout matches what was saved.
-            final_focus = self.target_settings["focus"].get()
-            final_brightness = self.target_settings["brightness"].get()
-            final_exposure = -self.target_settings["exposure"].get() # Get UI value and convert to CV value
+        # if self.cap and self.cap.isOpened():
+        #     print("\n--- Final Target Values ---")
+        #     # CORRECTED: Read from the UI variables, which are the source for the saved file,
+        #     # ensuring the final printout matches what was saved.
+        #     final_focus = self.target_settings["focus"].get()
+        #     final_brightness = self.target_settings["brightness"].get()
+        #     final_exposure = -self.target_settings["exposure"].get() # Get UI value and convert to CV value
 
-            print(f"Focus:      {final_focus}")
-            print(f"Brightness: {final_brightness}")
-            print(f"Exposure:   {final_exposure}")
-            print("-----------------------------")
+        #     print(f"Focus:      {final_focus}")
+        #     print(f"Brightness: {final_brightness}")
+        #     print(f"Exposure:   {final_exposure}")
+        #     print("-----------------------------")
             
         # Ensure all keypad Phidgets are turned off
         if self.controller:
