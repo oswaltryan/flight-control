@@ -28,14 +28,15 @@ logger = logging.getLogger("CameraTuner")
 # --- Project Imports ---
 try:
     from controllers.unified_controller import UnifiedController
-    from controllers.finite_state_machine import DeviceUnderTest # Add this import
+    from controllers.finite_state_machine import DeviceUnderTest
     from controllers.logitech_webcam import (
         LogitechLedChecker,
         OVERLAY_TEXT_COLOR_MAIN,
         OVERLAY_LED_INDICATOR_OFF_COLOR,
         OVERLAY_LED_INDICATOR_RADIUS,
-        _CAMERA_SETTINGS_FILE
+        _CAMERA_SETTINGS_FILE,
     )
+    from utils.config.keypad_layouts import KEYPAD_LAYOUTS
 except ImportError as e:
     logger.critical(f"Failed to import project modules: {e}. Make sure the script is run from the project root or the path setup is correct.", exc_info=True)
     sys.exit(1)
@@ -101,11 +102,8 @@ class App:
             'key1', 'key2', 'key3', 'key4', 'key5', 'key6', 'key7', 'key8', 'key9', 'key0', 'lock', 'unlock'
         ]}
 
-        # Variable to hold the scanned barcode text
-        self.scanned_barcode_text = tk.StringVar(value="")
-
-
         self.keypad_button_widgets: Dict[str, tk.Button] = {} 
+        self.keypad_frame: Optional[tk.Frame] = None
         self.power_button: Optional[tk.Checkbutton] = None
         self.usb3_button: Optional[tk.Checkbutton] = None
         self.scan_button: Optional[tk.Button] = None
@@ -178,77 +176,39 @@ class App:
 
     def _create_controls_layout(self):
         """Creates and packs all UI control elements (keypad, toggles, sliders)."""
-        # Keypad Frame
-        keypad_frame = tk.Frame(self.left_panel, relief=tk.GROOVE, borderwidth=2)
-        keypad_frame.pack(side=tk.TOP, pady=10, padx=5)
+        # Define a single, consistent padding value for all major groups.
+        GROUP_PADDING = 5
 
-        tk.Label(keypad_frame, text="Manual Keypad", font=self.label_font).grid(row=0, column=0, columnspan=3, pady=(5, 10))
+        # --- Group 1: Keypad Frame (Structure Only) ---
+        # OPTIMIZATION: This now only creates the frame and its title.
+        # The actual buttons are generated once and only once by _populate_keypad().
+        self.keypad_frame = tk.Frame(self.left_panel, relief=tk.GROOVE, borderwidth=2, padx=5, pady=5)
+        self.keypad_frame.pack(side=tk.TOP, pady=GROUP_PADDING, padx=0, fill=tk.X)
+        tk.Label(self.keypad_frame, text="Phidget I/Os", font=self.label_font).grid(row=0, column=0, columnspan=3, pady=(0, 5))
 
-        # --- CORRECTED: Create simple placeholder Buttons without commands ---
-        KEYPAD_LAYOUT_INITIAL = [
-            ['key1', 'key2', 'key3'], ['key4', 'key5', 'key6'],
-            ['key7', 'key8', 'key9'], ['lock', 'key0', 'unlock']
-        ]
-        button_font = tkFont.Font(family="Helvetica", size=10)
-        for row_idx, row_of_keys in enumerate(KEYPAD_LAYOUT_INITIAL):
-            for col_idx, key_name in enumerate(row_of_keys):
-                # Use tk.Button as a placeholder. It will be replaced by the fully-functional
-                # button in _recreate_keypad_and_enable_buttons.
-                button = tk.Button(
-                    keypad_frame,
-                    text=key_name,
-                    font=button_font,
-                    width=7, height=2,
-                    state=tk.DISABLED,
-                    relief=tk.RAISED
-                )
-                button.grid(row=row_idx + 1, column=col_idx, padx=5, pady=5)
-                # We don't need to store a reference here as it gets overwritten.
-
-        # Toggle buttons & Barcode scan
-        toggle_button_frame = tk.Frame(self.left_panel, relief=tk.GROOVE, borderwidth=1, padx=5, pady=5)
-        toggle_button_frame.pack(side=tk.TOP, pady=10, fill=tk.X)
-        
-        power_usb_frame = tk.Frame(toggle_button_frame)
-        power_usb_frame.pack(side=tk.TOP, fill=tk.X, expand=True, pady=5)
-        
-        self.power_button = tk.Checkbutton(power_usb_frame, text="Power", variable=self.power_state, indicatoron=False, width=12, state=tk.DISABLED, relief=tk.RAISED)
-        self.power_button.config(command=lambda btn=self.power_button: self._handle_phidget_toggle("connect", self.power_state, btn))
-        self.power_button.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=5)
-        
-        self.usb3_button = tk.Checkbutton(power_usb_frame, text="USB3", variable=self.usb3_state, indicatoron=False, width=12, state=tk.DISABLED, relief=tk.RAISED)
-        self.usb3_button.config(command=lambda btn=self.usb3_button: self._handle_phidget_toggle("usb3", self.usb3_state, btn))
-        self.usb3_button.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=5)
-        
-        self.scan_button = tk.Button(toggle_button_frame, text="Scan Barcode", command=self._scan_barcode_action, state=tk.DISABLED)
-        self.scan_button.pack(pady=(10, 5), fill=tk.X, expand=True)
-
-        scanned_barcode_label = tk.Label(toggle_button_frame, textvariable=self.scanned_barcode_text, font=tkFont.Font(family="Courier", size=8), wraplength=150)
-        scanned_barcode_label.pack(pady=(0,5), fill=tk.X)
-
-        # Sliders
-        sliders_frame = tk.Frame(self.left_panel, relief=tk.GROOVE, borderwidth=1, padx=5, pady=5)
-        sliders_frame.pack(side=tk.TOP, pady=10, fill=tk.X)
-        
+        # --- Group 2: Sliders Frame ---
+        sliders_frame = tk.Frame(self.left_panel, relief=tk.GROOVE, borderwidth=2, padx=5, pady=0)
+        sliders_frame.pack(side=tk.TOP, pady=GROUP_PADDING, fill=tk.X)
+        tk.Label(sliders_frame, text="Camera Settings", font=self.label_font).pack()
         self.sliders.append(self._create_slider_control(sliders_frame, "Focus", "focus", 0, 255))
         self.sliders.append(self._create_slider_control(sliders_frame, "Brightness", "brightness", 0, 255))
         self.sliders.append(self._create_slider_control(sliders_frame, "Exposure", "exposure", 2, 13))
 
-        # --- Button Area at the bottom of the left panel ---
-        # NOTE: Packing with side=tk.BOTTOM adds widgets from the bottom up.
-        # So, the 'Save' button is packed first to appear at the very bottom.
-        
+        # --- Group 3: A single frame for all action buttons at the bottom ---
+        action_button_frame = tk.Frame(self.left_panel)
+        action_button_frame.pack(side=tk.TOP, pady=(GROUP_PADDING, 2), fill=tk.X)
+
+        # Configure two columns with equal weight to place buttons side-by-side and ensure equal width.
+        action_button_frame.columnconfigure(0, weight=1)
+        action_button_frame.columnconfigure(1, weight=1)
+
+        # 'Tune LED Coordinates' button
+        self.tune_led_button = tk.Button(action_button_frame, text="Tune LED Coordinates", command=self._start_tuning_action, state=tk.DISABLED)
+        self.tune_led_button.grid(row=0, column=1, sticky="ew", padx=(2, 0))
+
         # 'Save Settings' button
-        save_button = tk.Button(self.left_panel, text="Save Settings", command=self._save_settings_action)
-        save_button.pack(side=tk.BOTTOM, fill=tk.X, pady=5, ipady=5)
-
-        # 'Tune LED Coordinates' button (will appear above the Save button)
-        self.tune_led_button = tk.Button(self.left_panel, text="Tune LED Coordinates", command=self._start_tuning_action, state=tk.DISABLED)
-        self.tune_led_button.pack(side=tk.BOTTOM, fill=tk.X, padx=5, pady=(10,0), ipady=5)
-
-        # Status label for the tuning process (will appear above the Tune button)
-        self.tuning_status_label = tk.Label(self.left_panel, textvariable=self.tuning_status_var, font=self.label_font, fg="blue")
-        self.tuning_status_label.pack(side=tk.BOTTOM, pady=5)
+        save_button = tk.Button(action_button_frame, text="Save Settings", command=self._save_settings_action)
+        save_button.grid(row=0, column=0, sticky="ew", padx=(0, 2))
 
     def _get_relative_coords(self, event) -> tuple[Optional[int], Optional[int]]:
         """
@@ -297,32 +257,34 @@ class App:
 
     def _on_drag_end(self, event):
         """Finalizes the ROI position and advances to the next tuning step."""
+        # ... (code to get relative_x, relative_y is unchanged) ...
         relative_x, relative_y = self._get_relative_coords(event)
-        
-        # --- FIX: Check for None and tuning status BEFORE proceeding ---
         if not (self.is_tuning and relative_x is not None and relative_y is not None):
             return
 
-        # Safeguard against advancing past the end of the list
+        # ... (safeguard and led_key logic is unchanged) ...
         if self.tuning_step >= len(self.tuning_leds):
             return
-
         led_key = self.tuning_leds[self.tuning_step]
         final_coords = self.new_rois.get(led_key, "N/A")
         logger.info(f"Tuning for '{led_key}' finalized at ROI: {final_coords}")
 
-        # Advance to the next step
         self.tuning_step += 1
         
         if self.tuning_step < len(self.tuning_leds):
             # Update UI for the next LED
             next_led_key = self.tuning_leds[self.tuning_step]
-            self.tuning_status_var.set(f"Click and drag to place {next_led_key.upper()} LED")
-            if self.tuning_status_label:
-                self.tuning_status_label.config(fg=next_led_key)
+            if self.tune_led_button:
+                self.tune_led_button.config(text=f"Click/drag to place {next_led_key.upper()} LED", fg=next_led_key)
         else:
-            # Finished tuning all LEDs
-            self._finish_tuning()
+            # --- FIX: Last LED is done, so save settings and finish ---
+            logger.info("Final LED tuned. Saving all new ROI coordinates...")
+            self._save_settings()
+            if self.tune_led_button:
+                self.tune_led_button.config(text="Tuning Complete!", fg="black")
+            
+            # Revert UI state after a short delay
+            self.root.after(2000, self._finish_tuning)
 
     def _update_roi_position(self, x: int, y: int):
         """Calculates and updates the current ROI based on mouse coordinates."""
@@ -339,67 +301,56 @@ class App:
         self.new_rois[led_key] = (new_x, new_y, roi_width, roi_height)
 
     def _start_tuning_action(self):
-        """Begins the interactive ROI tuning process."""
+        """Begins or aborts the interactive ROI tuning process."""
+        if self.is_tuning:
+            # --- If already tuning, abort the operation ---
+            self.is_tuning = False
+            if self.tune_led_button:
+                self.tune_led_button.config(text="Tune LED Coordinates")
+            logger.info("ROI tuning aborted by user.")
+            self._finish_tuning() # Call finish to re-enable controls
+            return
+
         if not self.checker:
             logger.error("Cannot start tuning, camera checker not ready.")
             return
+
         self.is_tuning = True
         self.tuning_step = 0
+        
         self.new_rois = {
             key: config.get('roi', (0, 0, 10, 10))
             for key, config in self.checker.led_configs.items()
         }
         
         # Disable other controls to avoid conflicts
-        if self.power_button:
-            self.power_button.config(state=tk.DISABLED)
-        if self.usb3_button:
-            self.usb3_button.config(state=tk.DISABLED)
-        if self.scan_button:
-            self.scan_button.config(state=tk.DISABLED)
+        if self.power_button: self.power_button.config(state=tk.DISABLED)
+        if self.usb3_button: self.usb3_button.config(state=tk.DISABLED)
+        if self.scan_button: self.scan_button.config(state=tk.DISABLED)
         for slider in self.sliders:
             slider.config(state=tk.DISABLED)
         
-        # Set initial instruction
+        # --- FIX: Update button text to provide instructions ---
         first_led = self.tuning_leds[0]
-        # --- FIX: Update the instruction text ---
-        self.tuning_status_var.set(f"Click and drag to place {first_led.upper()} LED")
+        if self.tune_led_button:
+            self.tune_led_button.config(text=f"Click on the {first_led.upper()} LED", fg=first_led)
         
-        if self.tuning_status_label:
-            self.tuning_status_label.config(fg=first_led)
         logger.info(f"Starting ROI tuning. Please click and drag to place the {first_led.upper()} LED.")
 
     def _finish_tuning(self):
-        """Finalizes the ROI tuning process, saves settings, and re-enables controls."""
+        """Resets the UI controls after tuning is complete or aborted."""
         self.is_tuning = False
-        self.tuning_status_var.set("Tuning complete. Saving...")
-        if self.tuning_status_label:
-            self.tuning_status_label.config(fg="black")
-        logger.info("Tuning complete. Applying and saving new ROI coordinates...")
+        
+        # Reset the button to its original state
+        if self.tune_led_button:
+            self.tune_led_button.config(text="Tune LED Coordinates", fg="black")
 
-        # Apply the tuned ROIs to the live checker instance
-        if self.checker:
-            for key, roi in self.new_rois.items():
-                if key in self.checker.led_configs:
-                    self.checker.led_configs[key]['roi'] = roi
-        
-        self._save_settings()
-        
-        # Re-enable controls
-        if self.power_button:
-            self.power_button.config(state=tk.NORMAL)
-        if self.usb3_button:
-            self.usb3_button.config(state=tk.NORMAL)
-        if self.scan_button:
-            self.scan_button.config(state=tk.NORMAL)
+        # Re-enable all other controls
+        if self.power_button: self.power_button.config(state=tk.NORMAL)
+        if self.usb3_button: self.usb3_button.config(state=tk.NORMAL)
+        if self.scan_button: self.scan_button.config(state=tk.NORMAL)
         for slider in self.sliders:
             slider.config(state=tk.NORMAL)
-            
-        # Clear the status message after a short delay
-        self.root.after(2000, lambda: self.tuning_status_var.set(""))
-            
-        # Clear the status message after a short delay
-        self.root.after(2000, lambda: self.tuning_status_var.set(""))
 
     def _on_keypad_press(self, event, key_name: str):
         """Handles the mouse-down event on a keypad button."""
@@ -471,32 +422,39 @@ class App:
         """Triggers a barcode scan in a background thread to not freeze the UI."""
         if not self.controller:
             logger.warning("Controller not ready, cannot scan barcode.")
-            self.scanned_barcode_text.set("Scan Failed: Controller Not Ready")
-            self.root.after(3000, lambda: self.scanned_barcode_text.set("")) 
+            # --- FIX: Check if the button exists before configuring it ---
+            if self.scan_button:
+                self.scan_button.config(text="Scan Failed: Controller Not Ready")
+                # Schedule the button text to revert
+                self.root.after(3000, lambda: self.scan_button.config(text="Scan Barcode") if self.scan_button else None)
             return
         
         logger.info("Scan barcode button pressed. Starting scan thread...")
         threading.Thread(target=self._perform_barcode_scan, daemon=True).start()
 
     def _perform_barcode_scan(self):
-        """Performs the actual barcode scan and updates the UI variable."""
-        if not self.controller:
-            self.root.after(0, lambda: self.scanned_barcode_text.set("Scan Failed: Internal Error"))
-            self.root.after(3000, lambda: self.scanned_barcode_text.set(""))
-            logger.error("Controller is None inside _perform_barcode_scan thread. This should not happen.")
+        """Performs the actual barcode scan and updates the button text."""
+        if not self.controller or not self.scan_button:
+            logger.error("Controller or scan button not ready for barcode scan.")
             return
 
-        self.root.after(0, lambda: self.scanned_barcode_text.set("Scanning..."))
+        # --- FIX: Check if the button exists before configuring it ---
+        # Update button text to show scanning is in progress
+        if self.scan_button:
+            self.root.after(0, lambda: self.scan_button.config(text="Scanning...") if self.scan_button else None)
         
         scanned_data = self.controller.scan_barcode()
         
-        if scanned_data:
-            self.root.after(0, lambda: self.scanned_barcode_text.set(scanned_data))
-        else:
-            self.root.after(0, lambda: self.scanned_barcode_text.set("TIMEOUT / No Data"))
-
-        self.root.after(3000, lambda: self.scanned_barcode_text.set(""))
-
+        # Determine the result text
+        new_text = scanned_data if scanned_data else "TIMEOUT / No Data"
+        
+        # Schedule UI updates from the main thread
+        if self.scan_button:
+            self.root.after(0, lambda: self.scan_button.config(text=new_text) if self.scan_button else None)
+        
+        # Schedule the button text to revert back to its original state after 3 seconds
+        if self.scan_button:
+            self.root.after(3000, lambda: self.scan_button.config(text="Scan Barcode") if self.scan_button else None)
 
     def initialize_hardware(self):
         """Initializes hardware in a background thread, then schedules UI finalization."""
@@ -514,12 +472,11 @@ class App:
                 logger.critical(error_msg)
                 return
 
-            self.dut = DeviceUnderTest(at_controller=self.controller) 
+            # The controller now creates its own DUT. Use that instance instead of creating a new one.
+            self.dut = self.controller.dut
             self.checker = self.controller._camera_checker
             self.cap = self.checker.cap if self.checker else None
-            
-            self.scanned_barcode_text.set("")
-            
+                        
             self.root.after(0, self.finish_ui_setup)
             
         except Exception as e:
@@ -532,7 +489,7 @@ class App:
         self.populate_sliders_from_camera()
         
         # Re-create the keypad with the correct layout and enable buttons
-        self._recreate_keypad_and_enable_buttons()
+        self._populate_keypad()
 
         # Enable toggle and scan buttons, and set their initial relief
         if self.power_button: 
@@ -550,60 +507,74 @@ class App:
 
         self._update_frame()
 
-    def _recreate_keypad_and_enable_buttons(self):
-        """Destroys existing keypad buttons and recreates them with correct layout and state."""
-        keypad_frame = None
-        for child in self.left_panel.winfo_children():
-            if isinstance(child, tk.Frame) and child.cget('relief') == 'groove':
-                is_keypad_frame = any(isinstance(w, (tk.Checkbutton, tk.Button)) for w in child.winfo_children())
-                if is_keypad_frame:
-                    keypad_frame = child
-                    break
-        
-        if keypad_frame:
-            for widget in keypad_frame.winfo_children():
-                widget.destroy()
-            
-            tk.Label(keypad_frame, text="Manual Keypad", font=self.label_font).grid(row=0, column=0, columnspan=3, pady=(5, 10))
+    def _populate_keypad(self):
+        """Determines the correct layout and creates all keypad-related controls ONCE."""
+        if not self.keypad_frame:
+            logger.error("Cannot populate keypad, frame container not found.")
+            return
 
-            if self.dut and self.dut.secure_key:
-                logger.info("Secure_key device detected, using 2-column keypad layout.")
-                KEYPAD_LAYOUT = [
-                    ['key1', 'key2'], ['key3', 'key4'], ['key5', 'key6'],
-                    ['key7', 'key8'], ['key9', 'key0'], ['lock', 'unlock']
-                ]
-            else:
-                logger.info("Standard device detected, using 3-column keypad layout.")
-                KEYPAD_LAYOUT = [
-                    ['key1', 'key2', 'key3'],
-                    ['key4', 'key5', 'key6'],
-                    ['key7', 'key8', 'key9'],
-                    ['lock', 'key0', 'unlock']
-                ]
-            
-            button_font = tkFont.Font(family="Helvetica", size=10)
-            self.keypad_button_widgets.clear() # Clear old references
-            for row_idx, row_of_keys in enumerate(KEYPAD_LAYOUT):
-                for col_idx, key_name in enumerate(row_of_keys):
-                    # Use tk.Button for the keypad
-                    button = tk.Button(
-                        keypad_frame,
-                        text=key_name,
-                        font=button_font,
-                        width=7, height=2,
-                        state=tk.NORMAL,
-                        relief=tk.RAISED
-                    )
-                    # Bind press and release events
-                    button.bind('<ButtonPress-1>', lambda event, k=key_name: self._on_keypad_press(event, k))
-                    button.bind('<ButtonRelease-1>', lambda event, k=key_name: self._on_keypad_release(event, k))
-
-                    button.grid(row=row_idx + 1, column=col_idx, padx=5, pady=5)
-                    self.keypad_button_widgets[key_name] = button # Store reference
-            
-            # The 'Release All' button has been removed.
+        # Determine which layout to use based on the initialized DUT.
+        if self.dut and self.dut.secure_key:
+            logger.info("Secure_key device detected, using 2-column keypad layout.")
+            keypad_layout = KEYPAD_LAYOUTS['secure']
+            num_columns = 2
         else:
-            logger.error("Could not find keypad_frame to re-create buttons.")
+            logger.info("Standard device detected, using 3-column keypad layout.")
+            keypad_layout = KEYPAD_LAYOUTS['standard']
+            num_columns = 3
+        
+        # Configure keypad columns to have equal weight.
+        for i in range(num_columns):
+            self.keypad_frame.columnconfigure(i, weight=1)
+
+        button_font = tkFont.Font(family="Helvetica", size=10)
+        self.keypad_button_widgets.clear() # Clear any old references, just in case
+
+        # Create and place the keypad buttons.
+        for row_idx, row_of_keys in enumerate(keypad_layout):
+            for col_idx, key_name in enumerate(row_of_keys):
+                button = tk.Button(
+                    self.keypad_frame,
+                    text=key_name,
+                    font=button_font,
+                    height=1, 
+                    state=tk.NORMAL,
+                    relief=tk.RAISED
+                )
+                button.bind('<ButtonPress-1>', lambda event, k=key_name: self._on_keypad_press(event, k))
+                button.bind('<ButtonRelease-1>', lambda event, k=key_name: self._on_keypad_release(event, k))
+                button.grid(row=row_idx + 1, column=col_idx, padx=5, pady=2, sticky="ew")
+                self.keypad_button_widgets[key_name] = button
+
+        # Calculate the next available row after the keypad
+        next_row = len(keypad_layout) + 1
+
+        # Add a separator
+        separator = tk.Frame(self.keypad_frame, height=2, bd=1, relief=tk.SUNKEN)
+        separator.grid(row=next_row, column=0, columnspan=num_columns, sticky="ew", padx=5, pady=10)
+        next_row += 1
+
+        # Create a dedicated frame for the Power and USB3 buttons
+        power_usb_frame = tk.Frame(self.keypad_frame)
+        power_usb_frame.grid(row=next_row, column=0, columnspan=num_columns, sticky="ew")
+
+        # Configure the frame's columns to have equal weight, so they share space.
+        power_usb_frame.columnconfigure(0, weight=1)
+        power_usb_frame.columnconfigure(1, weight=1)
+
+        # Create and grid the Power and USB3 buttons within this new frame
+        self.power_button = tk.Checkbutton(power_usb_frame, text="Power", variable=self.power_state, indicatoron=False, state=tk.NORMAL, relief=tk.RAISED)
+        self.power_button.config(command=lambda btn=self.power_button: self._handle_phidget_toggle("connect", self.power_state, btn))
+        self.power_button.grid(row=0, column=0, sticky="ew", padx=(5, 2))
+        
+        self.usb3_button = tk.Checkbutton(power_usb_frame, text="USB3", variable=self.usb3_state, indicatoron=False, state=tk.NORMAL, relief=tk.RAISED)
+        self.usb3_button.config(command=lambda btn=self.usb3_button: self._handle_phidget_toggle("usb3", self.usb3_state, btn))
+        self.usb3_button.grid(row=0, column=1, sticky="ew", padx=(2, 5))
+        next_row += 1
+        
+        # Create Scan Barcode button
+        self.scan_button = tk.Button(self.keypad_frame, text="Scan Barcode", command=self._scan_barcode_action, state=tk.NORMAL)
+        self.scan_button.grid(row=next_row, column=0, columnspan=num_columns, sticky="ew", padx=5, pady=(8, 5))
 
     def populate_sliders_from_camera(self):
         """Safely updates the Tkinter variables with current camera properties."""
@@ -623,26 +594,45 @@ class App:
         return default_value
 
     def _create_slider_control(self, parent, label_text, key, from_val, to_val):
-        """Creates a single horizontal slider and its labels, packed vertically."""
+        """Creates a single horizontal slider with its value label to the right."""
         control_frame = tk.Frame(parent, pady=2)
         control_frame.pack(side=tk.TOP, fill=tk.X, expand=True, padx=5)
 
-        tk.Label(control_frame, text=label_text, font=self.label_font).pack()
+        # Configure the grid columns within the control_frame.
+        # Column 0 (the slider) will expand to take up all available space.
+        control_frame.columnconfigure(0, weight=1)
+        # Column 1 (the value) will have a fixed width.
 
-        slider = tk.Scale( # Store reference
+        # 1. Place the main label ("Focus", etc.) in row 0, spanning both columns.
+        tk.Label(control_frame, text=label_text, font=self.label_font).grid(
+            row=0, column=0, columnspan=2, sticky="w"
+        )
+
+        # 2. Place the Scale widget (the slider) in row 1, column 0.
+        slider = tk.Scale(
             control_frame,
             from_=from_val,
             to=to_val,
             orient=tk.HORIZONTAL,
             variable=self.target_settings[key],
-            showvalue=False,
+            showvalue=False,  # We are showing our own label
             command=self._on_slider_move,
-            state=tk.DISABLED # Disable initially
+            state=tk.DISABLED
         )
-        slider.pack(fill=tk.X, expand=True)
+        # Use sticky="ew" to make the slider expand horizontally to fill its column.
+        slider.grid(row=1, column=0, sticky="ew")
 
-        tk.Label(control_frame, textvariable=self.target_settings[key], font=self.value_font).pack()
-        return slider # Return the slider widget
+        # 3. Place the value label in row 1, column 1, to the right of the slider.
+        # Give it a fixed width to prevent the UI from resizing as the number changes.
+        value_label = tk.Label(
+            control_frame,
+            textvariable=self.target_settings[key],
+            font=self.value_font,
+            width=4  # A fixed width of 4 characters is good for values up to 255.
+        )
+        value_label.grid(row=1, column=1, padx=(5, 0))
+
+        return slider
 
     def _on_slider_move(self, value):
         """Debounced callback for when any slider is moved."""

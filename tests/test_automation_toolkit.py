@@ -54,7 +54,6 @@ class TestAutomationToolkit:
             at_toolkit.get_pin_generator()
 
     @patch('controllers.unified_controller.UnifiedController')
-    @patch('controllers.finite_state_machine.DeviceUnderTest')
     @patch('controllers.finite_state_machine.TestSession')
     @patch('controllers.finite_state_machine.ApricornDeviceFSM')
     @patch('utils.pin_generator.PINGenerator')
@@ -62,11 +61,16 @@ class TestAutomationToolkit:
     @patch('automation_toolkit.setup_logging')
     def test_successful_initialization(self, mock_setup_logging, mock_makedirs,
                                      mock_pingenerator, mock_fsm, mock_session,
-                                     mock_dut, mock_unified_controller):
+                                     mock_unified_controller):
         """
         Tests the full, successful initialization path where all components
         are created without error.
         """
+        # GIVEN: We get handles to the mock instances that will be created.
+        mock_at_instance = mock_unified_controller.return_value
+        # The 'dut' instance is an attribute of the 'at' instance mock.
+        mock_dut_instance = mock_at_instance.dut
+
         importlib.reload(at_toolkit)
 
         # THEN: All global objects should have been created (are not None)
@@ -87,13 +91,14 @@ class TestAutomationToolkit:
 
         # AND: The constructors should have been called with the correct dependencies
         mock_session.assert_called_once_with(
-            at_controller=mock_unified_controller.return_value,
-            dut_instance=mock_dut.return_value
+            at_controller=mock_at_instance,
+            dut_instance=mock_dut_instance
         )
         mock_fsm.assert_called_once_with(
-            at_controller=mock_unified_controller.return_value,
+            at_controller=mock_at_instance,
             session_instance=mock_session.return_value
         )
+        mock_pingenerator.assert_called_once_with(dut_model=mock_dut_instance)
 
     @patch('controllers.unified_controller.UnifiedController', side_effect=Exception("Hardware Failure"))
     @patch('automation_toolkit.os.makedirs')
@@ -198,10 +203,14 @@ class TestAutomationToolkit:
             importlib.reload(at_toolkit)
 
     @patch('controllers.unified_controller.UnifiedController')
-    @patch('controllers.finite_state_machine.DeviceUnderTest', side_effect=Exception("DUT Fail"))
     @patch('automation_toolkit.os.makedirs')
     @patch('automation_toolkit.setup_logging')
-    def test_creation_failure_of_dut(self, mock_logging, mock_mkdirs, mock_dut, mock_controller):
+    def test_creation_failure_of_dut(self, mock_logging, mock_mkdirs, mock_controller):
+        # Configure the 'dut' attribute on the mock 'at' instance to be a property
+        # that raises an exception when accessed. This correctly tests the try/except block.
+        from unittest.mock import PropertyMock
+        type(mock_controller.return_value).dut = PropertyMock(side_effect=Exception("DUT Fail on access"))
+
         importlib.reload(at_toolkit)
         assert at_toolkit.at is not None
         assert at_toolkit.dut is None

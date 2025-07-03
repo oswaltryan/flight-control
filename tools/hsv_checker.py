@@ -26,7 +26,8 @@ try:
         OVERLAY_LED_INDICATOR_OFF_COLOR,
         OVERLAY_LED_INDICATOR_RADIUS,
         OVERLAY_LINE_HEIGHT,
-        OVERLAY_PADDING
+        OVERLAY_PADDING,
+        _CAMERA_SETTINGS_FILE # NEW: Import the path to the settings file
     )
 except ImportError as e_import:
     logger.critical(f"Import Error: {e_import}. Ensure paths are correct.", exc_info=True)
@@ -46,6 +47,9 @@ def main():
     
     logger.info("Initializing UnifiedController to power on device...")
     try:
+        # NEW: Log which settings file will be used
+        logger.info(f"UnifiedController will attempt to apply camera settings from: {_CAMERA_SETTINGS_FILE}")
+
         unified_at_controller = UnifiedController(
             camera_id=0,
             logger_instance=logger.getChild("UnifiedCtrl"),

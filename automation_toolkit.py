@@ -42,25 +42,18 @@ try:
     from controllers.unified_controller import UnifiedController
     from controllers.finite_state_machine import DeviceUnderTest, ApricornDeviceFSM, TestSession
     from utils.pin_generator import PINGenerator
+    from utils.config.keypad_layouts import KEYPAD_LAYOUTS # Keep for other scripts if needed, or remove
 except ImportError as e_uc_import:
     global_at_logger.critical(f"Import Error for UnifiedController or FSM: {e_uc_import}. Ensure paths are correct.", exc_info=True)
     raise
 
 # --- Global Configuration for the 'at' instance ---
+_PROJECT_ROOT = os.path.dirname(os.path.abspath(__file__))
+_CONFIG_DIR = os.path.join(_PROJECT_ROOT, 'utils', 'config')
+_CAMERA_SETTINGS_FILE = os.path.join(_CONFIG_DIR, 'hardware_configuration_settings.json')
+_DEVICE_SETTINGS_FILE = os.path.join(_CONFIG_DIR, 'device_properties.json')
 DEFAULT_CAMERA_ID = 0
 DEFAULT_LED_DISPLAY_ORDER = ["red", "green", "blue"]
-
-# --- Keypad layouts here ---
-KEYPAD_LAYOUTS = {
-    'secure': [
-        ['key1', 'key2'], ['key3', 'key4'], ['key5', 'key6'],
-        ['key7', 'key8'], ['key9', 'key0'], ['lock', 'unlock']
-    ],
-    'standard': [
-        ['key1', 'key2', 'key3'], ['key4', 'key5', 'key6'],
-        ['key7', 'key8', 'key9'], ['lock', 'key0', 'unlock']
-    ]
-}
 
 # --- Instantiate the Global Controller ('at') ---
 at = None
@@ -83,12 +76,9 @@ def get_at_controller():
 # --- Instantiate the Global DUT ---
 dut = None
 if at: # Only initialize DUT if 'at' was successful
-    try:
-        dut = DeviceUnderTest(at_controller=at)
+    try:    
+        dut = at.dut # Get the DUT instance directly from the controller
         global_at_logger.info(f"Global DUT initialized.")
-        layout_type = 'secure' if dut.secure_key else 'standard'
-        keypad_layout_to_use = KEYPAD_LAYOUTS[layout_type]
-        at.set_keypad_layout(keypad_layout_to_use)
     except Exception as e_dut_create:
         global_at_logger.critical(f"Failed to create global 'dut' instance: {e_dut_create}", exc_info=True)
 

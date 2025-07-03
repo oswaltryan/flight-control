@@ -61,7 +61,7 @@ def mock_at():
     mock_device_info.iSerial = "MOCK_SERIAL_123"
     at.confirm_drive_enum.return_value = (True, mock_device_info)
     at.confirm_device_enum.return_value = (True, mock_device_info)
-    at.scanned_serial_number = "TEST_SERIAL_123"
+    at.scan_barcode.return_value = "TEST_SERIAL_123"
     return at
 
 @pytest.fixture

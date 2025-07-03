@@ -1,5 +1,5 @@
 # Directory: tests/
-# Filename: test_phidget_board.py
+# Filename: test_phidget_controller.py
 
 #############################################################
 ##
@@ -7,7 +7,7 @@
 ## in controllers/phidget_board.py.
 ##
 ## Run this test with the following command:
-## pytest tests/test_phidget_board.py --cov=controllers.phidget_board --cov-report term-missing
+## pytest tests/test_phidget_controller.py --cov=controllers.phidget_board --cov-report term-missing
 ##
 #############################################################
 

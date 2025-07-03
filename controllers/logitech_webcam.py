@@ -52,7 +52,7 @@ OVERLAY_LED_INDICATOR_OFF_COLOR = (80, 80, 80) # Dark Grey for OFF
 
 # --- Path to external camera settings file ---
 _CONFIG_DIR = os.path.join(_PROJECT_ROOT_FROM_CAMERA, 'utils', 'config')
-_CAMERA_SETTINGS_FILE = os.path.join(_CONFIG_DIR, 'camera_hardware_settings.json')
+_CAMERA_SETTINGS_FILE = os.path.join(_CONFIG_DIR, 'hardware_configuration_settings.json')
 
 # --- PRIMARY (USER-TUNED) LED CONFIGURATIONS ---
 PRIMARY_LED_CONFIGURATIONS = {
@@ -75,9 +75,9 @@ PRIMARY_LED_CONFIGURATIONS = {
     "blue":  {
         "name": "Blue LED",
         "roi": (417, 165, 40, 40),
-        "hsv_lower": (0,    0, 100),
-        "hsv_upper": (130, 255, 255),
-        "min_match_percentage": 0.75,
+        "hsv_lower": (0,    0, 200),
+        "hsv_upper": (10, 10, 225),
+        "min_match_percentage": 0.25,
         "display_color_bgr": (255,0,0)
     }
 }
@@ -148,7 +148,7 @@ def _load_all_camera_settings() -> Tuple[Dict[int, Any], Dict[str, Tuple[int, in
                 elif key_str == 'brightness': # Assign to loaded_camera_props
                     loaded_camera_props[cv2.CAP_PROP_BRIGHTNESS] = value
                 logger.debug(f"Parsed setting from file: '{key_str}'={value} -> CAP_PROP_{key_str.upper()}={loaded_camera_props.get(getattr(cv2, f'CAP_PROP_{key_str.upper()}', None))}") # ADDED DEBUG LOG
-            except ValueError:
+            except (TypeError, ValueError):
                 logger.warning(f"Skipping invalid setting '{key_str}' from config file: value is not an integer.")
                 continue
 
@@ -240,6 +240,19 @@ class LogitechLedChecker:
             self.led_configs = copy.deepcopy(_FALLBACK_LED_DEFINITIONS)
             self.logger.error("PRIMARY_LED_CONFIGURATIONS empty/invalid. Using _FALLBACK_LED_DEFINITIONS.")
 
+        # MOVED: Validate the base LED configurations *before* overwriting with file data.
+        if not isinstance(self.led_configs, dict) or not self.led_configs:
+             raise ValueError("LED configurations are missing or invalid after loading.")
+
+        core_keys = ["name", "roi", "hsv_lower", "hsv_upper", "min_match_percentage"]
+        for key, config_item in self.led_configs.items():
+            if not isinstance(config_item, dict): raise ValueError(f"LED config item '{key}' not a dict.")
+            if any(k not in config_item for k in core_keys):
+                raise ValueError(f"LED config '{key}' missing core keys.")
+            if not (isinstance(config_item["roi"], tuple) and len(config_item["roi"]) == 4 and
+                    all(isinstance(n, int) for n in config_item["roi"])):
+                raise ValueError(f"ROI for LED '{key}' must be tuple of 4 ints.")
+
         # 2. Load settings from external file, including potentially updated ROIs
         # camera_settings_to_apply will be the actual values for cv2.CAP_PROP
         # loaded_roi_coordinates will be { 'red': (x,y,w,h), 'green': (x,y,w,h) }
@@ -253,19 +266,7 @@ class LogitechLedChecker:
             else:
                 self.logger.warning(f"ROI for '{led_name}' found in config file but not defined in PRIMARY_LED_CONFIGURATIONS. Skipping.")
 
-        # 4. Final validation of LED configs (ensure all required keys are present and types are correct)
-        if not isinstance(self.led_configs, dict) or not self.led_configs:
-             raise ValueError("LED configurations are missing or invalid after loading.")
-
-        core_keys = ["name", "roi", "hsv_lower", "hsv_upper", "min_match_percentage"]
-        for key, config_item in self.led_configs.items():
-            if not isinstance(config_item, dict): raise ValueError(f"LED config item '{key}' not a dict.")
-            if any(k not in config_item for k in core_keys):
-                raise ValueError(f"LED config '{key}' missing core keys.")
-            if not (isinstance(config_item["roi"], tuple) and len(config_item["roi"]) == 4 and
-                    all(isinstance(n, int) for n in config_item["roi"])):
-                raise ValueError(f"ROI for LED '{key}' must be tuple of 4 ints.")
-            
+        # 4. Final validation of display_order against the now-final configs.
         if self.explicit_display_order:
             for key in self.explicit_display_order:
                 if key not in self.led_configs:

@@ -51,7 +51,7 @@ DEVICE_PROPERTIES: Dict[str, Any] = {}
 _current_file_path = os.path.abspath(__file__)
 _controllers_dir = os.path.dirname(_current_file_path)
 _project_root = os.path.dirname(_controllers_dir)
-_json_path = os.path.join(_project_root, 'utils', 'device_properties.json')
+_json_path = os.path.join(_project_root, 'utils', 'config', 'device_properties.json')
 
 
 # --- File I/O and Parsing (operations that can fail are kept in the try block) ---
@@ -107,7 +107,7 @@ class DeviceUnderTest:
         self.mounted: bool = False
         self.serial_number: str = ""
         self.dev_keypad_serial_number: str = ""
-        self.scanned_serial_number: Optional[str] = self.at.scanned_serial_number
+        self.scanned_serial_number: Optional[str] = self.at.scan_barcode()
 
         self.model_id_1: int = DEVICE_PROPERTIES[self.device_name]['model_id_digit_1']
         self.model_id_2: int = DEVICE_PROPERTIES[self.device_name]['model_id_digit_2']
@@ -2254,5 +2254,3 @@ class ApricornDeviceFSM:
             self.session.add_speed_test_result(results)
 
         return results
-
-

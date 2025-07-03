@@ -12,7 +12,8 @@
 #############################################################
 
 import pytest
-from unittest.mock import MagicMock, patch, call, ANY
+from unittest.mock import MagicMock, patch, call, ANY, mock_open
+import json
 import os
 import sys
 import time
@@ -67,6 +68,164 @@ class TestGetCaptureBackend:
     def test_get_capture_backend_platforms(self, monkeypatch, platform, expected_backend):
         monkeypatch.setattr(sys, 'platform', platform)
         assert camera_module.get_capture_backend() == expected_backend
+
+class TestLoadAllCameraSettings:
+    """Tests the _load_all_camera_settings helper function."""
+
+    @patch('controllers.logitech_webcam.os.path.exists', return_value=False)
+    @patch('controllers.logitech_webcam.logger')
+    def test_file_not_found_returns_defaults(self, mock_logger, mock_exists):
+        """
+        Tests that if the settings file doesn't exist, the function returns
+        defaults and logs an info message.
+        """
+        # --- ARRANGE ---
+        # The patches are already configured by the decorators.
+
+        # --- ACT ---
+        props, rois = camera_module._load_all_camera_settings()
+
+        # --- ASSERT ---
+        # 1. Verify the correct default values were returned.
+        assert props == camera_module.DEFAULT_CAMERA_HARDWARE_SETTINGS
+        assert rois == {}
+
+        # 2. Verify that os.path.exists was called with the correct file path.
+        mock_exists.assert_called_once_with(camera_module._CAMERA_SETTINGS_FILE)
+
+        # 3. Verify that the correct info message was logged.
+        mock_logger.info.assert_called_once()
+        log_message = mock_logger.info.call_args[0][0]
+        assert "Camera settings file not found" in log_message
+        assert "Using default settings" in log_message
+
+    @patch('controllers.logitech_webcam.os.path.exists', return_value=True)
+    @patch('controllers.logitech_webcam.json.load')
+    @patch('controllers.logitech_webcam.logger')
+    def test_invalid_property_value_logs_warning(self, mock_logger, mock_json_load, mock_exists):
+        """
+        Tests that an invalid (non-numeric) value for a camera property
+        logs a warning and is skipped, returning the defaults.
+        """
+        # --- ARRANGE ---
+        # Simulate loading a JSON file with a bad string value for 'exposure'.
+        # The `-` operator on a string will raise a TypeError.
+        mock_json_load.return_value = {
+            "camera_properties": {
+                "exposure": "a_bad_string",
+                "focus": 100  # This valid property should still be applied.
+            }
+        }
+        
+        # --- ACT ---
+        props, rois = camera_module._load_all_camera_settings()
+        
+        # --- ASSERT ---
+        # 1. Verify the warning was logged for the invalid setting.
+        mock_logger.warning.assert_called_once_with(
+            "Skipping invalid setting 'exposure' from config file: value is not an integer."
+        )
+        
+        # 2. Verify the valid setting was still applied over the default.
+        assert props[cv2.CAP_PROP_FOCUS] == 100
+        
+        # 3. Verify the invalid setting was skipped and the default value remains.
+        default_exposure = camera_module.DEFAULT_CAMERA_HARDWARE_SETTINGS[cv2.CAP_PROP_EXPOSURE]
+        assert props[cv2.CAP_PROP_EXPOSURE] == default_exposure
+
+    @pytest.mark.parametrize("invalid_roi_value, description", [
+        ([10, 20, 30], "List with wrong length"),
+        ("not a list", "Value is not a list"),
+        ([10, 20, 30, "40"], "List with non-integer element"),
+    ])
+    @patch('controllers.logitech_webcam.os.path.exists', return_value=True)
+    @patch('controllers.logitech_webcam.logger')
+    def test_invalid_roi_value_logs_warning(self, mock_logger, mock_exists, invalid_roi_value, description):
+        """
+        Tests that an invalid ROI value in the config file logs a warning and is skipped.
+        """
+        # --- ARRANGE ---
+        # Create a JSON string containing the invalid data structure to be "read" from the file.
+        bad_roi_data = {
+            "roi_settings": {
+                "red": invalid_roi_value,      # This one is invalid based on the test's parametrization.
+                "green": [10, 20, 30, 40]  # This is a valid one to ensure it still gets processed.
+            }
+        }
+        json_string = json.dumps(bad_roi_data)
+
+        # Mock the 'open' call to simulate reading our JSON string from a file.
+        m_open = mock_open(read_data=json_string)
+
+        with patch('builtins.open', m_open):
+            # --- ACT ---
+            props, rois = camera_module._load_all_camera_settings()
+
+        # --- ASSERT ---
+        # 1. Verify the warning was logged for the invalid 'red' ROI.
+        mock_logger.warning.assert_called_once_with(
+            f"Skipping invalid ROI setting for 'red' from config file: expected list of 4 ints."
+        )
+
+        # 2. Verify that the invalid 'red' ROI was not added to the results.
+        assert "red" not in rois
+
+        # 3. Verify that the valid 'green' ROI was still loaded correctly.
+        assert "green" in rois
+        assert rois["green"] == (10, 20, 30, 40)
+
+    @patch('controllers.logitech_webcam.os.path.exists', return_value=True)
+    @patch('controllers.logitech_webcam.logger')
+    def test_json_decode_error_returns_defaults(self, mock_logger, mock_exists):
+        """
+        Tests that a json.JSONDecodeError is caught, an error is logged,
+        and the function returns defaults.
+        """
+        # --- ARRANGE ---
+        # Malformed JSON with a trailing comma, which causes a JSONDecodeError.
+        malformed_json_string = '{"key": "value",}'
+        m_open = mock_open(read_data=malformed_json_string)
+
+        with patch('builtins.open', m_open):
+            # --- ACT ---
+            props, rois = camera_module._load_all_camera_settings()
+
+        # --- ASSERT ---
+        # 1. Verify that the default settings were returned.
+        assert props == camera_module.DEFAULT_CAMERA_HARDWARE_SETTINGS
+        assert rois == {}
+
+        # 2. Verify that the correct error message was logged.
+        mock_logger.error.assert_called_once()
+        call_args, call_kwargs = mock_logger.error.call_args
+        assert "Error decoding camera settings JSON" in call_args[0]
+        assert call_kwargs.get('exc_info') is True
+
+    @patch('controllers.logitech_webcam.os.path.exists', return_value=True)
+    @patch('controllers.logitech_webcam.logger')
+    def test_generic_exception_returns_defaults(self, mock_logger, mock_exists):
+        """
+        Tests that a generic Exception (like an IOError) during file processing
+        is caught, an error is logged, and the function returns defaults.
+        """
+        # --- ARRANGE ---
+        # Simulate an IOError when trying to open the file.
+        # This will be caught by the generic `except Exception`.
+        error_message = "Permission denied"
+        with patch('builtins.open', side_effect=IOError(error_message)):
+            # --- ACT ---
+            props, rois = camera_module._load_all_camera_settings()
+
+        # --- ASSERT ---
+        # 1. Verify that the default settings were returned.
+        assert props == camera_module.DEFAULT_CAMERA_HARDWARE_SETTINGS
+        assert rois == {}
+
+        # 2. Verify that the correct error message was logged.
+        mock_logger.error.assert_called_once()
+        call_args, call_kwargs = mock_logger.error.call_args
+        assert "An unexpected error occurred" in call_args[0]
+        assert call_kwargs.get('exc_info') is True
 
 class TestLogitechLedCheckerInit:
     """Tests the __init__ method of the LogitechLedChecker."""
@@ -166,7 +325,7 @@ class TestLogitechLedCheckerInit:
 
     def test_invalid_display_order_key_raises_valueerror(self):
         """Test that a key in display_order not in led_configs raises ValueError."""
-        with pytest.raises(ValueError, match="not found in LED configs"):
+        with pytest.raises(ValueError, match="not found in final LED configs"):
             LogitechLedChecker(camera_id=0, display_order=["red", "nonexistent"])
             
     def test_replay_directory_creation_failure(self, mock_cv2_videocapture, mock_logger):
@@ -338,6 +497,90 @@ class TestLogitechLedCheckerMethods:
         # Assert that read() was called 3 times: fail, success, and the one that raised the exception.
         assert mock_cv2_videocapture.return_value.read.call_count == 3
 
+    @patch('threading.Thread')
+    def test_initialize_camera_warns_on_set_property_failure(self, mock_thread, mock_cv2_videocapture, mock_logger, tmp_path):
+        """
+        Tests that _initialize_camera logs a warning when cap.set() for a
+        specific hardware property returns False.
+        """
+        # --- ARRANGE ---
+        # Configure the mock camera to be opened successfully.
+        mock_cap = mock_cv2_videocapture.return_value
+        mock_cap.isOpened.return_value = True
+        mock_cap.get.return_value = 30.0 # Default value for any 'get' calls
+
+        # Define a side effect for the `set` method. It will succeed for all
+        # properties except for CAP_PROP_BRIGHTNESS, for which it will fail.
+        def set_side_effect(prop, value):
+            if prop == cv2.CAP_PROP_BRIGHTNESS:
+                return False  # Simulate failure
+            return True   # Simulate success for all other properties
+
+        mock_cap.set.side_effect = set_side_effect
+
+        # Define the specific settings we want to "load" to trigger the failure.
+        loaded_settings = {cv2.CAP_PROP_BRIGHTNESS: 128}
+        
+        # Reset the mock logger to ignore any logs from fixture setup.
+        mock_logger.reset_mock()
+
+        # --- ACT ---
+        # Patch the settings loader to inject our test case.
+        with patch('controllers.logitech_webcam._load_all_camera_settings', return_value=(loaded_settings, {})):
+            # Initialize the checker, which will call _initialize_camera.
+            with LogitechLedChecker(camera_id=0, logger_instance=mock_logger, replay_output_dir=str(tmp_path)):
+                pass
+
+        # --- ASSERT ---
+        # Verify that the specific warning for the failed `set` call was logged.
+        mock_logger.warning.assert_called_once_with(
+            "FAILED to set Brightness to 128. The camera/driver may not support this property or it's being overridden."
+        )
+
+    @patch('cv2.rectangle')
+    @patch('cv2.circle')
+    def test_draw_overlays_adjusts_indicator_pos_at_top_edge(self, mock_circle, mock_rectangle, checker):
+        """
+        Tests that _draw_overlays correctly adjusts the Y-position of an LED
+        indicator when the ROI is at the top edge of the frame to prevent it
+        from being drawn out of bounds.
+        """
+        # --- ARRANGE ---
+        # A blank image to draw on.
+        frame = np.zeros((480, 640, 3), dtype=np.uint8)
+        led_states = {"red": 1}
+        active_keys = set()
+
+        # Configure an ROI for the 'red' LED that is at the very top of the frame.
+        # This will cause the initial indicator_y_pos calculation to be negative.
+        # y = 5, OVERLAY_LINE_HEIGHT = 20 -> initial y_pos = 5 - 20 = -15
+        checker.led_configs['red']['roi'] = (100, 5, 20, 20)
+
+        # --- ACT ---
+        # Call the function under test. We don't need the return value.
+        checker._draw_overlays(frame, 1.23, led_states, active_keys)
+
+        # --- ASSERT ---
+        # Calculate the expected adjusted Y-position.
+        # It should be clamped to the radius + padding.
+        expected_y_pos = camera_module.OVERLAY_LED_INDICATOR_RADIUS + camera_module.OVERLAY_PADDING
+
+        # Find the specific call to cv2.circle for the LED indicator (the filled one).
+        # We need to check the arguments of this call.
+        found_call = False
+        for c in mock_circle.call_args_list:
+            args, kwargs = c
+            # We identify the correct circle call by checking its kwargs for the fill value.
+            if kwargs.get('thickness') == -1 or len(args) == 5 and args[4] == -1:
+                # args[1] is the (x, y) tuple for the circle's center.
+                # args[1][1] is the y-coordinate.
+                actual_y_pos = args[1][1]
+                assert actual_y_pos == expected_y_pos
+                found_call = True
+                break
+        
+        assert found_call, "The filled circle for the LED indicator was not drawn as expected."
+
     @pytest.mark.filterwarnings("ignore:Exception in thread")
     def test_update_frame_thread_sleeps_when_camera_not_open(self, mock_cv2_videocapture, mock_logger, default_configs, tmp_path):
         """
@@ -401,7 +644,10 @@ class TestLogitechLedCheckerMethods:
 
         # ACT & ASSERT
         # Patch the helper function to simulate having no preferred backend (returns None).
-        with patch('controllers.logitech_webcam.get_capture_backend', return_value=None):
+        # Patch _load_all_camera_settings to return empty dicts to prevent hardware settings
+        # from being applied, making the test independent of external config files.
+        with patch('controllers.logitech_webcam.get_capture_backend', return_value=None), \
+             patch('controllers.logitech_webcam._load_all_camera_settings', return_value=({}, {})):
             # The 'with' block ensures checker.release_camera() is called.
             with LogitechLedChecker(
                 camera_id=0,
@@ -417,6 +663,7 @@ class TestLogitechLedCheckerMethods:
                     assert "Preferred backend" not in call_obj.args[0]
 
                 # 3. Assert the rest of the initialization succeeded.
+                # With no hardware settings loaded, set() is called for width, height, and fps.
                 assert mock_cap.set.call_count == 3
                 mock_cap.get.assert_called_once_with(cv2.CAP_PROP_FPS)
                 assert checker.is_camera_initialized is True
@@ -456,7 +703,9 @@ class TestLogitechLedCheckerMethods:
 
         # ACT & ASSERT
         # Patch the helper function to *provide* a preferred backend
-        with patch('controllers.logitech_webcam.get_capture_backend', return_value=preferred_backend_val):
+        # Also patch _load_all_camera_settings to isolate the test from hardware property logic.
+        with patch('controllers.logitech_webcam.get_capture_backend', return_value=preferred_backend_val), \
+             patch('controllers.logitech_webcam._load_all_camera_settings', return_value=({}, {})):
             # The 'with' block ensures checker.release_camera() is called
             with LogitechLedChecker(
                 camera_id=0,
@@ -471,6 +720,7 @@ class TestLogitechLedCheckerMethods:
                 ])
 
                 # 2. Assert the `set` and `get` methods were called correctly
+                # With hardware settings disabled, set() is called for width, height, and fps.
                 assert mock_cap_success.set.call_count == 3
                 mock_cap_success.get.assert_called_once_with(cv2.CAP_PROP_FPS)
 
@@ -480,6 +730,55 @@ class TestLogitechLedCheckerMethods:
 
                 # 4. Assert initialization is now considered successful
                 assert checker.is_camera_initialized is True
+
+    @patch('threading.Thread')
+    def test_initialize_camera_applies_loaded_settings_and_warns_on_mismatch(self, mock_thread, mock_cv2_videocapture, mock_logger, tmp_path):
+        """
+        Tests that _initialize_camera correctly applies settings loaded from the
+        external configuration helper and logs a warning for mismatched read-back values.
+        """
+        # --- ARRANGE ---
+        # Mock the camera to succeed on all operations
+        mock_cap = mock_cv2_videocapture.return_value
+        mock_cap.isOpened.return_value = True
+        mock_cap.set.return_value = True
+
+        # Simulate a case where setting FOCUS works, but the camera returns a different value
+        # This tests the warning log path.
+        def get_side_effect(prop):
+            if prop == cv2.CAP_PROP_FOCUS:
+                return 35 # Return a different value than what was set
+            if prop == cv2.CAP_PROP_EXPOSURE:
+                return -6 # Return the same value that was set
+            if prop == cv2.CAP_PROP_FPS:
+                return 30.0
+            return 0 # Default for other gets
+
+        mock_cap.get.side_effect = get_side_effect
+
+        # Mock the settings loader to return specific camera properties
+        loaded_settings = {
+            cv2.CAP_PROP_FOCUS: 30,
+            cv2.CAP_PROP_EXPOSURE: -6
+        }
+        
+        with patch('controllers.logitech_webcam._load_all_camera_settings', return_value=(loaded_settings, {})):
+             # ACT
+             with LogitechLedChecker(camera_id=0, logger_instance=mock_logger, replay_output_dir=str(tmp_path)):
+                 pass # Initialization happens in the constructor
+
+        # ASSERT
+        # 1. Verify cap.set was called for each loaded property
+        mock_cap.set.assert_any_call(cv2.CAP_PROP_FOCUS, 30)
+        mock_cap.set.assert_any_call(cv2.CAP_PROP_EXPOSURE, -6)
+
+        # 2. Verify the warning for the mismatched read-back value was logged
+        mock_logger.warning.assert_called_once_with(
+            "  Note: Focus read back value (35) differs from set value (30). Camera likely applied closest supported value."
+        )
+
+        # 3. Verify the success log for the matching value
+        mock_logger.info.assert_any_call("Successfully set Exposure to -6 (read back: -6).")
 
     def test_clear_camera_buffer_handles_exception(self, checker, mock_logger):
         """
@@ -777,7 +1076,7 @@ class TestLogitechLedCheckerMethods:
         step_config = {"red": 1, "duration": (0.1, 0.5)}
         ordered_keys = ["red", "green"]
         timeout = time.time() + 5.0
-
+    
         # Mock `_get_current_led_state_from_camera` to inject empty frames.
         empty_state = (None, {})
         target_state = (None, {"red": 1})
@@ -793,6 +1092,9 @@ class TestLogitechLedCheckerMethods:
         start_time = 1000.0
         time_generator = (start_time + i * 0.05 for i in range(100))
 
+        # Reset the mock logger to ignore any calls made during the fixture's setup.
+        mock_logger.reset_mock()
+
         # Patch time.sleep to verify it's called for the empty frames and loop-ends.
         with patch('controllers.logitech_webcam.time.sleep') as mock_sleep, \
              patch('controllers.logitech_webcam.time.time', side_effect=time_generator):
@@ -804,11 +1106,11 @@ class TestLogitechLedCheckerMethods:
         assert success is True, f"Step should have succeeded, but failed with: {reason}"
         assert reason == ""
 
-        # FIX: The correct count is 3 based on the code's execution path.
+        # The logic inside _process_pattern_step calls sleep 3 times with this input
         assert mock_sleep.call_count == 3
         mock_sleep.assert_has_calls([call(0.001)] * 3)
 
-        # Verify the logger was not spammed with warnings or errors.
+        # Verify the logger was not spammed with warnings or errors during the method's execution.
         mock_logger.warning.assert_not_called()
 
     @pytest.mark.parametrize("held_time, min_duration, tolerance, expected_log_level, description", [
@@ -1445,18 +1747,27 @@ class TestLogitechLedCheckerMethods:
 
     def test_save_replay_video_conditions(self, checker, mock_logger):
         """Test conditions that prevent a video from being saved."""
-        # Not armed
+        # Reset the mock to clear any logs from initialization.
+        mock_logger.reset_mock()
+
+        # 1. Test when not armed
         checker.is_replay_armed = False
         checker._save_replay_video([1, 2, 3])
         mock_logger.debug.assert_not_called()
 
-        # No frames
+        # Reset for the next assertion
+        mock_logger.reset_mock()
+
+        # 2. Test with no frames
         checker.is_replay_armed = True
         checker.replay_output_dir = "/tmp/replays"
         checker._save_replay_video([])
         mock_logger.debug.assert_called_with("Replay: No frames in sequence to save.")
 
-        # Frame dimensions not set
+        # Reset for the next assertion
+        mock_logger.reset_mock()
+
+        # 3. Test with frame dimensions not set
         checker.replay_frame_width = None
         checker._save_replay_video([1, 2, 3])
         mock_logger.error.assert_called_with("Replay: Frame dimensions not set. Cannot save video.")
@@ -1507,6 +1818,9 @@ class TestLogitechLedCheckerMethods:
         # This ensures 'continuous_target_match_start_time' is set and never cleared.
         checker.replay_buffer.append((start_time, mock_frame, target_state, set()))
 
+        # Reset the mock logger to clear calls from initialization.
+        mock_logger.reset_mock()
+
         # --- ACT ---
         with patch('time.time', side_effect=time_side_effect):
             # WHEN confirm_led_solid is called with a short timeout (0.1s) to force failure
@@ -1554,6 +1868,9 @@ class TestLogitechLedCheckerMethods:
             break_time, # For current_time in _handle_state_change_logging
             break_time, # For the held_for calculation
         ]
+
+        # Reset the mock logger to clear any calls made during fixture setup.
+        mock_logger.reset_mock()
 
         with patch.object(checker, '_get_current_led_state_from_camera', side_effect=state_side_effect), \
              patch('time.time', side_effect=time_side_effect):
@@ -1788,6 +2105,9 @@ class TestSaveReplayVideo:
             (1002.0, MagicMock(), {}, set())  # This will get the mismatched_frame
         ]
         
+        # Reset the mock logger to clear calls from initialization
+        mock_logger.reset_mock()
+
         # --- ACT ---
         checker._save_replay_video(replay_sequence)
 
@@ -2017,10 +2337,14 @@ class TestAwaitLedState:
         fail_leds = ["red"]
         # Simulate camera returning a state that matches the target but also includes a fail_led
         bad_state = {"green": 1, "red": 1}
+        
+        # Reset the mock logger to clear any calls made during fixture setup.
+        mock_logger.reset_mock()
+
         with patch.object(checker, '_get_current_led_state_from_camera', return_value=(None, bad_state)):
             # --- ACT ---
             result = checker.await_led_state(target_state, fail_leds=fail_leds, timeout=0.1)
-
+    
         # --- ASSERT ---
         # The function should time out because _matches_state will return False
         assert result is False
@@ -2484,10 +2808,13 @@ class TestAwaitAndConfirmLedPattern:
         pattern = []
         timeout = 5
 
+        # Reset the mock logger to clear calls from fixture setup.
+        mock_logger.reset_mock()
+
         result = checker.await_and_confirm_led_pattern(pattern, timeout)
 
         assert result is False
-        # CORRECTED: The warning message is a single string including the method name prefix
+        # The warning message is a single string including the method name prefix
         method_name = "await_and_confirm_led_pattern" # Get the method_name explicitly for assertion
         expected_log_message = f"{method_name}: empty_pattern_await_confirm"
         mock_logger.warning.assert_called_once_with(expected_log_message) # Check for specific failure detail
@@ -2523,6 +2850,9 @@ class TestAwaitAndConfirmLedPattern:
         checker.await_led_state.return_value = True
         checker.confirm_led_pattern.return_value = True
 
+        # Reset the mock logger to clear calls from fixture setup.
+        mock_logger.reset_mock()
+
         result = checker.await_and_confirm_led_pattern(pattern, timeout, replay_extra_context=extra_context)
 
         assert result is True
@@ -2549,6 +2879,9 @@ class TestAwaitAndConfirmLedPattern:
 
         checker.await_led_state.return_value = False
         checker.confirm_led_pattern.return_value = True # This shouldn't be called
+
+        # Reset the mock logger to clear calls from fixture setup.
+        mock_logger.reset_mock()
 
         result = checker.await_and_confirm_led_pattern(pattern, timeout)
 

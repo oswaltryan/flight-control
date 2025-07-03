@@ -8,7 +8,7 @@ import logging
 import sys
 import os
 import time 
-from typing import Optional, List, Dict, Any, Union, Tuple
+from typing import Optional, List, Dict, Any, Union, Tuple, TYPE_CHECKING
 import threading
 from pprint import pprint
 import subprocess
@@ -30,7 +30,10 @@ try:
     )
     from controllers.barcode_scanner import BarcodeScanner
     from Phidget22.PhidgetException import PhidgetException
+    if TYPE_CHECKING: # pragma: no cover
+        from controllers.finite_state_machine import DeviceUnderTest
     from utils.led_states import LEDs
+    from utils.config.keypad_layouts import KEYPAD_LAYOUTS
     from usb_tool import find_apricorn_device
     from transitions import EventData
 except ImportError as e_import:
@@ -46,6 +49,8 @@ class UnifiedController:
     phidget_config_to_use: Dict[str, Any]
     effective_led_duration_tolerance: float
     scanned_serial_number: Optional[str]
+    # ADDED: For type hinting, declare that this class will have a 'dut' attribute.
+    dut: Optional['DeviceUnderTest']
 
     def __init__(self,
                  script_map_config: Optional[Dict[str, Any]] = None,
@@ -56,8 +61,7 @@ class UnifiedController:
                  led_duration_tolerance_sec: Optional[float] = None,
                  replay_post_failure_duration_sec: Optional[float] = None,
                  replay_output_dir: Optional[str] = None,
-                 enable_instant_replay: Optional[bool] = None,
-                 keypad_layout: Optional[Dict[str, Any]] = None):
+                 enable_instant_replay: Optional[bool] = None):
 
         self.logger = logger_instance if logger_instance else module_logger
         
@@ -66,7 +70,10 @@ class UnifiedController:
         self._camera_checker: Optional[LogitechLedChecker] = None
         self._barcode_scanner: Optional[BarcodeScanner] = None
         self.scanned_serial_number: Optional[str] = None # Guaranteed to exist from the start
+        # ADDED: The controller now owns the DUT and its keypad layout.
+        self.dut: Optional['DeviceUnderTest'] = None
         self.is_fully_initialized: bool = False # Overall success flag
+        self._keypad_layout: Optional[List[List[str]]] = None
 
         phidget_init_successful = False
         camera_init_successful = False
@@ -84,15 +91,30 @@ class UnifiedController:
         except Exception as e_phidget_init:
             self.logger.error(f"Failed to initialize PhidgetController: {e_phidget_init}", exc_info=True)
 
+        # --- Initialize DUT and determine Keypad Layout ---
+        # This must happen AFTER Phidgets are ready but BEFORE the camera checker that needs the layout.
+        try:
+            # Local import to break circular dependency at module load time
+            from controllers.finite_state_machine import DeviceUnderTest
+            self.dut = DeviceUnderTest(at_controller=self)
+            layout_type = 'secure' if self.dut.secure_key else 'standard'
+            self._keypad_layout = KEYPAD_LAYOUTS[layout_type]
+            self.logger.info(f"Keypad layout automatically configured to '{layout_type}'.")
+        except Exception as e_dut_init:
+            self.logger.error(f"Failed to initialize DeviceUnderTest (DUT) or determine keypad layout: {e_dut_init}", exc_info=True)
+            # Default to a standard layout to allow camera to still try initializing
+            self._keypad_layout = KEYPAD_LAYOUTS['standard']
+            self.logger.warning("Defaulting to 'standard' keypad layout due to DUT initialization error.")
+
         # --- Initialize Camera ---
         self.effective_led_duration_tolerance = led_duration_tolerance_sec if led_duration_tolerance_sec is not None else CAMERA_DEFAULT_TOLERANCE
         effective_replay_duration = replay_post_failure_duration_sec if replay_post_failure_duration_sec is not None else CAMERA_DEFAULT_REPLAY_DURATION
 
         try:
             self._camera_checker = LogitechLedChecker(
-                camera_id=camera_id, led_configs=led_configs, display_order=display_order,
-                logger_instance=camera_ctrl_logger, duration_tolerance_sec=self.effective_led_duration_tolerance,
-                replay_post_failure_duration_sec=effective_replay_duration, replay_output_dir=effective_replay_output_dir, enable_instant_replay=enable_instant_replay, keypad_layout=keypad_layout)
+                camera_id=camera_id, led_configs=led_configs, display_order=display_order, logger_instance=camera_ctrl_logger,
+                duration_tolerance_sec=self.effective_led_duration_tolerance, replay_post_failure_duration_sec=effective_replay_duration,
+                replay_output_dir=effective_replay_output_dir, enable_instant_replay=enable_instant_replay, keypad_layout=self._keypad_layout) # type: ignore
             if self._camera_checker.is_camera_initialized:
                 camera_init_successful = True
             else:
