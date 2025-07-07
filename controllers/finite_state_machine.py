@@ -53,13 +53,15 @@ _controllers_dir = os.path.dirname(_current_file_path)
 _project_root = os.path.dirname(_controllers_dir)
 _json_path = os.path.join(_project_root, 'utils', 'config', 'device_properties.json')
 
+_CACHED_SCANNED_SERIAL: Optional[str] = None
+
 
 # --- File I/O and Parsing (operations that can fail are kept in the try block) ---
 try:
     _fsm_module_logger.debug(f"Attempting to load module config from: {_json_path}")
     with open(_json_path, 'r') as f:
         DEVICE_PROPERTIES = json.load(f)
-    _fsm_module_logger.info("Successfully loaded module-level DEVICE_PROPERTIES from JSON.")
+    _fsm_module_logger.debug("Successfully loaded module-level DEVICE_PROPERTIES from JSON.")
 except FileNotFoundError:
     _fsm_module_logger.critical(f"Configuration file not found at '{_json_path}'. Cannot continue.")
     raise
@@ -80,14 +82,18 @@ class DeviceUnderTest:
     and hardware identifiers. The FSM and its callbacks read from and write
     to an instance of this class to mirror the device's real-world state.
     """
-    def __init__(self, at_controller: 'UnifiedController'):
+    def __init__(self, at_controller: 'UnifiedController', scanned_serial_number: Optional[str] = None):
         """
         Initializes the DeviceUnderTest state model.
 
         Args:
             at_controller: An instance of the UnifiedController to allow
                            this model to interact with hardware if needed.
+            scanned_serial_number (Optional[str]): An optional serial number to use.
+                                                   If not provided, a one-time barcode
+                                                   scan will be attempted and cached.
         """
+        global _CACHED_SCANNED_SERIAL
         self.at = at_controller
 
         self.device_name = "padlock3-3637"
@@ -107,7 +113,18 @@ class DeviceUnderTest:
         self.mounted: bool = False
         self.serial_number: str = ""
         self.dev_keypad_serial_number: str = ""
-        self.scanned_serial_number: Optional[str] = self.at.scan_barcode()
+        # Logic for one-time barcode scan
+        if scanned_serial_number is not None:
+            # If a serial is explicitly passed, use it and cache it for subsequent resets.
+            self.scanned_serial_number = scanned_serial_number
+            _CACHED_SCANNED_SERIAL = scanned_serial_number
+        elif _CACHED_SCANNED_SERIAL is not None:
+            # If it's already cached from a previous instantiation/reset, use the cached value.
+            self.scanned_serial_number = _CACHED_SCANNED_SERIAL
+        else:
+            # If it's not passed and not cached, this is the first run. Perform the one-time scan.
+            _CACHED_SCANNED_SERIAL = self.at.scan_barcode()
+            self.scanned_serial_number = _CACHED_SCANNED_SERIAL
 
         self.model_id_1: int = DEVICE_PROPERTIES[self.device_name]['model_id_digit_1']
         self.model_id_2: int = DEVICE_PROPERTIES[self.device_name]['model_id_digit_2']
@@ -599,14 +616,14 @@ class ApricornDeviceFSM:
     state: str
     source_state: str = 'OFF'
 
-    def __init__(self, at_controller: 'UnifiedController', session_instance: 'TestSession'):
+    def __init__(self, at_controller: 'UnifiedController', session_instance: 'TestSession', dut_instance: 'DeviceUnderTest'):
         """
         Initializes the ApricornDeviceFSM.
         ...
         """
         self.logger = logging.getLogger("DeviceFSM.Simplified")
         self.at = at_controller
-        self.dut = DeviceUnderTest(at_controller=self.at)
+        self.dut = dut_instance
         self.session = session_instance
 
         # Define all transitions in a single list of dictionaries, including lambdas.

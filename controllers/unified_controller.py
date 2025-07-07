@@ -91,20 +91,24 @@ class UnifiedController:
         except Exception as e_phidget_init:
             self.logger.error(f"Failed to initialize PhidgetController: {e_phidget_init}", exc_info=True)
 
+        # --- Initialize Barcode Scanner ---
+        self._barcode_scanner = BarcodeScanner(phidget_press_callback=self.press)
+        self.scanned_serial_number: Optional[str] = None
+
         # --- Initialize DUT and determine Keypad Layout ---
         # This must happen AFTER Phidgets are ready but BEFORE the camera checker that needs the layout.
         try:
             # Local import to break circular dependency at module load time
             from controllers.finite_state_machine import DeviceUnderTest
             self.dut = DeviceUnderTest(at_controller=self)
-            layout_type = 'secure' if self.dut.secure_key else 'standard'
+            layout_type = 'Secure Key' if self.dut.secure_key else 'Portable'
             self._keypad_layout = KEYPAD_LAYOUTS[layout_type]
-            self.logger.info(f"Keypad layout automatically configured to '{layout_type}'.")
+            self.logger.debug(f"Keypad layout automatically configured to '{layout_type}'.")
         except Exception as e_dut_init:
             self.logger.error(f"Failed to initialize DeviceUnderTest (DUT) or determine keypad layout: {e_dut_init}", exc_info=True)
-            # Default to a standard layout to allow camera to still try initializing
-            self._keypad_layout = KEYPAD_LAYOUTS['standard']
-            self.logger.warning("Defaulting to 'standard' keypad layout due to DUT initialization error.")
+            # Default to a Portable layout to allow camera to still try initializing
+            self._keypad_layout = KEYPAD_LAYOUTS['Portable']
+            self.logger.warning("Defaulting to 'Portable' keypad layout due to DUT initialization error.")
 
         # --- Initialize Camera ---
         self.effective_led_duration_tolerance = led_duration_tolerance_sec if led_duration_tolerance_sec is not None else CAMERA_DEFAULT_TOLERANCE
@@ -121,12 +125,6 @@ class UnifiedController:
                 self.logger.error(f"LogitechLedChecker FAILED to initialize camera {camera_id}.")
         except Exception as e_camera_init:
             self.logger.error(f"Failed to initialize LogitechLedChecker for camera {camera_id}: {e_camera_init}", exc_info=True)
-
-        # --- Initialize Barcode Scanner (no automatic scan on init) ---
-        # Barcode scanner requires a phidget_press_callback, which uses self.press
-        # If _phidget_controller failed, self.press will log an error.
-        self._barcode_scanner = BarcodeScanner(phidget_press_callback=self.press)
-        # self.scanned_serial_number remains None by default from early assignment.
 
         # Overall initialization status
         self.is_fully_initialized = phidget_init_successful and camera_init_successful
@@ -186,11 +184,10 @@ class UnifiedController:
             self.logger.error("Barcode scanner not available.")
             return None
         
-        self.logger.info("Triggering on-demand barcode scan...")
         scanned_data = self._barcode_scanner.await_scan()
         
         if scanned_data:
-            self.logger.info(f"Successfully scanned new serial: {scanned_data}")
+            self.logger.debug(f"Scanned Serial Number: {scanned_data}")
             self.scanned_serial_number = scanned_data
         else:
             self.logger.warning("On-demand barcode scan did not return data.")

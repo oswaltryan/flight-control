@@ -105,8 +105,7 @@ DEFAULT_CAMERA_HARDWARE_SETTINGS = {
     cv2.CAP_PROP_EXPOSURE: -6, # UI exposure 7 maps to -6, UI exposure 2 maps to -2 etc.
     cv2.CAP_PROP_AUTOFOCUS: 0,
     cv2.CAP_PROP_FOCUS: 30, 
-    cv2.CAP_PROP_AUTO_WB: 0,
-    cv2.CAP_PROP_WB_TEMPERATURE: 4500,
+    cv2.CAP_PROP_AUTO_WB: 0
 }
 # --- End of Camera Hardware Settings ---
 
@@ -166,7 +165,7 @@ def _load_all_camera_settings() -> Tuple[Dict[int, Any], Dict[str, Tuple[int, in
             else:
                 logger.warning(f"Skipping invalid ROI setting for '{led_name}' from config file: expected list of 4 ints.")
 
-        logger.info(f"Successfully loaded camera and ROI settings from '{_CAMERA_SETTINGS_FILE}'.")
+        logger.debug(f"Successfully loaded camera and ROI settings from '{_CAMERA_SETTINGS_FILE}'.")
         return merged_camera_properties, loaded_roi_settings # Return the merged properties
 
     except json.JSONDecodeError as e:
@@ -289,7 +288,6 @@ class LogitechLedChecker:
         MODIFIED: This thread now also snapshots the set of active keys
         and includes it in the replay buffer tuple.
         """
-        self.logger.info("Starting background frame-reading and processing thread.")
         while not self.stopped:
             if self.cap and self.cap.isOpened():
                 ret, frame = self.cap.read()
@@ -331,14 +329,12 @@ class LogitechLedChecker:
                     backend_name_str = f" with backend {cv2.videoio_registry.getBackendName(self.preferred_backend)}" if self.preferred_backend and hasattr(cv2.videoio_registry, 'getBackendName') else ""
                     raise IOError(f"Cannot open webcam {self.camera_id}{backend_name_str} or with default backend.")
                 
-            self.logger.info("Applying hard-coded camera hardware settings...")
             prop_names = {
                 cv2.CAP_PROP_AUTO_EXPOSURE: "Auto Exposure",
                 cv2.CAP_PROP_EXPOSURE: "Exposure",
                 cv2.CAP_PROP_AUTOFOCUS: "Autofocus",
                 cv2.CAP_PROP_FOCUS: "Focus",
                 cv2.CAP_PROP_AUTO_WB: "Auto White Balance",
-                cv2.CAP_PROP_WB_TEMPERATURE: "White Balance Temp",
                 cv2.CAP_PROP_GAIN: "Gain",
                 cv2.CAP_PROP_BRIGHTNESS: "Brightness",
                 cv2.CAP_PROP_CONTRAST: "Contrast",
@@ -365,7 +361,7 @@ class LogitechLedChecker:
                 self.logger.debug(f"Attempting to set {prop_name} ({prop}) to {value}.")
                 if self.cap.set(prop, value):
                     actual_value = self.cap.get(prop)
-                    self.logger.info(f"Successfully set {prop_name} to {value} (read back: {actual_value}).")
+                    self.logger.debug(f"Successfully set {prop_name} to {value} (read back: {actual_value}).")
                     if actual_value != value and prop not in [cv2.CAP_PROP_AUTO_EXPOSURE, cv2.CAP_PROP_AUTOFOCUS, cv2.CAP_PROP_AUTO_WB]:
                          # Warning if the camera didn't take the exact value, common for some props
                         self.logger.warning(f"  Note: {prop_name} read back value ({actual_value}) differs from set value ({value}). Camera likely applied closest supported value.")
@@ -385,7 +381,7 @@ class LogitechLedChecker:
             actual_fps = self.cap.get(cv2.CAP_PROP_FPS)
             if actual_fps > 0:
                 self.replay_fps = float(actual_fps) 
-            self.logger.info(f"Camera Controller initialized successfully at {DEFAULT_FPS} FPS.")
+            self.logger.debug(f"Camera module initialized.")
         except Exception as e:
             self.logger.error(f"Failed to initialize camera {self.camera_id}: {e}", exc_info=True)
             self.is_camera_initialized = False
@@ -831,7 +827,7 @@ class LogitechLedChecker:
         if step_seen_at is None:
             # Special handling for initial 0-duration step not found
             if step_idx == 0 and min_d_orig == 0.0:
-                self.logger.info(f"Pattern step {step_idx + 1}/{total_steps}: '{target_state_str}' (0.00s) - Not present but 0 duration. Continuing.")
+                self.logger.info(f"{target_state_str} 0.00s ({step_idx + 1:02d}/{total_steps:02d}) (skipped, 0s duration)")
                 return True, "" # Treat as a skip/pass for 0-duration first step not seen
             return False, f"step_{step_idx+1}_not_seen_{target_state_str.replace(' ','_')}"
         
@@ -855,14 +851,14 @@ class LogitechLedChecker:
                 
                 # Check if minimum duration is met
                 if held_time >= min_d_check:
-                    self.logger.info(f"Pattern step {step_idx + 1}/{total_steps}: '{target_state_str}' held for {held_time:.2f}s.")
+                    self.logger.info(f"{target_state_str} {held_time:.2f}+ ({step_idx + 1:02d}/{total_steps:02d})")
                     return True, "" # Success for this step
             else: # State changed early
                 if held_time >= min_d_check:
-                    self.logger.info(f"Pattern step {step_idx + 1}/{total_steps}: '{target_state_str}' held for {held_time:.2f}s (state changed but min duration met).")
+                    self.logger.info(f"{target_state_str} {held_time:.2f}+ ({step_idx + 1:02d}/{total_steps:02d})")
                     return True, "" # Success for this step, as minimum was met
                 elif held_time >= (min_d_orig - self.duration_tolerance_sec):
-                    self.logger.warning(f"Pattern step {step_idx + 1}/{total_steps}: '{target_state_str}' held for {held_time:.2f}s. Shorter than required {min_d_orig:.2f}s but within tolerance. Passing.")
+                    self.logger.info(f"{target_state_str} {held_time:.2f} ({step_idx + 1:02d}/{total_steps:02d}) (within tolerance)")
                     return True, "" # Pass due to tolerance
                 else:
                     current_led_str = self._format_led_display_string(current_leds, ordered_keys)
@@ -872,7 +868,7 @@ class LogitechLedChecker:
 
         # If the loop finishes without success or failure (i.e., hit overall_timeout_end_time), it's a timeout.
         return False, f"timeout_hold_step_{step_idx+1}_held_{held_time:.2f}s"
-
+    
     def _await_state_appearance(self, target_state: Dict[str, int], timeout_end_time: float, 
                                fail_leds: Optional[List[str]] = None, 
                                last_state_info_for_logging: Optional[List[Any]] = None,
@@ -1118,7 +1114,7 @@ class LogitechLedChecker:
                 pattern_start_time = time.time()
                 overall_timeout_end_time = pattern_start_time + overall_timeout
                 
-                self.logger.info(f"Starting pattern confirmation of {len(pattern)} steps. Overall timeout: {overall_timeout:.2f}s")
+                self.logger.info(f"Attempting to match LED pattern...")
 
                 for current_step_idx, step_cfg in enumerate(pattern):
                     if time.time() > overall_timeout_end_time:

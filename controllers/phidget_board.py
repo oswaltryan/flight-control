@@ -107,7 +107,7 @@ class PhidgetController:
                     except Exception as e: self.logger.error(f"Unexpected error opening {type_name[:-1]} '{script_name}': {e}", exc_info=True); self._opened_physical_channels[unique_key] = None
                 self.channels[script_name] = self._opened_physical_channels.get(unique_key)
                 if not self.channels[script_name] and unique_key in self._opened_physical_channels: self.logger.warning(f"    Channel '{script_name}' failed init.")
-        self.logger.info("Phidget channel initialization complete.")
+        self.logger.debug("Phidget module initialized.")
 
     def _get_channel_object(self, name, expected_type=None):
         if name not in self.channels:

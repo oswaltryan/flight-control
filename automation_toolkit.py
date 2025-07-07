@@ -78,7 +78,7 @@ dut = None
 if at: # Only initialize DUT if 'at' was successful
     try:    
         dut = at.dut # Get the DUT instance directly from the controller
-        global_at_logger.info(f"Global DUT initialized.")
+        global_at_logger.debug(f"DUT module initialized.")
     except Exception as e_dut_create:
         global_at_logger.critical(f"Failed to create global 'dut' instance: {e_dut_create}", exc_info=True)
 
@@ -93,7 +93,7 @@ session = None
 if at and dut:
     try:
         session = TestSession(at_controller=at, dut_instance=dut)
-        global_at_logger.info(f"Test Session initialized.")
+        global_at_logger.debug(f"Test Session module initialized.")
     except Exception as e_session_create:
         global_at_logger.critical(f"Failed to create 'session' instance: {e_session_create}", exc_info=True)
         # session remains None
@@ -107,10 +107,10 @@ def get_session():
 # The FSM needs the 'at' controller.
 # It's crucial 'at' is initialized before the FSM if the FSM's __init__ uses 'at'.
 fsm = None
-if at and session: # Only initialize FSM if 'at' was successful
+if at and dut and session:
     try:
-        fsm = ApricornDeviceFSM(at_controller=at, session_instance=session) # <<< MODIFY T)
-        global_at_logger.info(f"Global FSM initialized. Initial state: {fsm.state}")
+        fsm = ApricornDeviceFSM(at_controller=at, session_instance=session, dut_instance=dut)
+        global_at_logger.debug(f"FSM module initialized.")
     except Exception as e_fsm_create:
         global_at_logger.critical(f"Failed to create global 'fsm' instance: {e_fsm_create}", exc_info=True)
         # fsm remains None
@@ -128,7 +128,6 @@ pin_gen = None
 if dut: # Only create it if the DUT was successful
     try:
         pin_gen = PINGenerator(dut_model=dut)
-        global_at_logger.info(f"Global PIN Generator initialized.")
     except Exception as e_pin_gen_create:
         global_at_logger.critical(f"Failed to create global 'pin_gen' instance: {e_pin_gen_create}", exc_info=True)
 else:
@@ -139,6 +138,9 @@ def get_pin_generator():
     if pin_gen is None:
         raise RuntimeError("Global 'pin_gen' was not successfully initialized.")
     return pin_gen
+
+if at and dut and fsm and pin_gen and session:
+    global_at_logger.info("All modules successfully initialized.")
 
 # --- Optional: Resource cleanup ---
 def _cleanup_global_at():
