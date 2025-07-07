@@ -101,7 +101,7 @@ class TestUnifiedController:
     def test_initialization_defaults_keypad_on_fsm_import_error(self, mock_dependencies, monkeypatch, caplog):
         """
         Tests that if 'DeviceUnderTest' fails to import during initialization,
-        the controller logs the error and defaults to the standard keypad layout
+        the controller logs the error and defaults to the portable keypad layout
         without crashing.
         """
         # --- ARRANGE ---
@@ -127,10 +127,10 @@ class TestUnifiedController:
 
         # 2. Verify that the correct error and warning messages were logged.
         assert "Failed to initialize DeviceUnderTest" in caplog.text
-        assert "Defaulting to 'standard' keypad layout" in caplog.text
+        assert "Defaulting to 'Portable' keypad layout" in caplog.text
 
-        # 3. Verify that the camera was initialized with the default 'standard' layout.
-        expected_default_layout = KEYPAD_LAYOUTS['standard']
+        # 3. Verify that the camera was initialized with the default 'Portable' layout.
+        expected_default_layout = KEYPAD_LAYOUTS['Portable']
         mock_camera_constructor.assert_called_once_with(
             camera_id=ANY,
             led_configs=ANY,
@@ -362,8 +362,8 @@ class TestUnifiedController:
     @pytest.mark.parametrize(
         "scan_result, log_level, expected_log_msg, expected_return",
         [
-            # Scenario 1: Successful scan
-            ("NEW_SERIAL_456", logging.INFO, "Successfully scanned new serial: NEW_SERIAL_456", "NEW_SERIAL_456"),
+            # Scenario 1: Successful scan (Updated to match implementation)
+            ("NEW_SERIAL_456", logging.DEBUG, "Scanned Serial Number: NEW_SERIAL_456", "NEW_SERIAL_456"),
             # Scenario 2: Scan fails or times out (returns None)
             (None, logging.WARNING, "On-demand barcode scan did not return data.", None),
         ]
@@ -373,27 +373,29 @@ class TestUnifiedController:
         Tests the scan_barcode method for both success and failure scenarios where the scanner is present.
         """
         # --- ARRANGE ---
-        # The mock scanner is set up by the mock_dependencies fixture
-        controller = UnifiedController()
+        # Patch DeviceUnderTest to prevent the implicit scan during controller init.
+        # This makes the test a true unit test of the scan_barcode method itself.
+        with patch('controllers.finite_state_machine.DeviceUnderTest'):
+            controller = UnifiedController()
+        
         mock_scanner_instance = mock_dependencies["scanner"].return_value
-        
-        # Configure the mock scanner to return the desired result for this test case
         mock_scanner_instance.await_scan.return_value = scan_result
-        
-        # Store the initial serial number from __init__ to check if it changes
+
+        # With the DUT patched, the initial serial number should be None.
         initial_serial = controller.scanned_serial_number
-        
+
         # --- ACT ---
-        with caplog.at_level(logging.INFO): # Capture INFO, WARNING, ERROR logs
+        # Set the level on the specific logger to ensure DEBUG messages are captured.
+        with caplog.at_level(logging.DEBUG, logger='controllers.unified_controller'):
             returned_value = controller.scan_barcode()
 
         # --- ASSERT ---
-        # The await_scan method should always be called when the scanner exists
+        # With the init scan patched, await_scan is now only called once.
         mock_scanner_instance.await_scan.assert_called_once()
-        
+
         # The return value from scan_barcode() should match the expected outcome
         assert returned_value == expected_return
-        
+
         # The log should contain the expected message
         assert expected_log_msg in caplog.text
         
@@ -401,7 +403,7 @@ class TestUnifiedController:
         if scan_result:
             assert controller.scanned_serial_number == scan_result
         else:
-            # If the scan failed, the serial number should not have changed
+            # If the scan failed, the serial number should not have changed from its initial state.
             assert controller.scanned_serial_number == initial_serial
 
     def test_scan_barcode_no_scanner(self, mock_dependencies, caplog):
@@ -431,8 +433,8 @@ class TestUnifiedController:
         mock_scanner_instance.await_scan.assert_not_called()
 
     @pytest.mark.parametrize("is_secure, expected_layout_key", [
-        (True, 'secure'),
-        (False, 'standard'),
+        (True, 'Secure Key'),
+        (False, 'Portable'),
     ])
     def test_initialization_passes_correct_keypad_layout(self, mock_dependencies, monkeypatch, is_secure, expected_layout_key):
         """
@@ -472,7 +474,7 @@ class TestUnifiedController:
             led_configs=ANY,
             display_order=ANY,
             logger_instance=ANY,
-            duration_tolerance_sec=ANY, # <<< FIX: Corrected keyword argument
+            duration_tolerance_sec=ANY,
             replay_post_failure_duration_sec=ANY,
             replay_output_dir=ANY,
             enable_instant_replay=ANY,

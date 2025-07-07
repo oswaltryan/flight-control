@@ -96,7 +96,7 @@ class DeviceUnderTest:
         global _CACHED_SCANNED_SERIAL
         self.at = at_controller
 
-        self.device_name = "padlock3-3637"
+        self.device_name = "ask3-3639"
 
         self.name: str = self.device_name
         self.battery: bool = False

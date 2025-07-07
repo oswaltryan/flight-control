@@ -33,7 +33,7 @@ class BarcodeScanner:
         """
         self.press_phidget_output = phidget_press_callback
 
-    def await_scan(self, timeout: int = 1) -> Optional[str]:
+    def await_scan(self, timeout: float = 1.0) -> Optional[str]:
         """
         Triggers scanner hardware and captures barcode input without echoing.
 
@@ -45,7 +45,7 @@ class BarcodeScanner:
         5. Returns the scanned data.
 
         Args:
-            timeout (int): The maximum time in seconds to wait for a scan.
+            timeout (float): The maximum time in seconds to wait for a scan.
 
         Returns:
             The scanned data as a string if successful, otherwise None.

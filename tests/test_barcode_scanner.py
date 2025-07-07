@@ -26,9 +26,7 @@ from controllers.barcode_scanner import BarcodeScanner
 
 @pytest.fixture
 def mock_phidget_callback():
-    def fake_callback(name, duration_ms):
-        time.sleep(duration_ms / 1000)  # simulate delay
-    return MagicMock(side_effect=fake_callback)
+    return MagicMock()
 
 @patch("controllers.barcode_scanner.keyboard.Listener")
 def test_successful_scan(mock_listener_class, mock_phidget_callback):
@@ -84,10 +82,12 @@ def test_scan_timeout_returns_none(mock_listener_class, mock_phidget_callback):
     mock_listener_class.return_value = mock_listener_instance
 
     scanner = BarcodeScanner(phidget_press_callback=mock_phidget_callback)
-    result = scanner.await_scan(timeout=1)
+    # Use a very short timeout to speed up the test
+    result = scanner.await_scan(timeout=0.01)
 
     assert result is None
-    mock_phidget_callback.assert_called_once_with("barcode", 1000)
+    # The duration passed to the callback is now timeout * 1000 = 10ms
+    mock_phidget_callback.assert_called_once_with("barcode", 10)
 
 @patch("controllers.barcode_scanner.keyboard.Listener")
 def test_flush_buffer_windows(mock_listener_class, mock_phidget_callback):
@@ -111,15 +111,14 @@ def test_flush_buffer_windows(mock_listener_class, mock_phidget_callback):
             mock_msvcrt.kbhit.side_effect = [True, True, False]
             mock_msvcrt.getch.return_value = b'x'
 
-            # WHEN the scanner is used
+            # WHEN the scanner is used with a short timeout
             scanner = BarcodeScanner(phidget_press_callback=mock_phidget_callback)
-            result = scanner.await_scan(timeout=1)
+            result = scanner.await_scan(timeout=0.01)
 
             # THEN the buffer flushing logic should be called correctly
             assert result is None
             assert mock_phidget_callback.call_count == 1
             assert mock_msvcrt.getch.call_count == 2
-
 
 def test_flush_buffer_unix():
     """
@@ -142,14 +141,13 @@ def test_flush_buffer_unix():
 
                 mock_phidget_callback = MagicMock()
 
-                # WHEN the scanner is used
+                # WHEN the scanner is used with a short timeout
                 scanner = BarcodeScanner(phidget_press_callback=mock_phidget_callback)
-                result = scanner.await_scan(timeout=1)
+                result = scanner.await_scan(timeout=0.01)
 
                 # THEN the buffer flushing logic should be called correctly
                 assert result is None
                 mock_termios.tcflush.assert_called_once_with(sys.stdin, mock_termios.TCIOFLUSH)
-
 
 @patch("controllers.barcode_scanner.keyboard.Listener")
 def test_scan_complete_event_prevents_extra_keys(mock_listener_class):

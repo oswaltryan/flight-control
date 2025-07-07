@@ -68,10 +68,13 @@ if __name__ == "__main__":
     os.environ['FSM_DIAGRAM_MODE'] = 'true'
 
     # <<< FIX: Import TestSession for type casting >>>
-    from controllers.finite_state_machine import ApricornDeviceFSM, TestSession
+    from controllers.finite_state_machine import ApricornDeviceFSM, DeviceUnderTest, TestSession
     from transitions.extensions import GraphMachine
     from controllers.unified_controller import UnifiedController
     from typing import cast
+
+    class MockDeviceUnderTest:
+        pass
 
     DOCS_DIR = os.path.join(PROJECT_ROOT, 'docs')
     print(f"Ensuring output directory exists: {DOCS_DIR}")
@@ -80,9 +83,11 @@ if __name__ == "__main__":
     print("\nInitializing original FSM to access its configuration...")
     mock_at = MockUnifiedController()
     mock_session = MockTestSession()
+    mock_dut = MockDeviceUnderTest()
     fsm_config_source = ApricornDeviceFSM(
         at_controller=cast(UnifiedController, mock_at),
-        session_instance=cast(TestSession, mock_session)
+        session_instance=cast(TestSession, mock_session),
+        dut_instance=cast(DeviceUnderTest, mock_dut)
     )
 
     # 1. Build and generate the complete, detailed diagram

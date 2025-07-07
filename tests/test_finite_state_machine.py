@@ -93,9 +93,9 @@ def fsm(mock_at, dut_instance, mock_session):
     """Creates a fresh FSM instance using mocked dependencies."""
     fsm_instance = ApricornDeviceFSM(
         at_controller=mock_at,
-        session_instance=mock_session
+        session_instance=mock_session,
+        dut_instance=dut_instance
     )
-    fsm_instance.dut = dut_instance
     return fsm_instance
 
 # Helper to get the reloaded exception class
@@ -181,9 +181,9 @@ class TestDeviceUnderTest:
     def test_init(self, dut_instance, mock_at):
         """Test that __init__ correctly assigns properties from the loaded JSON."""
         assert dut_instance.at == mock_at
-        assert dut_instance.name == "padlock3-3637"
-        assert dut_instance.bridge_fw == "0510"
-        assert dut_instance.fips == 0
+        assert dut_instance.name == "ask3-3639"
+        assert dut_instance.bridge_fw == "0501"
+        assert dut_instance.fips == 3
         assert dut_instance.scanned_serial_number == "TEST_SERIAL_123"
         assert dut_instance.brute_force_counter_current == 20
 
@@ -776,7 +776,7 @@ class TestApricornDeviceFSM:
     # Case 2: Diagram mode is OFF, do not expect the kwarg
     ('false', False),
     ])
-    def test_fsm_initialization_with_diagram_mode(self, monkeypatch, mock_at, mock_session, diagram_mode_env, expect_graph_engine):
+    def test_fsm_initialization_with_diagram_mode(self, monkeypatch, mock_at, dut_instance, mock_session, diagram_mode_env, expect_graph_engine):
         """
         GIVEN a specific FSM_DIAGRAM_MODE environment setting
         WHEN the ApricornDeviceFSM is initialized
@@ -792,7 +792,8 @@ class TestApricornDeviceFSM:
             # WHEN: The FSM is instantiated.
             fsm_instance = finite_state_machine.ApricornDeviceFSM(
                 at_controller=mock_at,
-                session_instance=mock_session # Use the mock_session fixture
+                session_instance=mock_session,
+                dut_instance=dut_instance
             )
 
             # THEN: Assert the constructor for the Machine was called.
@@ -850,6 +851,25 @@ class TestApricornDeviceFSM:
 
         # THEN: The initialization log message should have been captured.
         assert f"FSM initialized to state: {fsm.state}" in caplog.text
+
+    def test_init_with_explicit_serial_number(self, mock_at):
+        """
+        Tests that passing a serial number to the constructor correctly sets
+        the instance attribute and the module-level cache. This covers the
+        'if scanned_serial_number is not None:' branch.
+        """
+        # GIVEN: The module-level cache is initially None to prove it gets updated
+        finite_state_machine._CACHED_SCANNED_SERIAL = None
+        explicit_serial = "EXPLICIT_SN_12345"
+
+        # WHEN: A DeviceUnderTest is instantiated with an explicit serial number
+        dut = DeviceUnderTest(at_controller=mock_at, scanned_serial_number=explicit_serial)
+
+        # THEN: The instance's attribute should be set to the explicit serial
+        assert dut.scanned_serial_number == explicit_serial
+
+        # AND: The module-level cache should also be updated with the explicit serial
+        assert finite_state_machine._CACHED_SCANNED_SERIAL == explicit_serial
 
     @pytest.mark.parametrize("valid_enum_type", [
         "pin",
@@ -1470,9 +1490,11 @@ class TestApricornDeviceFSM:
             timeout=10
         )
 
-    def test_do_user_reset_from_admin_mode(self, fsm, mock_at, dut_instance):
+    def test_do_user_reset_from_admin_mode(self, fsm, mock_at, dut_instance, monkeypatch):
         """Test successful user reset when initiated from ADMIN_MODE."""
         # GIVEN
+        mock_sleep = MagicMock()
+        monkeypatch.setattr(time, 'sleep', mock_sleep)
         fsm.state = 'ADMIN_MODE'
         dut_instance.admin_pin = ['1']
         
@@ -1480,18 +1502,21 @@ class TestApricornDeviceFSM:
         fsm._do_user_reset(MagicMock(transition=MagicMock()))
         
         # THEN
+        mock_sleep.assert_called_with(9)
         assert dut_instance.admin_pin == []
         mock_at.sequence.assert_called_once_with([["lock", "unlock", "key2"]], pause_duration_ms=ANY)
         mock_at.confirm_led_solid.assert_called_once()
         mock_at.on.assert_not_called() # Should use sequence, not .on()
 
     @pytest.mark.parametrize("hw_success", [True, False])
-    def test_do_user_reset_from_standby_mode(self, fsm, mock_at, dut_instance, hw_success):
+    def test_do_user_reset_from_standby_mode(self, fsm, mock_at, dut_instance, hw_success, monkeypatch):
         """
         Test user reset when initiated from a non-ADMIN_MODE state (e.g., STANDBY).
         This covers the 'else' block of the function.
         """
         # GIVEN: The FSM is in a state other than ADMIN_MODE
+        mock_sleep = MagicMock()
+        monkeypatch.setattr(time, 'sleep', mock_sleep)
         fsm.state = 'STANDBY_MODE'
         dut_instance.admin_pin = ['1']
         
@@ -1504,6 +1529,7 @@ class TestApricornDeviceFSM:
             fsm._do_user_reset(MagicMock(transition=MagicMock()))
             
             # Assert the `else` block's logic was followed
+            mock_sleep.assert_called_with(9)
             mock_at.on.assert_called_once_with("lock", "unlock", "key2")
             mock_at.await_and_confirm_led_pattern.assert_called_once_with(
                 LEDs["RED_BLUE"], timeout=15, replay_extra_context=ANY
@@ -1518,12 +1544,15 @@ class TestApricornDeviceFSM:
                 fsm._do_user_reset(MagicMock(transition=MagicMock()))
 
             # Assert the function aborted before clearing data
+            mock_sleep.assert_not_called()
             assert dut_instance.admin_pin == ['1']
             mock_at.on.assert_called_once_with("lock", "unlock", "key2")
             mock_at.off.assert_not_called() # Should not be called if it aborts early
 
-    def test_do_user_reset_failure(self, fsm, mock_at, dut_instance):
+    def test_do_user_reset_failure(self, fsm, mock_at, dut_instance, monkeypatch):
         # This test remains valid for testing a failure in the final confirmation step
+        mock_sleep = MagicMock()
+        monkeypatch.setattr(time, 'sleep', mock_sleep)
         fsm.state = 'ADMIN_MODE'
         dut_instance.admin_pin = ['1']
         mock_at.confirm_led_solid.return_value = False # Simulate final HW failure
@@ -1531,6 +1560,8 @@ class TestApricornDeviceFSM:
         ExpectedException = get_reloaded_exception()
         with pytest.raises(ExpectedException, match="Failed to observe user reset confirmation pattern"):
             fsm._do_user_reset(event)
+        
+        mock_sleep.assert_called_with(9)
         assert dut_instance.admin_pin == ['1']
         
     @pytest.mark.parametrize("is_secure_key", [True, False])
@@ -2000,8 +2031,8 @@ class TestApricornDeviceFSM:
         assert dut_instance.pending_enrollment_type is None
 
     @pytest.mark.parametrize("enrollment_type, pin_attr, expected_error_msg", [
-        ("user", "user_pin", "All 4 user slots are full"),
-        ("recovery", "recovery_pin", "All 4 recovery slots are full"),
+        ("user", "user_pin", "Enrollment failed as expected: All 1 user slots are full"),
+        ("recovery", "recovery_pin", "Enrollment failed as expected: All 4 recovery slots are full"),
     ])
     @pytest.mark.parametrize("hw_observes_reject", [True, False])
     def test_pin_enrollment_fails_when_slots_full(self, fsm, mock_at, dut_instance, enrollment_type, pin_attr, expected_error_msg, hw_observes_reject):

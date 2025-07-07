@@ -96,7 +96,8 @@ class TestAutomationToolkit:
         )
         mock_fsm.assert_called_once_with(
             at_controller=mock_at_instance,
-            session_instance=mock_session.return_value
+            session_instance=mock_session.return_value,
+            dut_instance=mock_dut_instance
         )
         mock_pingenerator.assert_called_once_with(dut_model=mock_dut_instance)
 

@@ -778,7 +778,7 @@ class TestLogitechLedCheckerMethods:
         )
 
         # 3. Verify the success log for the matching value
-        mock_logger.info.assert_any_call("Successfully set Exposure to -6 (read back: -6).")
+        mock_logger.debug.assert_any_call("Successfully set Exposure to -6 (read back: -6).")
 
     def test_clear_camera_buffer_handles_exception(self, checker, mock_logger):
         """
@@ -1115,7 +1115,7 @@ class TestLogitechLedCheckerMethods:
 
     @pytest.mark.parametrize("held_time, min_duration, tolerance, expected_log_level, description", [
         (1.1, 1.0, 0.2, "info", "State changed AFTER min duration was met"),
-        (0.9, 1.0, 0.2, "warning", "State changed WITHIN tolerance window")
+        (0.9, 1.0, 0.2, "info", "State changed WITHIN tolerance window")
     ])
     def test_process_pattern_step_state_changes_after_hold(self, checker, mock_logger,
                                                          held_time, min_duration, tolerance,
@@ -1158,20 +1158,20 @@ class TestLogitechLedCheckerMethods:
             yield next(time_generator) # current_step_find_timeout_end_time calc
             yield next(time_generator) # 'find' loop time check
             yield time_seen            # 'find' loop -> step_seen_at = 1001.0
-            
+
             # Now, in the 'hold' loop, let time advance until it's time for the change
             current_time = time_seen
             while current_time < time_changed:
                 current_time += 0.1
                 yield current_time
-            
+
             # Yield the change time and continue indefinitely from there
             while True:
                 yield time_changed
-        
+
         with patch('controllers.logitech_webcam.time.time', side_effect=controlled_time_generator()), \
              patch('controllers.logitech_webcam.time.sleep'):
-            
+
             mock_logger.reset_mock()
             # ACT
             success, reason = checker._process_pattern_step(step_config, ordered_keys, overall_timeout, 0, 1)
@@ -1179,7 +1179,7 @@ class TestLogitechLedCheckerMethods:
         # ASSERT
         assert success is True, description
         assert reason == "", description
-        
+
         # Check that the correct log (info or warning) was called
         log_method = getattr(mock_logger, expected_log_level)
         log_method.assert_called_once()
@@ -1208,10 +1208,10 @@ class TestLogitechLedCheckerMethods:
         # for the two critical moments to ensure the duration calculation is exact.
         time_state_seen = 1001.0
         time_state_changed = time_state_seen + min_duration # 1001.5
-        
+
         # This generator handles all background time.time() calls
         time_generator = itertools.count(start=1000.0, step=0.01)
-        
+
         # The side_effect list will precisely control the critical calls.
         time_side_effect = [
             next(time_generator),   # for step_find_start_time
@@ -1226,7 +1226,7 @@ class TestLogitechLedCheckerMethods:
 
         with patch('controllers.logitech_webcam.time.time', side_effect=time_side_effect), \
              patch('controllers.logitech_webcam.time.sleep'):
-            
+
             mock_logger.reset_mock()
             # ACT
             success, reason = checker._process_pattern_step(step_config, ordered_keys, overall_timeout, 0, 1)
@@ -1237,7 +1237,7 @@ class TestLogitechLedCheckerMethods:
 
         # Verify the specific info log for this success path was called.
         mock_logger.info.assert_called_once_with(
-            f"Pattern step 1/1: '[RED ON]' held for {min_duration:.2f}s (state changed but min duration met)."
+            f"[RED ON] {min_duration:.2f}+ (01/01)"
         )
 
     def test_confirm_led_solid_success_path_and_state_reset(self, checker, mock_logger):
@@ -2594,7 +2594,7 @@ class TestConfirmLedPattern:
         assert result is True # Should be True as both steps will "pass"
 
         # The log message should be captured:
-        assert "Not present but 0 duration" in caplog.text
+        assert "(skipped, 0s duration)" in caplog.text
         assert "LED pattern confirmed successfully." in caplog.text
 
     def test_hold_time_exceeds_max_duration(self, checker, caplog):
@@ -2723,13 +2723,13 @@ class TestConfirmLedPattern:
         # held_time will be approximately the difference between step_seen_at and when bad_state is seen,
         # which in this precise mock is 0.001s (1000.001 - 1000.000) or very close.
         # min_d_orig is 1.0
-        
+
         # Calculate expected held_time based on mocked time values
         # step_seen_at occurs after 1 call to time.time() inside _process_pattern_step (for current_step_find_timeout_end_time)
         # and then 1 call for _get_current_led_state_from_camera (which internally calls time.time())
         # and then 1 call for step_seen_at = time.time().
         # So step_seen_at ~ start_time + 3*0.001 = 1000.003
-        
+
         # When `bad_state` is received, time will be ~ start_time + X*0.001.
         # The first time current_leds is `bad_state`, it occurs after _get_current_led_state_from_camera
         # which means time has incremented at least once more.
@@ -2744,20 +2744,14 @@ class TestConfirmLedPattern:
             f"step_1_state_{str({'green': 1}).replace(' ','_')}_changed_to_"
             f"{str({'red': 1}).replace(' ','_')}_early_held_{expected_held_time:.2f}s_min_{expected_min_d_orig:.2f}s" # Corrected line
         )
-        
+
         checker._stop_replay_recording.assert_called_once_with(
             success=False,
             failure_reason=expected_failure_reason
         )
 
         # We can also assert that the initial pattern confirmation message was logged
-        assert "Starting pattern confirmation of 1 steps." in caplog.text
-
-        # The specific early change log from _process_pattern_step is NOT a warning level.
-        # It's a return value. So we don't expect a specific warning log from this scenario
-        # unless it hits the tolerance path (which it won't here, as 0.001s is far from 1.0s).
-        # The `caplog.text` will also contain the ERROR from `_stop_replay_recording` if replay is enabled.
-        # We confirm the `result` and `_stop_replay_recording` call, which is sufficient.
+        assert "Attempting to match LED pattern..." in caplog.text
 
     def test_generic_exception_handling(self, checker, caplog):
         """Tests the outer try...except block."""
