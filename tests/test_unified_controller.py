@@ -105,32 +105,25 @@ class TestUnifiedController:
         without crashing.
         """
         # --- ARRANGE ---
-        # Get handles to the modules and mocks we need.
         from unittest.mock import ANY
         from utils.config.keypad_layouts import KEYPAD_LAYOUTS
         import controllers.finite_state_machine as fsm_module_to_break
 
-        # Temporarily delete the 'DeviceUnderTest' class to force an ImportError.
         monkeypatch.delattr(fsm_module_to_break, 'DeviceUnderTest')
-        
-        # Get a reference to the mock camera constructor to check its call args later.
+
         mock_camera_constructor = mock_dependencies["camera"]
 
         # --- ACT ---
-        # Set the log capture level to WARNING to catch both ERROR and WARNING logs.
         with caplog.at_level(logging.WARNING):
             controller = UnifiedController()
 
         # --- ASSERT ---
-        # 1. Verify that the controller was created.
         assert controller is not None
-
-        # 2. Verify that the correct error and warning messages were logged.
         assert "Failed to initialize DeviceUnderTest" in caplog.text
         assert "Defaulting to 'Portable' keypad layout" in caplog.text
-
-        # 3. Verify that the camera was initialized with the default 'Portable' layout.
         expected_default_layout = KEYPAD_LAYOUTS['Portable']
+
+        # [BUG FIX] Add the new 'camera_hw_settings' parameter to the assertion.
         mock_camera_constructor.assert_called_once_with(
             camera_id=ANY,
             led_configs=ANY,
@@ -140,8 +133,46 @@ class TestUnifiedController:
             replay_post_failure_duration_sec=ANY,
             replay_output_dir=ANY,
             enable_instant_replay=ANY,
-            keypad_layout=expected_default_layout
+            keypad_layout=expected_default_layout,
+            camera_hw_settings=ANY # <-- ADD THIS LINE
         )
+
+    def test_initialization_skips_barcode_scan(self, mock_dependencies, caplog):
+        """
+        Tests that when skip_initial_scan=True, the DUT is initialized
+        with a placeholder serial number, and an info message is logged.
+        """
+        # --- ARRANGE ---
+        # Mock the function that loads settings from the JSON file to provide
+        # a predictable device name for the test.
+        mock_settings_return = ({}, {}, "test_device_profile_from_config")
+
+        # --- [BUG FIX] ---
+        # Patch both functions where they are DEFINED, not where they are imported/used.
+        with patch('controllers.logitech_webcam._load_all_camera_settings', return_value=mock_settings_return), \
+             patch('controllers.finite_state_machine.DeviceUnderTest') as mock_dut_constructor:
+            # --- [END BUG FIX] ---
+
+            # --- ACT ---
+            # Initialize the controller with the skip_initial_scan flag set to True.
+            # Capture logs at the INFO level to verify the log message.
+            with caplog.at_level(logging.INFO):
+                controller = UnifiedController(skip_initial_scan=True)
+
+            # --- ASSERT ---
+            # 1. Verify that the correct informational message was logged.
+            assert "DUT initialization requested to skip initial barcode scan." in caplog.text
+
+            # 2. Verify that the DeviceUnderTest constructor was called exactly once.
+            mock_dut_constructor.assert_called_once()
+
+            # 3. Inspect the keyword arguments passed to the constructor to ensure
+            #    they match the logic in the 'if skip_initial_scan:' block.
+            call_kwargs = mock_dut_constructor.call_args.kwargs
+            
+            assert call_kwargs.get('at_controller') is controller
+            assert call_kwargs.get('target_device_profile') == "test_device_profile_from_config"
+            assert call_kwargs.get('scanned_serial_number') == "SCAN_SKIPPED_BY_TOOL"
 
     def test_initialization_handles_phidget_exception(self, mock_dependencies, caplog):
         """
@@ -440,28 +471,21 @@ class TestUnifiedController:
         """
         Tests that the correct keypad layout is determined based on the DUT's
         'secure_key' attribute and passed to the camera checker's constructor.
-        This replaces the invalid 'test_set_keypad_layout_delegation' test.
         """
         # GIVEN: We will mock the DeviceUnderTest to control its attributes.
-        # We also need to import KEYPAD_LAYOUTS to get the expected value.
         from unittest.mock import ANY
         from utils.config.keypad_layouts import KEYPAD_LAYOUTS
         from controllers import finite_state_machine
 
         mock_dut_instance = MagicMock()
         mock_dut_instance.secure_key = is_secure
-        # Ensure the barcode scan check in __init__ passes
         mock_dut_instance.scanned_serial_number = "MOCK_SERIAL_123"
 
-        # Patch the DeviceUnderTest class within the finite_state_machine module
-        # so when UnifiedController tries to instantiate it, it gets our controlled mock.
         monkeypatch.setattr(finite_state_machine, 'DeviceUnderTest', lambda *args, **kwargs: mock_dut_instance)
 
         # WHEN: The UnifiedController is initialized.
-        # We must also patch sys.exit to prevent the test runner from exiting.
         with patch('sys.exit') as mock_exit:
             controller = UnifiedController()
-            # Ensure the controller didn't try to exit due to a failed scan
             mock_exit.assert_not_called()
 
         # THEN: The LogitechLedChecker constructor should have been called with
@@ -469,6 +493,7 @@ class TestUnifiedController:
         expected_layout = KEYPAD_LAYOUTS[expected_layout_key]
         mock_camera_constructor = mock_dependencies["camera"]
 
+        # [BUG FIX] Add the new 'camera_hw_settings' parameter to the assertion.
         mock_camera_constructor.assert_called_once_with(
             camera_id=ANY,
             led_configs=ANY,
@@ -478,7 +503,8 @@ class TestUnifiedController:
             replay_post_failure_duration_sec=ANY,
             replay_output_dir=ANY,
             enable_instant_replay=ANY,
-            keypad_layout=expected_layout
+            keypad_layout=expected_layout,
+            camera_hw_settings=ANY # <-- ADD THIS LINE
         )
 
     def test_run_fio_tests_path_formatting(self, mock_dependencies, monkeypatch):

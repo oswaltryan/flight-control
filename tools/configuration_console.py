@@ -61,7 +61,7 @@ else:
 
 # --- Other Configuration ---
 CAMERA_ID = 0
-
+VALID_FOCUS_VALUES = list(range(0, 255, 5))
 
 # --- Main Application Class ---
 class App:
@@ -76,6 +76,7 @@ class App:
         self.cap: Optional[cv2.VideoCapture] = None
         self.imgtk = None
         self._debounce_job = None
+        self.target_device_profile: Optional[str] = None
 
         # --- Variables for ROI Tuning ---
         self.tune_led_button: Optional[tk.Button] = None
@@ -135,6 +136,7 @@ class App:
         self.root.bind("<ButtonPress-1>", self._on_drag_start)
         self.root.bind("<B1-Motion>", self._on_drag_move)
         self.root.bind("<ButtonRelease-1>", self._on_drag_end)
+        self.root.bind('<Escape>', self._abort_tuning_on_escape)
         self.root.protocol("WM_DELETE_WINDOW", self._on_closing)
         threading.Thread(target=self.initialize_hardware, daemon=True).start()
 
@@ -176,12 +178,9 @@ class App:
 
     def _create_controls_layout(self):
         """Creates and packs all UI control elements (keypad, toggles, sliders)."""
-        # Define a single, consistent padding value for all major groups.
         GROUP_PADDING = 5
 
         # --- Group 1: Keypad Frame (Structure Only) ---
-        # OPTIMIZATION: This now only creates the frame and its title.
-        # The actual buttons are generated once and only once by _populate_keypad().
         self.keypad_frame = tk.Frame(self.left_panel, relief=tk.GROOVE, borderwidth=2, padx=5, pady=5)
         self.keypad_frame.pack(side=tk.TOP, pady=GROUP_PADDING, padx=0, fill=tk.X)
         tk.Label(self.keypad_frame, text="Phidget I/Os", font=self.label_font).grid(row=0, column=0, columnspan=3, pady=(0, 5))
@@ -196,19 +195,32 @@ class App:
 
         # --- Group 3: A single frame for all action buttons at the bottom ---
         action_button_frame = tk.Frame(self.left_panel)
-        action_button_frame.pack(side=tk.TOP, pady=(GROUP_PADDING, 2), fill=tk.X)
+        # This frame is packed at the top level, which will center it by default
+        action_button_frame.pack(side=tk.TOP, pady=(GROUP_PADDING, 2))
 
-        # Configure two columns with equal weight to place buttons side-by-side and ensure equal width.
-        action_button_frame.columnconfigure(0, weight=1)
-        action_button_frame.columnconfigure(1, weight=1)
+        # --- [BUG FIX] ---
+        # A fixed width is set ONLY for the tune_led_button.
+        # No 'sticky' or 'columnconfigure' options are used, so buttons will not stretch.
+        TUNE_BUTTON_WIDTH = 17
 
         # 'Tune LED Coordinates' button
-        self.tune_led_button = tk.Button(action_button_frame, text="Tune LED Coordinates", command=self._start_tuning_action, state=tk.DISABLED)
-        self.tune_led_button.grid(row=0, column=1, sticky="ew", padx=(2, 0))
+        self.tune_led_button = tk.Button(
+            action_button_frame, 
+            text="Tune LED Coordinates", 
+            command=self._start_tuning_action, 
+            state=tk.DISABLED, 
+            width=TUNE_BUTTON_WIDTH  # Apply fixed width here
+        )
+        # Grid is used here just to place the two buttons neatly side-by-side
+        self.tune_led_button.grid(row=0, column=1, padx=(2, 0))
 
-        # 'Save Settings' button
-        save_button = tk.Button(action_button_frame, text="Save Settings", command=self._save_settings_action)
-        save_button.grid(row=0, column=0, sticky="ew", padx=(0, 2))
+        # 'Save Settings' button now has no fixed width and will size to its text
+        save_button = tk.Button(
+            action_button_frame, 
+            text="Save Settings", 
+            command=self._save_settings_action
+        )
+        save_button.grid(row=0, column=0, padx=(0, 2))
 
     def _get_relative_coords(self, event) -> tuple[Optional[int], Optional[int]]:
         """
@@ -277,9 +289,20 @@ class App:
             if self.tune_led_button:
                 self.tune_led_button.config(text=f"Click/drag to place {next_led_key.upper()} LED", fg=next_led_key)
         else:
-            # --- FIX: Last LED is done, so save settings and finish ---
-            logger.info("Final LED tuned. Saving all new ROI coordinates...")
-            self._save_settings()
+            # --- FIX: Last LED is done, so apply to live config, save, and finish ---
+            logger.info("Final LED tuned. Applying new ROIs and saving...")
+
+            # --- [BUG FIX START] ---
+            # This is the crucial new block. It updates the live, in-memory
+            # configuration that the video renderer uses after tuning is complete.
+            if self.checker:
+                for led_key, new_roi_coords in self.new_rois.items():
+                    if led_key in self.checker.led_configs:
+                        self.checker.led_configs[led_key]['roi'] = new_roi_coords
+                        logger.debug(f"Updated live ROI for '{led_key}': {new_roi_coords}")
+            # --- [BUG FIX END] ---
+            
+            self._save_settings() # Save the new settings to the JSON file
             if self.tune_led_button:
                 self.tune_led_button.config(text="Tuning Complete!", fg="black")
             
@@ -292,23 +315,28 @@ class App:
             return
 
         led_key = self.tuning_leds[self.tuning_step]
-        roi_width, roi_height = 40, 40
-        
-        # The offset is still needed based on your last successful test
+
+        # --- [BUG FIX] ---
+        # Get the current width and height from the ROI we are tuning.
+        # This preserves the size that was dynamically set when tuning started.
+        # Default to (40, 40) as a safe fallback if the key somehow doesn't exist.
+        _prev_x, _prev_y, roi_width, roi_height = self.new_rois.get(led_key, (0, 0, 40, 40))
+
+        # The offset calculation remains the same
         new_x = x - (roi_width // 2) - 2
-        new_y = y - (roi_height // 2) - 160
+        new_y = y - (roi_height // 2) - 40
         
+        # Update the dictionary with the new position but the PRESERVED size.
         self.new_rois[led_key] = (new_x, new_y, roi_width, roi_height)
 
     def _start_tuning_action(self):
         """Begins or aborts the interactive ROI tuning process."""
         if self.is_tuning:
-            # --- If already tuning, abort the operation ---
             self.is_tuning = False
             if self.tune_led_button:
                 self.tune_led_button.config(text="Tune LED Coordinates")
             logger.info("ROI tuning aborted by user.")
-            self._finish_tuning() # Call finish to re-enable controls
+            self._finish_tuning()
             return
 
         if not self.checker:
@@ -318,9 +346,17 @@ class App:
         self.is_tuning = True
         self.tuning_step = 0
         
+        # Determine the current ROI size from the live checker to use for tuning
+        # This makes the tool robust to whichever size was loaded.
+        current_roi_w, current_roi_h = 40, 40 # Default fallback
+        if 'red' in self.checker.led_configs and 'roi' in self.checker.led_configs['red']:
+             _, _, current_roi_w, current_roi_h = self.checker.led_configs['red']['roi']
+             logger.info(f"Initializing tuning session with current ROI size: {current_roi_w}x{current_roi_h}")
+
+        # Initialize new_rois with current positions but dynamic size for drawing
         self.new_rois = {
-            key: config.get('roi', (0, 0, 10, 10))
-            for key, config in self.checker.led_configs.items()
+            key: (config['roi'][0], config['roi'][1], current_roi_w, current_roi_h)
+            for key, config in self.checker.led_configs.items() if 'roi' in config
         }
         
         # Disable other controls to avoid conflicts
@@ -330,7 +366,6 @@ class App:
         for slider in self.sliders:
             slider.config(state=tk.DISABLED)
         
-        # --- FIX: Update button text to provide instructions ---
         first_led = self.tuning_leds[0]
         if self.tune_led_button:
             self.tune_led_button.config(text=f"Click on the {first_led.upper()} LED", fg=first_led)
@@ -351,6 +386,13 @@ class App:
         if self.scan_button: self.scan_button.config(state=tk.NORMAL)
         for slider in self.sliders:
             slider.config(state=tk.NORMAL)
+
+    def _abort_tuning_on_escape(self, event):
+        """Event handler to abort the ROI tuning process when 'Esc' is pressed."""
+        if self.is_tuning:
+            logger.info("ROI tuning aborted by user via Escape key.")
+            # Re-use the existing finish method to reset the UI and state
+            self._finish_tuning()
 
     def _on_keypad_press(self, event, key_name: str):
         """Handles the mouse-down event on a keypad button."""
@@ -460,10 +502,19 @@ class App:
         """Initializes hardware in a background thread, then schedules UI finalization."""
         try:
             logger.info("Initializing UnifiedController...")
+            try:
+                with open(CAMERA_SETTINGS_SAVE_PATH, 'r') as f:
+                    settings_data = json.load(f)
+                    self.target_device_profile = settings_data.get('target_device_profile')
+                    logger.info(f"Loaded and will preserve target device profile: '{self.target_device_profile}'")
+            except (FileNotFoundError, json.JSONDecodeError, TypeError) as e:
+                logger.warning(f"Could not pre-load settings to preserve device profile: {e}")
+            
             self.controller = UnifiedController(
                 camera_id=CAMERA_ID,
                 logger_instance=logger.getChild("UnifiedCtrl"),
-                replay_output_dir=None
+                replay_output_dir=None,
+                skip_initial_scan=True
             )
 
             if not self.controller.is_fully_initialized:
@@ -515,12 +566,12 @@ class App:
 
         # Determine which layout to use based on the initialized DUT.
         if self.dut and self.dut.secure_key:
-            logger.info("Secure_key device detected, using 2-column keypad layout.")
-            keypad_layout = KEYPAD_LAYOUTS['secure']
+            logger.info("Secure Key device detected, using 2-column keypad layout.")
+            keypad_layout = KEYPAD_LAYOUTS['Secure Key']
             num_columns = 2
         else:
-            logger.info("Standard device detected, using 3-column keypad layout.")
-            keypad_layout = KEYPAD_LAYOUTS['standard']
+            logger.info("Portable device detected, using 3-column keypad layout.")
+            keypad_layout = KEYPAD_LAYOUTS['Portable']
             num_columns = 3
         
         # Configure keypad columns to have equal weight.
@@ -616,7 +667,7 @@ class App:
             orient=tk.HORIZONTAL,
             variable=self.target_settings[key],
             showvalue=False,  # We are showing our own label
-            command=self._on_slider_move,
+            command=lambda value, k=key: self._on_slider_move(k, value),
             state=tk.DISABLED
         )
         # Use sticky="ew" to make the slider expand horizontally to fill its column.
@@ -634,55 +685,59 @@ class App:
 
         return slider
 
-    def _on_slider_move(self, value):
-        """Debounced callback for when any slider is moved."""
+    def _apply_single_setting(self, key: str, value: int):
+        """Applies a single camera setting to the hardware."""
+        if not self.cap or not self.cap.isOpened(): return
+
+        logger.info(f"--- Applying setting for {key}: {value} ---")
+        
+        if key == "focus":
+            logger.info(f"Attempting to set Autofocus to 0 (Off)...")
+            self.cap.set(cv2.CAP_PROP_AUTOFOCUS, 0)
+            logger.info(f"Attempting to set Focus to: {value}")
+            if self.cap.set(cv2.CAP_PROP_FOCUS, value):
+                logger.info(f"  Actual Focus after set: {self.cap.get(cv2.CAP_PROP_FOCUS)}")
+            else:
+                logger.warning(f"  Failed to set Focus to {value}.")
+        
+        elif key == "brightness":
+            logger.info(f"Attempting to set Brightness to: {value}")
+            if self.cap.set(cv2.CAP_PROP_BRIGHTNESS, value):
+                logger.info(f"  Actual Brightness after set: {self.cap.get(cv2.CAP_PROP_BRIGHTNESS)}")
+            else:
+                logger.warning(f"  Failed to set Brightness to {value}.")
+
+        elif key == "exposure":
+            # UI value is positive, OpenCV value is negative
+            exposure_val_cv = -value
+            logger.info(f"Attempting to set Auto Exposure to 0 (Manual)...")
+            self.cap.set(cv2.CAP_PROP_AUTO_EXPOSURE, 0)
+            logger.info(f"Attempting to set Exposure (UI: {value}) to CV value: {exposure_val_cv}")
+            if self.cap.set(cv2.CAP_PROP_EXPOSURE, exposure_val_cv):
+                logger.info(f"  Actual Exposure after set: {self.cap.get(cv2.CAP_PROP_EXPOSURE)}")
+            else:
+                logger.warning(f"  Failed to set Exposure to {exposure_val_cv}.")
+        
+        logger.info("-------------------------------------------")
+
+    def _on_slider_move(self, key: str, value: str):
+        """Debounced callback for when a specific slider is moved."""
         if self._debounce_job:
             self.root.after_cancel(self._debounce_job)
-        self._debounce_job = self.root.after(250, self._apply_all_settings)
-
-    def _apply_all_settings(self):
-        if not self.cap or not self.cap.isOpened(): return
         
-        logger.info("--- Sending all target settings to camera ---")
-        focus_val = self.target_settings["focus"].get()
-        brightness_val = self.target_settings["brightness"].get()
-        exposure_val_ui = self.target_settings["exposure"].get() # UI value (positive)
-        exposure_val_cv = -exposure_val_ui # OpenCV value (negative)
+        int_value = int(value)
 
-        # IMPORTANT: Ensure auto-focus and auto-exposure are explicitly off before setting manual values.
-        # This is a common requirement for many webcams.
-        logger.info(f"Attempting to set Autofocus to 0 (Off)...")
-        if self.cap.set(cv2.CAP_PROP_AUTOFOCUS, 0):
-            logger.info(f"  Actual Autofocus after set: {self.cap.get(cv2.CAP_PROP_AUTOFOCUS)}")
-        else:
-            logger.warning("  Failed to set Autofocus to 0.")
-
-        logger.info(f"Attempting to set Auto Exposure to 0 (Manual)...")
-        if self.cap.set(cv2.CAP_PROP_AUTO_EXPOSURE, 0):
-            logger.info(f"  Actual Auto Exposure after set: {self.cap.get(cv2.CAP_PROP_AUTO_EXPOSURE)}")
-        else:
-            logger.warning("  Failed to set Auto Exposure to 0.")
-
-
-        logger.info(f"Attempting to set Focus to: {focus_val}")
-        if self.cap.set(cv2.CAP_PROP_FOCUS, focus_val):
-            logger.info(f"  Actual Focus after set: {self.cap.get(cv2.CAP_PROP_FOCUS)}")
-        else:
-            logger.warning(f"  Failed to set Focus to {focus_val}.")
-
-        logger.info(f"Attempting to set Brightness to: {brightness_val}")
-        if self.cap.set(cv2.CAP_PROP_BRIGHTNESS, brightness_val):
-            logger.info(f"  Actual Brightness after set: {self.cap.get(cv2.CAP_PROP_BRIGHTNESS)}")
-        else:
-            logger.warning(f"  Failed to set Brightness to {brightness_val}.")
-        
-        logger.info(f"Attempting to set Exposure (UI: {exposure_val_ui}) to CV value: {exposure_val_cv}")
-        if self.cap.set(cv2.CAP_PROP_EXPOSURE, exposure_val_cv):
-            logger.info(f"  Actual Exposure after set: {self.cap.get(cv2.CAP_PROP_EXPOSURE)}")
-        else:
-            logger.warning(f"  Failed to set Exposure to {exposure_val_cv}.")
-
-        logger.info("-------------------------------------------")
+        if key == "focus":
+            # Find the closest valid focus value from our hardcoded list
+            closest_value = min(VALID_FOCUS_VALUES, key=lambda x: abs(x - int_value))
+            # Snap the UI slider's variable to this valid value. This will update the label.
+            if self.target_settings["focus"].get() != closest_value:
+                self.target_settings["focus"].set(closest_value)
+            
+            # Use the snapped value for the debounced hardware call
+            int_value = closest_value
+            
+        self._debounce_job = self.root.after(250, lambda: self._apply_single_setting(key, int_value))
 
     def _draw_led_status_overlays(self, frame: np.ndarray, detected_states: Dict[str, Any]) -> np.ndarray:
         """Draws ROIs and status indicators on the frame."""
@@ -743,49 +798,59 @@ class App:
         self._save_settings()
 
     def _save_settings(self):
-        """Saves the current slider values and ROI coordinates to the JSON file."""
-        # 1. Get current slider values
-        # IMPORTANT: These values are read directly from the Tkinter variables,
-        # which should reflect what the user has set.
+        """Saves the current slider values and ROI positions to the JSON file."""
         current_focus = self.target_settings["focus"].get()
         current_brightness = self.target_settings["brightness"].get()
-        current_exposure = self.target_settings["exposure"].get() # This is the positive UI value
+        current_exposure = self.target_settings["exposure"].get()
 
         camera_properties = {
             "focus": current_focus,
             "brightness": current_brightness,
-            "exposure": current_exposure # Save the positive UI value
+            "exposure": current_exposure
         }
-        logger.info(f"Saving camera properties: {camera_properties}") # ADDED LOG
+        logger.info(f"Preparing to save camera properties: {camera_properties}")
 
-        # 2. Get current ROI coordinates from the checker
+        # --- [BUG FIX START] ---
+        # Determine the source of ROI data safely, checking for checker's existence
+        rois_to_save_from = {}
+        if self.is_tuning:
+            # If tuning, the new_rois dictionary is the source of truth
+            rois_to_save_from = self.new_rois
+        elif self.checker:
+            # If not tuning, get ROIs from the live checker, but only if it exists
+            rois_to_save_from = {
+                key: config.get('roi') for key, config in self.checker.led_configs.items()
+            }
+        # --- [BUG FIX END] ---
+
+        # Prepare ROI positions in the new {x, y} format
         roi_settings = {}
-        if self.new_rois:
-            logger.info(f"Applying {len(self.new_rois)} new ROIs from tuning session.")
-            for led_key, roi_tuple in self.new_rois.items():
-                roi_settings[led_key] = list(roi_tuple)
-        
-        if self.checker and self.checker.led_configs:
-            for led_key, config_item in self.checker.led_configs.items():
-                # If this key wasn't part of the tuning session, use its current value.
-                if led_key not in roi_settings and "roi" in config_item:
-                    roi_settings[led_key] = list(config_item["roi"])
+        if not rois_to_save_from:
+             logger.warning("No ROI data available to save. ROI settings will be empty.")
         else:
-            logger.warning("Checker or LED configs not available. Cannot save ROI settings.")   
+            for led_key, roi_tuple in rois_to_save_from.items():
+                if roi_tuple:
+                    # Save only the x and y coordinates from the (x, y, w, h) tuple
+                    roi_settings[led_key] = {'x': roi_tuple[0], 'y': roi_tuple[1]}
 
-        # 3. Combine all settings into a single dictionary for JSON output
+        logger.info(f"Preparing to save ROI positions: {roi_settings}")
+
         all_settings_to_save = {
+            # --- [BUG FIX START] ---
+            # Add the preserved target_device_profile to the dictionary before saving.
+            "target_device_profile": self.target_device_profile,
+            # --- [BUG FIX END] ---
             "camera_properties": camera_properties,
             "roi_settings": roi_settings
         }
 
         try:
             os.makedirs(os.path.dirname(CAMERA_SETTINGS_SAVE_PATH), exist_ok=True)
-            
             with open(CAMERA_SETTINGS_SAVE_PATH, 'w') as f:
                 json.dump(all_settings_to_save, f, indent=4)
             logger.info(f"Settings saved successfully to: {CAMERA_SETTINGS_SAVE_PATH}")
-            logger.info("Restart the application for changes to take effect on camera initialization.")
+            if not self.is_tuning:
+                logger.info("Restart the application for changes to take full effect.")
         except Exception as e:
             logger.error(f"Failed to save settings to '{CAMERA_SETTINGS_SAVE_PATH}': {e}", exc_info=True)
 

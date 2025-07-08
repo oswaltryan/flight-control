@@ -76,7 +76,7 @@ PRIMARY_LED_CONFIGURATIONS = {
         "name": "Blue LED",
         "roi": (417, 165, 40, 40),
         "hsv_lower": (0,    0, 200),
-        "hsv_upper": (10, 10, 225),
+        "hsv_upper": (120, 250, 255),
         "min_match_percentage": 0.25,
         "display_color_bgr": (255,0,0)
     }
@@ -109,6 +109,10 @@ DEFAULT_CAMERA_HARDWARE_SETTINGS = {
 }
 # --- End of Camera Hardware Settings ---
 
+# --- ROI Sizing Constants (NEW) ---
+ROI_SIZE_STANDARD_KEYPAD = (30, 40) # Wider for 3-column layout
+ROI_SIZE_SECURE_KEYPAD = (60, 40)   # Taller/squarer for 2-column layout
+
 def get_capture_backend():
     if sys.platform.startswith('win'):
         return cv2.CAP_DSHOW
@@ -116,64 +120,58 @@ def get_capture_backend():
         return cv2.CAP_AVFOUNDATION
     return None # Let OpenCV choose default
 
-def _load_all_camera_settings() -> Tuple[Dict[int, Any], Dict[str, Tuple[int, int, int, int]]]:
+def _load_all_camera_settings() -> Tuple[Dict[int, Any], Dict[str, Dict[str, int]], Optional[str]]:
     """
-    Attempts to load camera hardware settings and ROI definitions from a JSON file.
-    Falls back to defaults if file not found or invalid.
+    Attempts to load camera hardware properties, ROI positions, and the target device
+    profile from a JSON file.
 
     Returns:
-        A tuple: (camera_properties: Dict[cv2.CAP_PROP, Any], roi_settings: Dict[str, Tuple[int, int, int, int]])
+        A tuple: (camera_properties, roi_positions, target_device_profile)
     """
     if not os.path.exists(_CAMERA_SETTINGS_FILE):
         logger.info(f"Camera settings file not found at '{_CAMERA_SETTINGS_FILE}'. Using default settings.")
-        return DEFAULT_CAMERA_HARDWARE_SETTINGS.copy(), {}
+        return DEFAULT_CAMERA_HARDWARE_SETTINGS.copy(), {}, None
 
-    loaded_camera_props = {} # This is the target dictionary for camera properties
-    loaded_roi_settings = {}
+    loaded_camera_props = {}
+    loaded_roi_positions = {}
+    target_device_profile = None
 
     try:
         with open(_CAMERA_SETTINGS_FILE, 'r') as f:
             loaded_data = json.load(f)
         
-        logger.debug(f"Loaded raw data from config file: {loaded_data}") # ADDED DEBUG LOG
-        
-        # Load camera properties (focus, brightness, exposure)
+        # [NEW] Get the target device profile name
+        target_device_profile = loaded_data.get('target_device_profile')
+
+        # Load camera properties
         for key_str, value in loaded_data.get('camera_properties', {}).items():
             try:
-                if key_str == 'exposure': # UI exposure (positive) to cv2 exposure (negative)
+                if key_str == 'exposure':
                     loaded_camera_props[cv2.CAP_PROP_EXPOSURE] = -value
-                elif key_str == 'focus': # Assign to loaded_camera_props
+                elif key_str == 'focus':
                     loaded_camera_props[cv2.CAP_PROP_FOCUS] = value
-                elif key_str == 'brightness': # Assign to loaded_camera_props
+                elif key_str == 'brightness':
                     loaded_camera_props[cv2.CAP_PROP_BRIGHTNESS] = value
-                logger.debug(f"Parsed setting from file: '{key_str}'={value} -> CAP_PROP_{key_str.upper()}={loaded_camera_props.get(getattr(cv2, f'CAP_PROP_{key_str.upper()}', None))}") # ADDED DEBUG LOG
             except (TypeError, ValueError):
                 logger.warning(f"Skipping invalid setting '{key_str}' from config file: value is not an integer.")
                 continue
 
-        # Merge with defaults to ensure all required settings are present,
-        # giving preference to loaded settings if they exist.
         merged_camera_properties = DEFAULT_CAMERA_HARDWARE_SETTINGS.copy()
         merged_camera_properties.update(loaded_camera_props)
-        logger.debug(f"Merged camera properties for application: {merged_camera_properties}") # ADDED DEBUG LOG
 
-
-        # Load ROI settings
-        for led_name, roi_list in loaded_data.get('roi_settings', {}).items():
-            if isinstance(roi_list, list) and len(roi_list) == 4 and all(isinstance(n, int) for n in roi_list):
-                loaded_roi_settings[led_name] = tuple(roi_list)
+        # Load ROI positions
+        for led_name, pos_dict in loaded_data.get('roi_settings', {}).items():
+            if isinstance(pos_dict, dict) and 'x' in pos_dict and 'y' in pos_dict:
+                loaded_roi_positions[led_name] = {'x': pos_dict['x'], 'y': pos_dict['y']}
             else:
-                logger.warning(f"Skipping invalid ROI setting for '{led_name}' from config file: expected list of 4 ints.")
+                logger.warning(f"Skipping invalid ROI setting for '{led_name}': expected dict with 'x' and 'y'.")
 
-        logger.debug(f"Successfully loaded camera and ROI settings from '{_CAMERA_SETTINGS_FILE}'.")
-        return merged_camera_properties, loaded_roi_settings # Return the merged properties
+        logger.debug(f"Successfully loaded settings. Target Device: '{target_device_profile}'.")
+        return merged_camera_properties, loaded_roi_positions, target_device_profile
 
-    except json.JSONDecodeError as e:
-        logger.error(f"Error decoding camera settings JSON from '{_CAMERA_SETTINGS_FILE}': {e}. Using default settings.", exc_info=True)
-        return DEFAULT_CAMERA_HARDWARE_SETTINGS.copy(), {}
-    except Exception as e:
-        logger.error(f"An unexpected error occurred while loading camera settings from '{_CAMERA_SETTINGS_FILE}': {e}. Using default settings.", exc_info=True)
-        return DEFAULT_CAMERA_HARDWARE_SETTINGS.copy(), {}
+    except (json.JSONDecodeError, Exception) as e:
+        logger.error(f"Error processing camera settings from '{_CAMERA_SETTINGS_FILE}': {e}. Using defaults.", exc_info=True)
+        return DEFAULT_CAMERA_HARDWARE_SETTINGS.copy(), {}, None
  
 class LogitechLedChecker:
     def __init__(self, camera_id: int, logger_instance=None, led_configs=None,
@@ -181,7 +179,8 @@ class LogitechLedChecker:
                  replay_post_failure_duration_sec: float = DEFAULT_REPLAY_POST_FAIL_DURATION_SEC,
                  replay_output_dir: Optional[str] = None,
                  enable_instant_replay: Optional[bool] = None,
-                 keypad_layout: Optional[Dict[str, Any]] = None):
+                 keypad_layout: Optional[List[List[str]]] = None,
+                 camera_hw_settings: Optional[Dict[int, Any]] = None):
         self.logger = logger_instance if logger_instance else logger
         self.cap = None
         self.is_camera_initialized = False
@@ -190,6 +189,7 @@ class LogitechLedChecker:
         self._ordered_keys_for_display_cache = None
         self.explicit_display_order = display_order
         self.duration_tolerance_sec = duration_tolerance_sec
+        self._camera_settings_to_apply = camera_hw_settings or {}
 
         # --- Attributes for Key Press Overlay ---
         self.keypad_layout = keypad_layout
@@ -229,19 +229,22 @@ class LogitechLedChecker:
         else:
             self.logger.warning("Replay output directory is not set. Replays will not be saved.")
         
-        # --- LED Config Loading ---
-        # 1. Start with a deep copy of the base primary configurations
-        if led_configs is not None: # If custom led_configs are passed, use them as base
-            self.led_configs = copy.deepcopy(led_configs)
-        elif PRIMARY_LED_CONFIGURATIONS: # Otherwise, use the module's default primary config
-            self.led_configs = copy.deepcopy(PRIMARY_LED_CONFIGURATIONS)
-        else: # Fallback if even PRIMARY_LED_CONFIGURATIONS is empty (shouldn't happen in production)
-            self.led_configs = copy.deepcopy(_FALLBACK_LED_DEFINITIONS)
-            self.logger.error("PRIMARY_LED_CONFIGURATIONS empty/invalid. Using _FALLBACK_LED_DEFINITIONS.")
+        # --- [BUG FIX] ---
+        # The logic for loading from files is now REMOVED from this class.
+        # This class now trusts that the 'led_configs' passed in from UnifiedController
+        # is the final, complete configuration with correctly sized ROIs.
 
-        # MOVED: Validate the base LED configurations *before* overwriting with file data.
+        if led_configs is not None:
+            self.led_configs = copy.deepcopy(led_configs)
+        else:
+            # Provide a fallback just in case, but this path shouldn't be hit when
+            # called from UnifiedController.
+            self.logger.warning("No LED configs provided to LogitechLedChecker, using module defaults.")
+            self.led_configs = copy.deepcopy(PRIMARY_LED_CONFIGURATIONS)
+
+        # Validate the final configuration that was passed in.
         if not isinstance(self.led_configs, dict) or not self.led_configs:
-             raise ValueError("LED configurations are missing or invalid after loading.")
+             raise ValueError("LED configurations are missing or invalid.")
 
         core_keys = ["name", "roi", "hsv_lower", "hsv_upper", "min_match_percentage"]
         for key, config_item in self.led_configs.items():
@@ -250,33 +253,23 @@ class LogitechLedChecker:
                 raise ValueError(f"LED config '{key}' missing core keys.")
             if not (isinstance(config_item["roi"], tuple) and len(config_item["roi"]) == 4 and
                     all(isinstance(n, int) for n in config_item["roi"])):
-                raise ValueError(f"ROI for LED '{key}' must be tuple of 4 ints.")
+                # This is the check that was failing because the old code was overwriting the tuple with a dict.
+                raise ValueError(f"ROI for LED '{key}' must be a tuple of 4 ints.")
 
-        # 2. Load settings from external file, including potentially updated ROIs
-        # camera_settings_to_apply will be the actual values for cv2.CAP_PROP
-        # loaded_roi_coordinates will be { 'red': (x,y,w,h), 'green': (x,y,w,h) }
-        self._camera_settings_to_apply, self._loaded_roi_coordinates = _load_all_camera_settings()
-
-        # 3. Overwrite ROIs in self.led_configs with loaded values if present
-        for led_name, roi_coords in self._loaded_roi_coordinates.items():
-            if led_name in self.led_configs:
-                self.led_configs[led_name]["roi"] = roi_coords
-                self.logger.debug(f"Overwrote ROI for '{led_name}' with loaded value: {roi_coords}")
-            else:
-                self.logger.warning(f"ROI for '{led_name}' found in config file but not defined in PRIMARY_LED_CONFIGURATIONS. Skipping.")
-
-        # 4. Final validation of display_order against the now-final configs.
         if self.explicit_display_order:
             for key in self.explicit_display_order:
                 if key not in self.led_configs:
                     raise ValueError(f"Key '{key}' in display_order not found in final LED configs.")
+        
+        # This will be populated by UnifiedController after initialization
+        self._camera_settings_to_apply, self._loaded_roi_coordinates = {}, {}
             
         self.stopped = False
-        # One lock for the replay buffer, which now contains all data.
         self.buffer_lock = threading.Lock()
 
         if self.camera_id is None: self.logger.error("Camera ID cannot be None."); return 
-        self._initialize_camera()
+        hw_settings = camera_hw_settings or {}
+        self._initialize_camera(camera_hw_settings=hw_settings)
 
         if self.is_camera_initialized:
             self.thread = threading.Thread(target=self._update_frame_thread, args=())
@@ -314,7 +307,11 @@ class LogitechLedChecker:
                 time.sleep(0.1)
         self.logger.info("Frame-reading and processing thread has stopped.")
 
-    def _initialize_camera(self):
+    def _initialize_camera(self, camera_hw_settings: Dict[int, Any]):
+        """
+        Initializes the camera hardware, applying the provided settings.
+        Now accepts settings as a direct argument for clarity and testability.
+        """
         try:
             if self.preferred_backend is not None:
                 self.cap = cv2.VideoCapture(self.camera_id, self.preferred_backend)
@@ -328,7 +325,7 @@ class LogitechLedChecker:
                 if not self.cap.isOpened():
                     backend_name_str = f" with backend {cv2.videoio_registry.getBackendName(self.preferred_backend)}" if self.preferred_backend and hasattr(cv2.videoio_registry, 'getBackendName') else ""
                     raise IOError(f"Cannot open webcam {self.camera_id}{backend_name_str} or with default backend.")
-                
+            
             prop_names = {
                 cv2.CAP_PROP_AUTO_EXPOSURE: "Auto Exposure",
                 cv2.CAP_PROP_EXPOSURE: "Exposure",
@@ -340,30 +337,15 @@ class LogitechLedChecker:
                 cv2.CAP_PROP_CONTRAST: "Contrast",
                 cv2.CAP_PROP_SATURATION: "Saturation",
             }
-            # Iterate through the LOADED settings (which might be defaults or from file)
-            for prop, value in self._camera_settings_to_apply.items():
+            # [BUG FIX] Iterate over the settings passed directly to the method.
+            for prop, value in camera_hw_settings.items():
                 prop_name = prop_names.get(prop, f"Property_ID_{prop}")
                 
-                # ADDED: Log the value of relevant properties BEFORE attempting to set
-                if prop == cv2.CAP_PROP_EXPOSURE:
-                    current_val = self.cap.get(cv2.CAP_PROP_EXPOSURE)
-                    self.logger.debug(f"  [Init] Before setting {prop_name}, current value is: {current_val}")
-                elif prop == cv2.CAP_PROP_FOCUS:
-                    current_val = self.cap.get(cv2.CAP_PROP_FOCUS)
-                    self.logger.debug(f"  [Init] Before setting {prop_name}, current value is: {current_val}")
-                elif prop == cv2.CAP_PROP_AUTOFOCUS:
-                    current_val = self.cap.get(cv2.CAP_PROP_AUTOFOCUS)
-                    self.logger.debug(f"  [Init] Before setting {prop_name}, current value is: {current_val}")
-                elif prop == cv2.CAP_PROP_AUTO_EXPOSURE:
-                    current_val = self.cap.get(cv2.CAP_PROP_AUTO_EXPOSURE)
-                    self.logger.debug(f"  [Init] Before setting {prop_name}, current value is: {current_val}")
-
                 self.logger.debug(f"Attempting to set {prop_name} ({prop}) to {value}.")
                 if self.cap.set(prop, value):
                     actual_value = self.cap.get(prop)
                     self.logger.debug(f"Successfully set {prop_name} to {value} (read back: {actual_value}).")
                     if actual_value != value and prop not in [cv2.CAP_PROP_AUTO_EXPOSURE, cv2.CAP_PROP_AUTOFOCUS, cv2.CAP_PROP_AUTO_WB]:
-                         # Warning if the camera didn't take the exact value, common for some props
                         self.logger.warning(f"  Note: {prop_name} read back value ({actual_value}) differs from set value ({value}). Camera likely applied closest supported value.")
                 else:
                     self.logger.warning(f"FAILED to set {prop_name} to {value}. The camera/driver may not support this property or it's being overridden.")

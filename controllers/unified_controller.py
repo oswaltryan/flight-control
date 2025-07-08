@@ -12,6 +12,7 @@ from typing import Optional, List, Dict, Any, Union, Tuple, TYPE_CHECKING
 import threading
 from pprint import pprint
 import subprocess
+import copy
 
 # --- Path Setup ---
 CONTROLLERS_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -61,72 +62,103 @@ class UnifiedController:
                  led_duration_tolerance_sec: Optional[float] = None,
                  replay_post_failure_duration_sec: Optional[float] = None,
                  replay_output_dir: Optional[str] = None,
-                 enable_instant_replay: Optional[bool] = None):
+                 enable_instant_replay: Optional[bool] = None,
+                 skip_initial_scan: bool = False):
 
         self.logger = logger_instance if logger_instance else module_logger
         
-        # Initialize attributes early to guarantee their existence, even if None
         self._phidget_controller: Optional[PhidgetController] = None
         self._camera_checker: Optional[LogitechLedChecker] = None
         self._barcode_scanner: Optional[BarcodeScanner] = None
-        self.scanned_serial_number: Optional[str] = None # Guaranteed to exist from the start
-        # ADDED: The controller now owns the DUT and its keypad layout.
+        self.scanned_serial_number: Optional[str] = None
         self.dut: Optional['DeviceUnderTest'] = None
-        self.is_fully_initialized: bool = False # Overall success flag
+        self.is_fully_initialized: bool = False
         self._keypad_layout: Optional[List[List[str]]] = None
 
         phidget_init_successful = False
         camera_init_successful = False
 
-        effective_replay_output_dir = replay_output_dir
-        self.phidget_config_to_use = script_map_config if script_map_config is not None else DEFAULT_SCRIPT_CHANNEL_MAP_CONFIG
-        phidget_ctrl_logger = self.logger.getChild("Phidget")
-        camera_ctrl_logger = self.logger.getChild("Camera")
-
-        # --- Initialize Phidget ---
+        # --- Initialize Phidget FIRST ---
         try:
             self._phidget_controller = PhidgetController(
-                script_map_config=self.phidget_config_to_use, logger_instance=phidget_ctrl_logger)
+                script_map_config=script_map_config or DEFAULT_SCRIPT_CHANNEL_MAP_CONFIG,
+                logger_instance=self.logger.getChild("Phidget")
+            )
             phidget_init_successful = True
         except Exception as e_phidget_init:
             self.logger.error(f"Failed to initialize PhidgetController: {e_phidget_init}", exc_info=True)
 
         # --- Initialize Barcode Scanner ---
         self._barcode_scanner = BarcodeScanner(phidget_press_callback=self.press)
-        self.scanned_serial_number: Optional[str] = None
 
-        # --- Initialize DUT and determine Keypad Layout ---
-        # This must happen AFTER Phidgets are ready but BEFORE the camera checker that needs the layout.
+        # --- [MODIFIED] Build Dynamic LED & Camera Configs FIRST ---
+        from .logitech_webcam import _load_all_camera_settings, PRIMARY_LED_CONFIGURATIONS, ROI_SIZE_SECURE_KEYPAD, ROI_SIZE_STANDARD_KEYPAD
+        
+        camera_settings_to_apply, roi_positions, target_device_name = _load_all_camera_settings()
+        self.logger.info(f"Loaded target device profile from config: '{target_device_name}'")
+
+        # --- Initialize DUT to determine hardware properties ---
         try:
-            # Local import to break circular dependency at module load time
             from controllers.finite_state_machine import DeviceUnderTest
-            self.dut = DeviceUnderTest(at_controller=self)
-            layout_type = 'Secure Key' if self.dut.secure_key else 'Portable'
-            self._keypad_layout = KEYPAD_LAYOUTS[layout_type]
-            self.logger.debug(f"Keypad layout automatically configured to '{layout_type}'.")
+            
+            if skip_initial_scan:
+                self.logger.info("DUT initialization requested to skip initial barcode scan.")
+                self.dut = DeviceUnderTest(
+                    at_controller=self, 
+                    target_device_profile=target_device_name, 
+                    scanned_serial_number="SCAN_SKIPPED_BY_TOOL"
+                )
+            else:
+                self.dut = DeviceUnderTest(at_controller=self, target_device_profile=target_device_name)
+
+            layout_key = 'Secure Key' if self.dut.secure_key else 'Portable'
+            self._keypad_layout = KEYPAD_LAYOUTS[layout_key]
+            self.logger.info(f"DUT Initialized. Keypad type: '{layout_key}'.")
         except Exception as e_dut_init:
-            self.logger.error(f"Failed to initialize DeviceUnderTest (DUT) or determine keypad layout: {e_dut_init}", exc_info=True)
-            # Default to a Portable layout to allow camera to still try initializing
-            self._keypad_layout = KEYPAD_LAYOUTS['Portable']
+            self.logger.error(f"Failed to initialize DeviceUnderTest (DUT): {e_dut_init}", exc_info=True)
+            self.dut = None
             self.logger.warning("Defaulting to 'Portable' keypad layout due to DUT initialization error.")
+            self._keypad_layout = KEYPAD_LAYOUTS['Portable']
 
-        # --- Initialize Camera ---
-        self.effective_led_duration_tolerance = led_duration_tolerance_sec if led_duration_tolerance_sec is not None else CAMERA_DEFAULT_TOLERANCE
-        effective_replay_duration = replay_post_failure_duration_sec if replay_post_failure_duration_sec is not None else CAMERA_DEFAULT_REPLAY_DURATION
+        # --- Construct final LED configuration ---
+        final_led_configs = copy.deepcopy(PRIMARY_LED_CONFIGURATIONS)
 
+        if self.dut and self.dut.secure_key:
+            roi_w, roi_h = ROI_SIZE_SECURE_KEYPAD
+            self.logger.debug(f"Using SECURE keypad ROI size: {roi_w}x{roi_h}")
+        else: 
+            roi_w, roi_h = ROI_SIZE_STANDARD_KEYPAD
+            self.logger.debug(f"Using STANDARD keypad ROI size: {roi_w}x{roi_h}")
+
+        for led_key, position_data in roi_positions.items():
+            if led_key in final_led_configs:
+                x_pos = position_data.get('x')
+                y_pos = position_data.get('y')
+                if x_pos is not None and y_pos is not None:
+                    final_led_configs[led_key]['roi'] = (x_pos, y_pos, roi_w, roi_h)
+                    self.logger.debug(f"Applied dynamic ROI for '{led_key}': {final_led_configs[led_key]['roi']}")
+
+        # --- Initialize Camera with final, dynamic configuration ---
         try:
             self._camera_checker = LogitechLedChecker(
-                camera_id=camera_id, led_configs=led_configs, display_order=display_order, logger_instance=camera_ctrl_logger,
-                duration_tolerance_sec=self.effective_led_duration_tolerance, replay_post_failure_duration_sec=effective_replay_duration,
-                replay_output_dir=effective_replay_output_dir, enable_instant_replay=enable_instant_replay, keypad_layout=self._keypad_layout) # type: ignore
+                camera_id=camera_id,
+                led_configs=final_led_configs, 
+                display_order=display_order,
+                logger_instance=self.logger.getChild("Camera"),
+                duration_tolerance_sec=led_duration_tolerance_sec or CAMERA_DEFAULT_TOLERANCE,
+                replay_post_failure_duration_sec=replay_post_failure_duration_sec or CAMERA_DEFAULT_REPLAY_DURATION,
+                replay_output_dir=replay_output_dir,
+                enable_instant_replay=enable_instant_replay,
+                keypad_layout=self._keypad_layout,
+                camera_hw_settings=camera_settings_to_apply
+            )
+            self._camera_checker._camera_settings_to_apply = camera_settings_to_apply
+            
             if self._camera_checker.is_camera_initialized:
                 camera_init_successful = True
-            else:
-                self.logger.error(f"LogitechLedChecker FAILED to initialize camera {camera_id}.")
         except Exception as e_camera_init:
             self.logger.error(f"Failed to initialize LogitechLedChecker for camera {camera_id}: {e_camera_init}", exc_info=True)
 
-        # Overall initialization status
         self.is_fully_initialized = phidget_init_successful and camera_init_successful
 
     # --- PhidgetController Method Delegation ---

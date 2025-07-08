@@ -82,13 +82,15 @@ class DeviceUnderTest:
     and hardware identifiers. The FSM and its callbacks read from and write
     to an instance of this class to mirror the device's real-world state.
     """
-    def __init__(self, at_controller: 'UnifiedController', scanned_serial_number: Optional[str] = None):
+    def __init__(self, at_controller: 'UnifiedController', target_device_profile: Optional[str] = None, scanned_serial_number: Optional[str] = None):
         """
         Initializes the DeviceUnderTest state model.
 
         Args:
             at_controller: An instance of the UnifiedController to allow
                            this model to interact with hardware if needed.
+            target_device_profile (Optional[str]): The device profile key from device_properties.json.
+                                                   If not provided, a fallback is used.
             scanned_serial_number (Optional[str]): An optional serial number to use.
                                                    If not provided, a one-time barcode
                                                    scan will be attempted and cached.
@@ -96,7 +98,14 @@ class DeviceUnderTest:
         global _CACHED_SCANNED_SERIAL
         self.at = at_controller
 
-        self.device_name = "ask3-3639"
+        # --- [MODIFIED] ---
+        # Use the provided profile name or fallback to a default with a warning.
+        if not target_device_profile:
+            self.device_name = "ask3-3639" # Fallback to prevent crashes
+            _fsm_module_logger.warning(f"No target_device_profile provided to DUT, falling back to '{self.device_name}'.")
+        else:
+            self.device_name = target_device_profile
+        # --- END MODIFIED ---
 
         self.name: str = self.device_name
         self.battery: bool = False
@@ -115,14 +124,11 @@ class DeviceUnderTest:
         self.dev_keypad_serial_number: str = ""
         # Logic for one-time barcode scan
         if scanned_serial_number is not None:
-            # If a serial is explicitly passed, use it and cache it for subsequent resets.
             self.scanned_serial_number = scanned_serial_number
             _CACHED_SCANNED_SERIAL = scanned_serial_number
         elif _CACHED_SCANNED_SERIAL is not None:
-            # If it's already cached from a previous instantiation/reset, use the cached value.
             self.scanned_serial_number = _CACHED_SCANNED_SERIAL
         else:
-            # If it's not passed and not cached, this is the first run. Perform the one-time scan.
             _CACHED_SCANNED_SERIAL = self.at.scan_barcode()
             self.scanned_serial_number = _CACHED_SCANNED_SERIAL
 
