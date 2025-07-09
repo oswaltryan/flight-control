@@ -536,35 +536,33 @@ class TestLogitechLedCheckerMethods:
         # ARRANGE
         good_frame = np.zeros((480, 640, 3), dtype=np.uint8)
 
-        # Use a specific, non-standard exception to reliably stop the thread.
-        class StopThread(Exception):
-            pass
-
-        # The side_effect list will be consumed, and then the final item will
-        # raise an exception, guaranteeing the thread stops.
+        # Set up the mock's behavior *before* the object is created.
+        # When the side_effect list is exhausted, the mock will raise StopIteration,
+        # which will cleanly terminate the background thread.
         mock_cv2_videocapture.return_value.read.side_effect = [
             (False, None),      # 1. This triggers `if not ret: continue`
             (True, good_frame), # 2. This is processed normally.
-            StopThread          # 3. This will raise an unhandled exception and stop the thread.
         ]
 
         # ACT & ASSERT
         # Patch the method on the CLASS before the instance is created to avoid a race condition.
         with patch.object(camera_module.LogitechLedChecker, '_check_roi_for_color', return_value=True) as mock_check_roi:
             # The `with` statement ensures `release_camera()` is also called.
+            # When this is created, the thread starts and immediately consumes our side_effect list.
             with LogitechLedChecker(
                 camera_id=0,
                 logger_instance=mock_logger,
                 led_configs=default_configs,
                 replay_output_dir=str(tmp_path)
             ) as checker:
-                # Wait for the thread to run through the side_effect list and terminate.
+                # Wait for the thread to run out of side_effects and terminate.
                 checker.thread.join(timeout=1.0)
 
                 # The buffer should only contain the single frame from the successful read.
                 assert len(checker.replay_buffer) == 1
 
-                # The mock that was patched onto the class should have been called for the successful frame.
+                # The mock should have been called twice (for 'red' and 'green')
+                # for the single successful frame read.
                 assert mock_check_roi.call_count == 2
 
     @patch('threading.Thread')

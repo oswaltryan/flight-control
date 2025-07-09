@@ -1,4 +1,25 @@
-*.cpython-312
-*.pyc
+# Filename: .gitignore
+
+# Python
 __pycache__/
-*.log
+*.pyc
+*.pyo
+*.pyd
+
+# Virtual Environment
+venv/
+*.env
+
+# Pytest & Coverage
+.pytest_cache/
+.coverage
+
+# IDE / Editor
+.vscode/
+.idea/
+
+# Logs and Build Artifacts
+logs/
+dist/
+build/
+*.egg-info/

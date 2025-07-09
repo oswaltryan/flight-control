@@ -28,6 +28,26 @@ class TestAutomationToolkit:
     """
     Tests the initialization logic and getter functions of the automation_toolkit.
     """
+    def test_import_error_for_controllers(self, monkeypatch, caplog):
+        """
+        Covers lines 46-48:
+        Tests that a critical error is logged and the exception is re-raised
+        if a core controller module fails to import.
+        """
+        # GIVEN: The setup_logging function will work, but a later import will fail.
+        # We patch setup_logging to prevent it from resetting the test's logger.
+        with patch('controllers.logging.setup_logging'):
+            # AND: We break the import for UnifiedController by hiding its module.
+            monkeypatch.setitem(sys.modules, 'controllers.unified_controller', None)
+
+            # WHEN: The toolkit is reloaded
+            # THEN: It should log a critical error and then raise an ImportError.
+            with caplog.at_level(logging.CRITICAL, logger="GlobalATController"):
+                with pytest.raises(ImportError):
+                    importlib.reload(at_toolkit)
+
+        # AND: The specific critical log message should have been recorded.
+        assert "Import Error for UnifiedController or FSM" in caplog.text
 
     def test_getters_raise_error_when_uninitialized(self):
         """

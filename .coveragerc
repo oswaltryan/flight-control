@@ -1,0 +1,15 @@
+[run]
+source =
+    controllers
+    utils
+omit =
+    tests/*
+    */__main__.py
+    */venv/*
+
+[report]
+exclude_lines =
+    pragma: no cover
+    raise NotImplementedError
+    if __name__ == .__main__.:
+    if TYPE_CHECKING:
