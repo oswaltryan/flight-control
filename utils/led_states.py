@@ -23,6 +23,7 @@ LEDs = {
     'DIAGNOSTIC_MODE_TIMEOUT':  [0],
     'CONFIRMATION':             {'red':0, 'green':1, 'blue':0},
     'GREEN_BLUE_STATE':         {'red':0, 'green':1, 'blue':1},
+    'GREEN_BLUE_BATTERY_STATE': {'green':1, 'blue':1},
     'KEY_GENERATION':           {'red':1, 'green':1, 'blue':0},
     'KEY_GENERATION_LEGACY':    {'red':1, 'green':1, 'blue':0},
     'SLEEP_MODE':               {'red':0, 'green':0, 'blue':0},
@@ -173,15 +174,13 @@ LEDs = {
         {'red':0, 'green':0, 'blue':1, 'duration': (0.10,  0.7)}],
 
     ## pattern match:  10 seconds
-    'OOB_CHARGE':  [{'green':1, 'blue':1, 'duration': (3.00,  7.0)}],
+    # 'OOB_CHARGE':  [{'green':1, 'blue':1, 'duration': (3.00,  7.0)}],
 
     # ## pattern match:  10 seconds
-    # 'OOB_CHARGE':  [
-    #     {'red':1, 'green':1, 'blue':1, 'duration': (0.00,  7.0)},
-    #     {'red':0, 'green':1, 'blue':1, 'duration': (0.05,  1.0)},
-    #     {'red':1, 'green':1, 'blue':1, 'duration': (3.00,  7.0)},
-    #     {'red':0, 'green':1, 'blue':1, 'duration': (0.05,  1.0)},
-    #     {'red':1, 'green':1, 'blue':1, 'duration': (3.00,  7.0)}],
+    'OOB_CHARGE':  [
+        {'red':0, 'green':1, 'blue':1, 'duration': (0.05,  1.0)},
+        {'red':1, 'green':1, 'blue':1, 'duration': (2.00,  7.0)},
+        {'red':0, 'green':1, 'blue':1, 'duration': (0.05,  1.0)}],
 
     ## pattern match:  05 seconds
     ## This pattern is used for provisionLockBricked.

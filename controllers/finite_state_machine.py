@@ -82,7 +82,11 @@ class DeviceUnderTest:
     and hardware identifiers. The FSM and its callbacks read from and write
     to an instance of this class to mirror the device's real-world state.
     """
-    def __init__(self, at_controller: 'UnifiedController', target_device_profile: Optional[str] = None, scanned_serial_number: Optional[str] = None):
+    def __init__(self, 
+                 at_controller: 'UnifiedController', 
+                 target_device_profile: Optional[str] = None, 
+                 scanned_serial_number: Optional[str] = None,
+                 power: bool = False):
         """
         Initializes the DeviceUnderTest state model.
 
@@ -98,19 +102,15 @@ class DeviceUnderTest:
         global _CACHED_SCANNED_SERIAL
         self.at = at_controller
 
-        # --- [MODIFIED] ---
         # Use the provided profile name or fallback to a default with a warning.
         if not target_device_profile:
             self.device_name = "ask3-3639" # Fallback to prevent crashes
             _fsm_module_logger.warning(f"No target_device_profile provided to DUT, falling back to '{self.device_name}'.")
         else:
             self.device_name = target_device_profile
-        # --- END MODIFIED ---
 
         self.name: str = self.device_name
-        self.battery: bool = False
-        self.battery_vbus: bool = False
-        self.vbus: bool = True
+        self.battery: bool = power
         self.bridge_fw: str = DEVICE_PROPERTIES[self.device_name]['bridge_fw']
         self.pid: str = DEVICE_PROPERTIES[self.device_name]['id_product']
         self.mcu_fw_human_readable = DEVICE_PROPERTIES[self.device_name]['mcu_fw']
@@ -219,7 +219,11 @@ class DeviceUnderTest:
                 None:
         """
         # Re-call init, passing along the controller it already has
-        self.__init__(self.at)
+        self.__init__(
+            self.at, 
+            target_device_profile=self.device_name, 
+            power=self.battery
+        )
 
     def _self_destruct(self):
         """ This function sets the current self.dut admin_pin, recovery_pin, self_destruct_pin, and user_pin parameters to the 'old' parameters.
@@ -877,11 +881,14 @@ class ApricornDeviceFSM:
             'fsm_current_state': self.source_state,
             'fsm_destination_state': self.state
         }
-        if not self.at.await_and_confirm_led_pattern(LEDs['ACCEPT_PATTERN'], timeout=5.0, replay_extra_context=context):
-            self.logger.error("Did not observe ACCEPT_PATTERN pattern. POST failed.")
-            self.post_fail()
-        else:
+        if self.dut.battery:
             self.post_pass()
+        else:
+            if not self.at.await_and_confirm_led_pattern(LEDs['ACCEPT_PATTERN'], timeout=5.0, replay_extra_context=context):
+                self.logger.error("Did not observe ACCEPT_PATTERN pattern. POST failed.")
+                self.post_fail()
+            else:
+                self.post_pass()
 
     def on_enter_OFF(self, event_data: EventData) -> None:
         """
@@ -901,7 +908,11 @@ class ApricornDeviceFSM:
             'fsm_current_state': self.source_state,
             'fsm_destination_state': self.state
         }
-        if self.at.confirm_led_solid(LEDs['ALL_OFF'], minimum=1.0, timeout=3.0, replay_extra_context=context):
+        if self.dut.battery:
+            duration = 20.0
+        else:
+            duration = 3.0
+        if self.at.confirm_led_solid(LEDs['ALL_OFF'], minimum=1.0, timeout=duration, replay_extra_context=context):
             self.logger.info("Device is confirmed OFF.")
         else:
             self.logger.error("Failed to confirm device LEDs are OFF.")
@@ -947,7 +958,12 @@ class ApricornDeviceFSM:
             'fsm_current_state': self.source_state,
             'fsm_destination_state': self.state
         }
-        if self.at.confirm_led_solid(LEDs['GREEN_BLUE_STATE'], minimum=3.0, timeout=10.0, replay_extra_context=context):
+        if self.dut.battery:
+            pattern = LEDs['GREEN_BLUE_BATTERY_STATE']
+        else:
+            pattern = LEDs['GREEN_BLUE_STATE']
+
+        if self.at.confirm_led_solid(pattern, minimum=3.0, timeout=10.0, replay_extra_context=context):
             self.logger.info("Stable OOB_MODE confirmed.")
             self._increment_enumeration_count('oob')
         else:
@@ -1220,7 +1236,9 @@ class ApricornDeviceFSM:
         self.at.on("connect") # This will now be called correctly.
         time.sleep(0.5)
         
-        if self.dut.vbus:
+        if self.dut.battery:
+            pass
+        else:
             if not self.at.confirm_led_pattern(LEDs['RED_GREEN_BLUE'], clear_buffer=True, replay_extra_context=context):
                 raise TransitionCallbackError("Failed Startup Self-Test LED confirmation")
             self.logger.info("Startup Self-Test successful. Proceeding to POWER_ON_SELF_TEST state.")
@@ -1435,9 +1453,9 @@ class ApricornDeviceFSM:
             self._press("lock", duration_ms=6000)
         else:
             self.logger.info("Initiating Manufacturer Reset...")
-            self._sequence([["unlock", "key2"], "key3", "key8"], pause_duration_ms=200)
+            self._sequence([["lock", "key2"], "key3", "key8"], pause_duration_ms=200)
             time.sleep(.2)
-            self._press("unlock", duration_ms=6000)
+            self._press("lock", duration_ms=6000)
 
         if not self.at.await_and_confirm_led_pattern(LEDs['RED_GREEN_BLUE'], timeout=7, clear_buffer=True, replay_extra_context=context):
             raise TransitionCallbackError("Failed Reset Ready LED confirmation")

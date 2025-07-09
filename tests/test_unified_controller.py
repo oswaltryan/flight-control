@@ -144,12 +144,12 @@ class TestUnifiedController:
         """
         # --- ARRANGE ---
         # Mock the function that loads settings from the JSON file to provide
-        # a predictable device name for the test.
-        mock_settings_return = ({}, {}, "test_device_profile_from_config")
+        # a predictable device name for the test. It must be a 4-tuple.
+        mock_settings_return = ({}, {}, "test_device_profile_from_config", False)
 
         # --- [BUG FIX] ---
-        # Patch both functions where they are DEFINED, not where they are imported/used.
-        with patch('controllers.logitech_webcam._load_all_camera_settings', return_value=mock_settings_return), \
+        # Patch the correct function name `load_all_camera_settings` (no leading underscore).
+        with patch('controllers.logitech_webcam.load_all_camera_settings', return_value=mock_settings_return), \
              patch('controllers.finite_state_machine.DeviceUnderTest') as mock_dut_constructor:
             # --- [END BUG FIX] ---
 
@@ -173,6 +173,7 @@ class TestUnifiedController:
             assert call_kwargs.get('at_controller') is controller
             assert call_kwargs.get('target_device_profile') == "test_device_profile_from_config"
             assert call_kwargs.get('scanned_serial_number') == "SCAN_SKIPPED_BY_TOOL"
+            assert call_kwargs.get('power') is False
 
     def test_initialization_handles_phidget_exception(self, mock_dependencies, caplog):
         """

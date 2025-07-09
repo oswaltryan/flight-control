@@ -1,7 +1,8 @@
 {
     "target_device_profile": "ask3-3639",
+    "battery": true,
     "camera_properties": {
-        "focus": 130,
+        "focus": 165,
         "brightness": 158,
         "exposure": 4
     },

@@ -76,7 +76,6 @@ class App:
         self.cap: Optional[cv2.VideoCapture] = None
         self.imgtk = None
         self._debounce_job = None
-        self.target_device_profile: Optional[str] = None
 
         # --- Variables for ROI Tuning ---
         self.tune_led_button: Optional[tk.Button] = None
@@ -501,15 +500,7 @@ class App:
     def initialize_hardware(self):
         """Initializes hardware in a background thread, then schedules UI finalization."""
         try:
-            logger.info("Initializing UnifiedController...")
-            try:
-                with open(CAMERA_SETTINGS_SAVE_PATH, 'r') as f:
-                    settings_data = json.load(f)
-                    self.target_device_profile = settings_data.get('target_device_profile')
-                    logger.info(f"Loaded and will preserve target device profile: '{self.target_device_profile}'")
-            except (FileNotFoundError, json.JSONDecodeError, TypeError) as e:
-                logger.warning(f"Could not pre-load settings to preserve device profile: {e}")
-            
+            logger.info("Initializing UnifiedController...")            
             self.controller = UnifiedController(
                 camera_id=CAMERA_ID,
                 logger_instance=logger.getChild("UnifiedCtrl"),
@@ -799,6 +790,15 @@ class App:
 
     def _save_settings(self):
         """Saves the current slider values and ROI positions to the JSON file."""
+        # Step 1: READ - Load the entire existing config file first.
+        # If the file doesn't exist or is invalid, start with an empty dictionary.
+        try:
+            with open(CAMERA_SETTINGS_SAVE_PATH, 'r') as f:
+                all_settings_to_save = json.load(f)
+        except (FileNotFoundError, json.JSONDecodeError):
+            all_settings_to_save = {}
+
+        # Step 2: Update only the parts this tool is responsible for.
         current_focus = self.target_settings["focus"].get()
         current_brightness = self.target_settings["brightness"].get()
         current_exposure = self.target_settings["exposure"].get()
@@ -808,42 +808,27 @@ class App:
             "brightness": current_brightness,
             "exposure": current_exposure
         }
-        logger.info(f"Preparing to save camera properties: {camera_properties}")
-
-        # --- [BUG FIX START] ---
-        # Determine the source of ROI data safely, checking for checker's existence
+        all_settings_to_save['camera_properties'] = camera_properties
+        logger.info(f"Updating camera properties to: {camera_properties}")
+        
         rois_to_save_from = {}
         if self.is_tuning:
-            # If tuning, the new_rois dictionary is the source of truth
             rois_to_save_from = self.new_rois
         elif self.checker:
-            # If not tuning, get ROIs from the live checker, but only if it exists
             rois_to_save_from = {
                 key: config.get('roi') for key, config in self.checker.led_configs.items()
             }
-        # --- [BUG FIX END] ---
-
-        # Prepare ROI positions in the new {x, y} format
+        
         roi_settings = {}
-        if not rois_to_save_from:
-             logger.warning("No ROI data available to save. ROI settings will be empty.")
-        else:
+        if rois_to_save_from:
             for led_key, roi_tuple in rois_to_save_from.items():
                 if roi_tuple:
-                    # Save only the x and y coordinates from the (x, y, w, h) tuple
                     roi_settings[led_key] = {'x': roi_tuple[0], 'y': roi_tuple[1]}
+        
+        all_settings_to_save['roi_settings'] = roi_settings
+        logger.info(f"Updating ROI positions to: {roi_settings}")
 
-        logger.info(f"Preparing to save ROI positions: {roi_settings}")
-
-        all_settings_to_save = {
-            # --- [BUG FIX START] ---
-            # Add the preserved target_device_profile to the dictionary before saving.
-            "target_device_profile": self.target_device_profile,
-            # --- [BUG FIX END] ---
-            "camera_properties": camera_properties,
-            "roi_settings": roi_settings
-        }
-
+        # Step 3: WRITE - Save the entire modified data structure back to the file.
         try:
             os.makedirs(os.path.dirname(CAMERA_SETTINGS_SAVE_PATH), exist_ok=True)
             with open(CAMERA_SETTINGS_SAVE_PATH, 'w') as f:

@@ -25,7 +25,7 @@ os.makedirs(RUN_OUTPUT_DIR, exist_ok=True) # Create the directory
 
 # --- IMPORT AND SETUP LOGGING FIRST ---
 try:
-    from utils.logging_config import setup_logging
+    from controllers.logging import setup_logging
     # Pass the specific log file path for this run
     run_log_file = os.path.join(RUN_OUTPUT_DIR, "main.log")
     setup_logging(log_file_path=run_log_file, log_file_mode="w") # "w" to start fresh for each run

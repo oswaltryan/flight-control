@@ -120,30 +120,30 @@ def get_capture_backend():
         return cv2.CAP_AVFOUNDATION
     return None # Let OpenCV choose default
 
-def _load_all_camera_settings() -> Tuple[Dict[int, Any], Dict[str, Dict[str, int]], Optional[str]]:
+def load_all_camera_settings() -> Tuple[Dict[int, Any], Dict[str, Dict[str, int]], Optional[str], bool]:
     """
-    Attempts to load camera hardware properties, ROI positions, and the target device
-    profile from a JSON file.
+    Attempts to load camera hardware properties, ROI positions, the target device
+    profile, and battery status from a JSON file.
 
     Returns:
-        A tuple: (camera_properties, roi_positions, target_device_profile)
+        A tuple: (camera_properties, roi_positions, target_device_profile, battery_status)
     """
     if not os.path.exists(_CAMERA_SETTINGS_FILE):
         logger.info(f"Camera settings file not found at '{_CAMERA_SETTINGS_FILE}'. Using default settings.")
-        return DEFAULT_CAMERA_HARDWARE_SETTINGS.copy(), {}, None
+        return DEFAULT_CAMERA_HARDWARE_SETTINGS.copy(), {}, None, False
 
     loaded_camera_props = {}
     loaded_roi_positions = {}
     target_device_profile = None
+    battery_status = False # Default to False
 
     try:
         with open(_CAMERA_SETTINGS_FILE, 'r') as f:
             loaded_data = json.load(f)
         
-        # [NEW] Get the target device profile name
         target_device_profile = loaded_data.get('target_device_profile')
+        battery_status = loaded_data.get('battery', False) # [NEW] Read the battery status
 
-        # Load camera properties
         for key_str, value in loaded_data.get('camera_properties', {}).items():
             try:
                 if key_str == 'exposure':
@@ -159,19 +159,18 @@ def _load_all_camera_settings() -> Tuple[Dict[int, Any], Dict[str, Dict[str, int
         merged_camera_properties = DEFAULT_CAMERA_HARDWARE_SETTINGS.copy()
         merged_camera_properties.update(loaded_camera_props)
 
-        # Load ROI positions
         for led_name, pos_dict in loaded_data.get('roi_settings', {}).items():
             if isinstance(pos_dict, dict) and 'x' in pos_dict and 'y' in pos_dict:
                 loaded_roi_positions[led_name] = {'x': pos_dict['x'], 'y': pos_dict['y']}
             else:
                 logger.warning(f"Skipping invalid ROI setting for '{led_name}': expected dict with 'x' and 'y'.")
 
-        logger.debug(f"Successfully loaded settings. Target Device: '{target_device_profile}'.")
-        return merged_camera_properties, loaded_roi_positions, target_device_profile
+        logger.debug(f"Successfully loaded settings. Target: '{target_device_profile}', Battery: {battery_status}.")
+        return merged_camera_properties, loaded_roi_positions, target_device_profile, battery_status
 
     except (json.JSONDecodeError, Exception) as e:
         logger.error(f"Error processing camera settings from '{_CAMERA_SETTINGS_FILE}': {e}. Using defaults.", exc_info=True)
-        return DEFAULT_CAMERA_HARDWARE_SETTINGS.copy(), {}, None
+        return DEFAULT_CAMERA_HARDWARE_SETTINGS.copy(), {}, None, False
  
 class LogitechLedChecker:
     def __init__(self, camera_id: int, logger_instance=None, led_configs=None,
@@ -684,8 +683,15 @@ class LogitechLedChecker:
                     frame, detected_led_states = self._get_current_led_state_from_camera()
                     # The main buffer continues to update, but we don't care about it anymore for this save.
                     if frame is not None:
-                        # We append to our temporary post-roll list.
-                        post_roll_footage.append((time.time(), frame.copy(), detected_led_states))
+                        with self.active_keys_lock:
+                            active_keys_snapshot = self.active_keys_for_replay.copy()
+                        
+                        post_roll_footage.append((
+                            time.time(), 
+                            frame.copy(), 
+                            detected_led_states, 
+                            active_keys_snapshot  # Add the missing 4th element
+                        ))
                     time.sleep(1.0 / self.replay_fps if self.replay_fps > 0 else 0.01)
                 
                 # DEBUG LOG: Log the number of post-roll frames captured.

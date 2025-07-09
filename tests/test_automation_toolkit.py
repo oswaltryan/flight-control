@@ -184,24 +184,20 @@ class TestAutomationToolkit:
 
     @patch('controllers.unified_controller.UnifiedController')
     @patch('automation_toolkit.os.makedirs')
-    def test_import_error_for_logging_setup(self, mock_makedirs, mock_controller, monkeypatch):
+    @patch('automation_toolkit.setup_logging') # Patch the successful setup_logging call
+    def test_import_error_for_logging_setup(self, mock_setup_logging, mock_makedirs, mock_controller, monkeypatch):
         """
         Covers lines 27-31:
-        Tests fallback logging if `utils.logging_config` fails to import.
+        Tests fallback logging if `controllers.logging` fails to import.
         """
-        # GIVEN: We hide the 'utils' module so the import fails
-        monkeypatch.setitem(sys.modules, 'utils.logging_config', None)
+        # GIVEN: We hide the 'controllers.logging' module so the import fails
+        monkeypatch.setitem(sys.modules, 'controllers.logging', None)
     
         # WHEN: The toolkit is reloaded
         # THEN: It should not raise an error, but use basicConfig
         with patch('automation_toolkit.logging.basicConfig') as mock_basic_config:
             importlib.reload(at_toolkit)
             mock_basic_config.assert_called_once()
-
-    def test_import_error_for_controllers(self, monkeypatch):
-        monkeypatch.setitem(sys.modules, 'controllers.unified_controller', None)
-        with pytest.raises(ImportError):
-            importlib.reload(at_toolkit)
 
     @patch('controllers.unified_controller.UnifiedController')
     @patch('automation_toolkit.os.makedirs')

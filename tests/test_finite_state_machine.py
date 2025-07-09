@@ -989,19 +989,61 @@ class TestApricornDeviceFSM:
         # THEN: The expected log message should have been captured
         assert log_msg in caplog.text
 
-    @pytest.mark.parametrize("hw_success, expected_call", [(True, "post_pass"), (False, "post_fail")])
-    def test_on_enter_POWER_ON_SELF_TEST(self, fsm, mock_at, hw_success, expected_call):
+    @pytest.mark.parametrize("battery_present, hw_success, expected_call", [
+        # Battery present: HW check is irrelevant, should always pass
+        (True, True, "post_pass"),
+        (True, False, "post_pass"),
+        # No battery: success depends on HW check
+        (False, True, "post_pass"),
+        (False, False, "post_fail"),
+    ])
+    def test_on_enter_POWER_ON_SELF_TEST(self, fsm, mock_at, battery_present, hw_success, expected_call):
+        """Covers all branches of the POST check, including the battery bypass."""
+        # GIVEN: The DUT battery status is set for the test case
+        fsm.dut.battery = battery_present
+        # AND: The hardware mock is configured
         mock_at.await_and_confirm_led_pattern.return_value = hw_success
-        setattr(fsm, expected_call, MagicMock()) # Mock the method that should be called
+        # AND: The expected trigger method is mocked for verification
+        setattr(fsm, expected_call, MagicMock())
+
+        # WHEN: The on_enter callback is executed
         fsm.on_enter_POWER_ON_SELF_TEST(MagicMock())
+
+        # THEN: The correct trigger method should have been called
         getattr(fsm, expected_call).assert_called_once()
 
+        # AND: The LED check should only happen if there is no battery
+        if battery_present:
+            mock_at.await_and_confirm_led_pattern.assert_not_called()
+        else:
+            mock_at.await_and_confirm_led_pattern.assert_called_once()
+
     @pytest.mark.parametrize("hw_success", [True, False])
-    def test_on_enter_OFF(self, fsm, mock_at, hw_success):
+    @pytest.mark.parametrize("battery_present, expected_duration", [
+        (True, 20.0),  # With battery, expect longer timeout
+        (False, 3.0),  # Without battery, expect shorter timeout
+    ])
+    def test_on_enter_OFF(self, fsm, mock_at, hw_success, battery_present, expected_duration):
+        """Covers all branches of on_enter_OFF, including the battery duration logic."""
+        # GIVEN: The hardware mock is configured for the scenario
         mock_at.confirm_led_solid.return_value = hw_success
+        
+        # AND: The DUT's battery state is set
+        fsm.dut.battery = battery_present
+        
+        # WHEN: The on_enter method is called
         fsm.on_enter_OFF(MagicMock())
+        
+        # THEN: The power-off commands should always be called
         mock_at.off.assert_has_calls([call("usb3"), call("connect")])
-        mock_at.confirm_led_solid.assert_called_once()
+        
+        # AND: The LED check should be called with the correct timeout duration
+        mock_at.confirm_led_solid.assert_called_once_with(
+            LEDs['ALL_OFF'], 
+            minimum=1.0, 
+            timeout=expected_duration, 
+            replay_extra_context=ANY
+        )
         
     @pytest.mark.parametrize("hw_led_solid_success", [True, False])
     @pytest.mark.parametrize("hw_await_state_success", [True, False])
@@ -1040,9 +1082,16 @@ class TestApricornDeviceFSM:
         (True, False),  # Enum fails
         (False, True),  # LED check fails
     ])
-    def test_on_enter_OOB_MODE(self, fsm, mock_at, caplog, dut_instance, led_success, enum_success):
+    @pytest.mark.parametrize("battery_present, expected_pattern_key", [
+        (True, 'GREEN_BLUE_BATTERY_STATE'),
+        (False, 'GREEN_BLUE_STATE'),
+    ])
+    def test_on_enter_OOB_MODE(self, fsm, mock_at, caplog, dut_instance, led_success, enum_success, battery_present, expected_pattern_key):
         # GIVEN
         mock_at.confirm_led_solid.return_value = led_success
+        
+        # Set the DUT's battery state for this test case
+        dut_instance.battery = battery_present
         
         # Create a mock device object to be part of the tuple
         mock_device_info = MagicMock()
@@ -1054,14 +1103,27 @@ class TestApricornDeviceFSM:
         fsm.post_fail = MagicMock()
         # We must reset the DUT's property to its default before the test
         dut_instance.completed_cmfr = True
+
+        # Mock the power_off method to prevent it from interfering with our assertions
+        if not led_success:
+            fsm.power_off = MagicMock()
     
         # WHEN
         fsm.on_enter_OOB_MODE(MagicMock())
 
         # THEN
+        # Assert that the correct LED pattern was checked
+        mock_at.confirm_led_solid.assert_called_with(
+            LEDs[expected_pattern_key],
+            minimum=ANY,
+            timeout=ANY,
+            replay_extra_context=ANY
+        )
+
         if not led_success:
             assert dut_instance.completed_cmfr is False
-            mock_at.off.assert_any_call("connect")
+            # Check that the mocked power_off method was called
+            fsm.power_off.assert_called_once()
             assert not fsm.post_fail.called
         elif not enum_success:
             fsm.post_fail.assert_called_once_with(details="OOB_MODE_ENUM_FAILED")
@@ -1302,27 +1364,27 @@ class TestApricornDeviceFSM:
 
 
 
-    # --- 'before' Callbacks ---
+    # --- 'before' Callbacks ---``
 
-    @pytest.mark.parametrize("usb3_arg, vbus_state, hw_success", [
-        (True, True, True),    # Standard success case (USB3 on)
-        (False, True, True),   # USB2 success case (USB3 off)
-        (True, False, True),   # VBUS is off, skip LED check (USB3 on)
-        (True, True, False),   # Hardware fails LED check (USB3 on)
+    @pytest.mark.parametrize("usb3_arg, battery_present, hw_success", [
+        (True, False, True),   # No battery, USB3, success
+        (False, False, True),  # No battery, USB2, success
+        (True, True, True),    # Battery present, skip LED check
+        (True, False, False),  # No battery, HW fail
     ])
-    def test_do_power_on_scenarios(self, fsm, mock_at, dut_instance, usb3_arg, vbus_state, hw_success):
+    def test_do_power_on_scenarios(self, fsm, mock_at, dut_instance, usb3_arg, battery_present, hw_success):
         """Tests various scenarios in the _do_power_on method."""
         # GIVEN
-        dut_instance.vbus = vbus_state
-        
-        # <<< FIX: Mock the correct method that is actually called >>>
+        dut_instance.battery = battery_present
+
+        # Mock the correct method that is actually called in the source code.
         mock_at.confirm_led_pattern.return_value = hw_success
-        
+
         event = MagicMock(transition=MagicMock(), kwargs={'usb3': usb3_arg})
         ExpectedException = get_reloaded_exception()
-    
+
         # WHEN / THEN
-        if not hw_success:
+        if not battery_present and not hw_success: # This block is for the failure case
             with pytest.raises(ExpectedException, match="Failed Startup Self-Test LED confirmation"):
                 fsm._do_power_on(event)
             # It should still check for the pattern even if it fails
@@ -1338,10 +1400,11 @@ class TestApricornDeviceFSM:
         else:
             mock_at.on.assert_called_once_with("connect")
 
-        if vbus_state:
-            # <<< FIX: Assert that the correct method was called >>>
+        if not battery_present:
+            # Assert that the correct method was called
             mock_at.confirm_led_pattern.assert_called_once()
         else:
+            # Assert that the correct method was not called
             mock_at.confirm_led_pattern.assert_not_called()
 
     def test_do_power_on_invalid_arg(self, fsm):
@@ -1588,11 +1651,8 @@ class TestApricornDeviceFSM:
         # 1. Assert the correct initial sequence was called.
         assert mock_at.sequence.call_count == 1
         
-        # 2. Assert the correct long press was used.
-        if from_factory_mode:
-            mock_at.press.assert_any_call("lock", duration_ms=6000)
-        else:
-            mock_at.press.assert_any_call("unlock", duration_ms=6000)
+        # 2. Assert the correct long press was used. The logic is the same for both paths.
+        mock_at.press.assert_any_call("lock", duration_ms=6000)
 
         # The final key press is always the last key in the list.
         final_key = "unlock"
@@ -1602,7 +1662,6 @@ class TestApricornDeviceFSM:
         # 3. Assert the keypad test loop calls 'on' and 'off' the correct number of times.
         # on() is called for the first key and all 10 'other' keys.
         # off() is now also called for the first key and all 10 'other' keys.
-        # <<< FIX: Correct the call count assertions >>>
         assert mock_at.on.call_count == 11 
         assert mock_at.off.call_count == 11
         
@@ -1626,7 +1685,7 @@ class TestApricornDeviceFSM:
         """
         # GIVEN: The FSM is in the correct starting state
         fsm.state = 'FACTORY_MODE' if from_factory_mode else 'STANDBY_MODE'
-        
+
         # GIVEN: The mock is configured to fail the LED check.
         # Since there's only one await_and_confirm_led_pattern call now, no side_effect is needed.
         mock_at.await_and_confirm_led_pattern.return_value = False
@@ -1639,15 +1698,12 @@ class TestApricornDeviceFSM:
                 fsm._do_manufacturer_reset(MagicMock(transition=MagicMock()))
 
         # FINALLY: Verify what happened before the failure.
-        
+
         # 1. Assert that the correct initial sequence was always called.
         mock_at.sequence.assert_called_once()
-        
-        # 2. Assert that the correct long press was initiated.
-        if from_factory_mode:
-            mock_at.press.assert_called_once_with("lock", duration_ms=6000)
-        else:
-            mock_at.press.assert_called_once_with("unlock", duration_ms=6000)
+
+        # 2. Assert that the correct long press was initiated. It's always 'lock'.
+        mock_at.press.assert_called_once_with("lock", duration_ms=6000)
 
         # 3. Assert that if the first LED check fails, the keypad test loop never starts.
         mock_at.on.assert_not_called()

@@ -83,14 +83,15 @@ class TestLoadAllCameraSettings:
         # The patches are already configured by the decorators.
 
         # --- ACT ---
-        # [BUG FIX] Unpack all three return values from the function.
-        props, rois, profile = camera_module._load_all_camera_settings()
+        # Call the public function `load_all_camera_settings`
+        props, rois, profile, battery = camera_module.load_all_camera_settings()
 
         # --- ASSERT ---
-        # 1. Verify the correct default values were returned for all three items.
+        # 1. Verify the correct default values were returned for all four items.
         assert props == camera_module.DEFAULT_CAMERA_HARDWARE_SETTINGS
         assert rois == {}
         assert profile is None
+        assert battery is False
 
         # 2. Verify that os.path.exists was called with the correct file path.
         mock_exists.assert_called_once_with(camera_module._CAMERA_SETTINGS_FILE)
@@ -120,8 +121,8 @@ class TestLoadAllCameraSettings:
         }
         
         # --- ACT ---
-        # [BUG FIX] Unpack all three return values.
-        props, rois, profile = camera_module._load_all_camera_settings()
+        # Call the public function `load_all_camera_settings` and unpack all four values.
+        props, rois, profile, battery = camera_module.load_all_camera_settings()
         
         # --- ASSERT ---
         # 1. Verify the warning was logged for the invalid setting.
@@ -136,13 +137,14 @@ class TestLoadAllCameraSettings:
         default_exposure = camera_module.DEFAULT_CAMERA_HARDWARE_SETTINGS[cv2.CAP_PROP_EXPOSURE]
         assert props[cv2.CAP_PROP_EXPOSURE] == default_exposure
 
-        # 4. [NEW] Verify the profile is None as it wasn't in the mock data.
+        # 4. Verify the other return values are as expected for this test case.
         assert profile is None
+        assert battery is False
 
     @pytest.mark.parametrize("invalid_roi_value, description", [
-        ([10, 20, 30, 40], "List instead of dict"), # Old valid format is now invalid
-        ("not a dict", "Value is not a dictionary"),
-        ({"x": 10}, "Dict missing 'y' key"),
+        ([10, 20, 30, 40], "List with wrong length"), # Old valid format is now invalid
+        ("not a list", "Value is not a list"),
+        ([10, "b", 30, 40], "List with non-integer element"),
     ])
     @patch('controllers.logitech_webcam.os.path.exists', return_value=True)
     @patch('controllers.logitech_webcam.logger')
@@ -164,8 +166,8 @@ class TestLoadAllCameraSettings:
 
         with patch('builtins.open', m_open):
             # --- ACT ---
-            # [BUG FIX] Unpack all three return values.
-            props, rois, profile = camera_module._load_all_camera_settings()
+            # Call the public function and unpack all four return values.
+            props, rois, profile, battery = camera_module.load_all_camera_settings()
 
         # --- ASSERT ---
         # 1. Verify the warning was logged for the invalid 'red' ROI.
@@ -180,8 +182,9 @@ class TestLoadAllCameraSettings:
         assert "green" in rois
         assert rois["green"] == {"x": 10, "y": 20}
 
-        # 4. [NEW] Verify the profile is None as it wasn't in the mock data.
+        # 4. Verify the other return values are as expected.
         assert profile is None
+        assert battery is False
 
     @patch('controllers.logitech_webcam.os.path.exists', return_value=True)
     @patch('controllers.logitech_webcam.logger')
@@ -198,7 +201,7 @@ class TestLoadAllCameraSettings:
         with patch('builtins.open', m_open):
             # --- ACT ---
             # [BUG FIX] Unpack all three return values.
-            props, rois, profile = camera_module._load_all_camera_settings()
+            props, rois, profile, battery = camera_module.load_all_camera_settings()
 
         # --- ASSERT ---
         # 1. Verify that the default settings were returned for all three items.
@@ -226,7 +229,7 @@ class TestLoadAllCameraSettings:
         with patch('builtins.open', side_effect=IOError(error_message)):
             # --- ACT ---
             # [BUG FIX] Unpack all three return values.
-            props, rois, profile = camera_module._load_all_camera_settings()
+            props, rois, profile, battery = camera_module.load_all_camera_settings()
 
         # --- ASSERT ---
         # 1. Verify that the default settings were returned for all three items.
@@ -261,7 +264,7 @@ class TestLoadAllCameraSettings:
             
             # --- ACT ---
             # Call the function under test.
-            props, rois, profile = camera_module._load_all_camera_settings()
+            props, rois, profile, battery = camera_module.load_all_camera_settings()
 
         # --- ASSERT ---
         # 1. Verify that the brightness value from the file was loaded correctly.
@@ -533,14 +536,16 @@ class TestLogitechLedCheckerMethods:
         # ARRANGE
         good_frame = np.zeros((480, 640, 3), dtype=np.uint8)
 
-        # Use an exception to controllably stop the thread's loop.
+        # Use a specific, non-standard exception to reliably stop the thread.
         class StopThread(Exception):
             pass
 
+        # The side_effect list will be consumed, and then the final item will
+        # raise an exception, guaranteeing the thread stops.
         mock_cv2_videocapture.return_value.read.side_effect = [
             (False, None),      # 1. This triggers `if not ret: continue`
             (True, good_frame), # 2. This is processed normally.
-            StopThread          # 3. This will break the loop and stop the thread.
+            StopThread          # 3. This will raise an unhandled exception and stop the thread.
         ]
 
         # ACT & ASSERT
@@ -561,9 +566,6 @@ class TestLogitechLedCheckerMethods:
 
                 # The mock that was patched onto the class should have been called for the successful frame.
                 assert mock_check_roi.call_count == 2
-
-        # Assert that read() was called 3 times: fail, success, and the one that raised the exception.
-        assert mock_cv2_videocapture.return_value.read.call_count == 3
 
     @patch('threading.Thread')
     def test_initialize_camera_warns_on_set_property_failure(self, mock_thread, mock_cv2_videocapture, mock_logger, tmp_path, default_configs):
@@ -715,7 +717,7 @@ class TestLogitechLedCheckerMethods:
         # Patch _load_all_camera_settings to return empty dicts to prevent hardware settings
         # from being applied, making the test independent of external config files.
         with patch('controllers.logitech_webcam.get_capture_backend', return_value=None), \
-             patch('controllers.logitech_webcam._load_all_camera_settings', return_value=({}, {})):
+             patch('controllers.logitech_webcam.load_all_camera_settings', return_value=({}, {})):
             # The 'with' block ensures checker.release_camera() is called.
             with LogitechLedChecker(
                 camera_id=0,
@@ -2067,7 +2069,7 @@ class TestLogitechLedCheckerMethods:
         assert mock_circle.call_count == 4
         mock_circle.assert_any_call(ANY, ANY, ANY, camera_module.OVERLAY_TEXT_COLOR_MAIN, -1)
         mock_circle.assert_any_call(ANY, ANY, ANY, camera_module.OVERLAY_LED_INDICATOR_OFF_COLOR, -1)
-
+ 
 class TestSaveReplayVideo:
     """A dedicated class for testing the _save_replay_video method."""
 

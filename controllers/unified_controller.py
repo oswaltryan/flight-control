@@ -92,24 +92,25 @@ class UnifiedController:
         self._barcode_scanner = BarcodeScanner(phidget_press_callback=self.press)
 
         # --- [MODIFIED] Build Dynamic LED & Camera Configs FIRST ---
-        from .logitech_webcam import _load_all_camera_settings, PRIMARY_LED_CONFIGURATIONS, ROI_SIZE_SECURE_KEYPAD, ROI_SIZE_STANDARD_KEYPAD
+        from .logitech_webcam import load_all_camera_settings, PRIMARY_LED_CONFIGURATIONS, ROI_SIZE_SECURE_KEYPAD, ROI_SIZE_STANDARD_KEYPAD
         
-        camera_settings_to_apply, roi_positions, target_device_name = _load_all_camera_settings()
-        self.logger.info(f"Loaded target device profile from config: '{target_device_name}'")
+        camera_settings_to_apply, roi_positions, target_device_name, battery_present = load_all_camera_settings()
+        self.logger.debug(f"Loaded target device profile from config: '{target_device_name}'")
 
         # --- Initialize DUT to determine hardware properties ---
         try:
             from controllers.finite_state_machine import DeviceUnderTest
-            
+
+            dut_kwargs = {
+                'at_controller': self,
+                'target_device_profile': target_device_name,
+                'power': battery_present 
+            }
             if skip_initial_scan:
                 self.logger.info("DUT initialization requested to skip initial barcode scan.")
-                self.dut = DeviceUnderTest(
-                    at_controller=self, 
-                    target_device_profile=target_device_name, 
-                    scanned_serial_number="SCAN_SKIPPED_BY_TOOL"
-                )
-            else:
-                self.dut = DeviceUnderTest(at_controller=self, target_device_profile=target_device_name)
+                dut_kwargs['scanned_serial_number'] = "SCAN_SKIPPED_BY_TOOL"
+            
+            self.dut = DeviceUnderTest(**dut_kwargs)
 
             layout_key = 'Secure Key' if self.dut.secure_key else 'Portable'
             self._keypad_layout = KEYPAD_LAYOUTS[layout_key]
@@ -615,7 +616,7 @@ class UnifiedController:
 # --- For direct testing ---
 if __name__ == '__main__': # pragma: no cover
     try:
-        from utils.logging_config import setup_logging
+        from controllers.logging import setup_logging
         setup_logging(default_log_level=logging.DEBUG) 
     except ImportError:
         logging.basicConfig(stream=sys.stdout, level=logging.DEBUG,
