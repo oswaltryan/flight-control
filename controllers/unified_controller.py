@@ -418,6 +418,57 @@ class UnifiedController:
         self.logger.info(f"  {DUT_ping_2.idVendor}:{DUT_ping_2.idProduct} [{DUT_ping_2.bcdDevice}] @{DUT_ping_2.bcdUSB} {DUT_ping_2.iSerial} {DUT_ping_2.iProduct}")
         return True, DUT_ping_2
     
+    def _format_fat32(self, device, label="DUT", windows_partition_number=1):
+        """
+        Format an existing partition as FAT32.  exFAT ON WINDOWS ONLY!!!
+        Returns True on success, False on failure.
+
+        Windows:
+        - device: disk number (int or str, e.g., 2)
+        - windows_partition_number: required (int or str, e.g., 1)
+        - Requires Admin; partition must already exist.
+
+        Linux:
+        - device: path to partition (str), e.g., "/dev/sdb1"
+        - Uses: mkfs.vfat -F 32
+
+        macOS:
+        - device: path to disk/partition (str), e.g., "/dev/disk2s1"
+        - Uses: diskutil eraseVolume FAT32
+        """
+        try:
+            if sys.platform.startswith("win32"):
+                if windows_partition_number is None:
+                    raise ValueError("On Windows you must supply windows_partition_number")
+                dn = str(device).strip()
+                pn = str(windows_partition_number).strip()
+                ps = f"""
+                    $ErrorActionPreference = 'Stop'
+                    $part = Get-Partition -DiskNumber {dn} -PartitionNumber {pn}
+                    if (-not $part.DriveLetter) {{ $part | Add-PartitionAccessPath -AssignDriveLetter:$true }}
+                    $letter = (Get-Partition -DiskNumber {dn} -PartitionNumber {pn}).DriveLetter
+                    Format-Volume -DriveLetter $letter -FileSystem exFAT -NewFileSystemLabel '{label}' -Force -Confirm:$false
+                    """
+                subprocess.run(
+                    ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", ps],
+                    check=True
+                )
+                return True
+
+            elif sys.platform.startswith("linux"):
+                subprocess.run(["mkfs.vfat", "-F", "32", "-n", label, str(device)], check=True)
+                return True
+
+            elif sys.platform.startswith("darwin"):
+                subprocess.run(["diskutil", "eraseVolume", "FAT32", label, str(device)], check=True)
+                return True
+
+            else:
+                raise NotImplementedError(f"Unsupported platform: {sys.platform}")
+
+        except Exception as e:
+            return False
+    
     def _get_fio_path(self) -> str:
         """
         Determines the correct path to the bundled FIO binary based on the OS.

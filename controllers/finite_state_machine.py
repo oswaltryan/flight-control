@@ -53,7 +53,7 @@ _controllers_dir = os.path.dirname(_current_file_path)
 _project_root = os.path.dirname(_controllers_dir)
 _json_path = os.path.join(_project_root, 'utils', 'config', 'device_properties.json')
 
-_CACHED_SCANNED_SERIAL: Optional[str] = None
+_CACHED_SCANNED_SERIAL: Optional[str] = "141820000007"
 
 
 # --- File I/O and Parsing (operations that can fail are kept in the try block) ---
@@ -104,7 +104,8 @@ class DeviceUnderTest:
 
         # Use the provided profile name or fallback to a default with a warning.
         if not target_device_profile:
-            self.device_name = "ask3-3639" # Fallback to prevent crashes
+            self.device_name = "ask3nx-3861f" # Fallback to prevent crashes
+            power = True # PLACEHOLDER
             _fsm_module_logger.warning(f"No target_device_profile provided to DUT, falling back to '{self.device_name}'.")
         else:
             self.device_name = target_device_profile
@@ -138,7 +139,7 @@ class DeviceUnderTest:
         self.hardware_id_2: int = DEVICE_PROPERTIES[self.device_name]['hardware_minor']
         self.scb_part_number: str = DEVICE_PROPERTIES[self.device_name]['scb_part_number']
         self.single_code_base: bool = self.scb_part_number is None
-        self.completed_cmfr: bool = True
+        self.completed_cmfr: bool = True # ASSUMPTION IS MOST DEVICES WILL NOT BE IN FACTORY_MODE
 
         self.basic_disk: bool = True
         self.removable_media: bool = False
@@ -291,12 +292,6 @@ class TestSession:
         self.script_start_time: float = time.time()
         self.block_start_time: float = 0.0
         self.block_end_time: float = 0.0
-
-        # Enumeration Counters
-        self.current_block_manufacturer_reset_enum: int = 0
-        self.current_block_oob_enum: int = 0
-        self.current_block_pin_enum: int = 0
-        self.current_block_spi_enum: int = 0
         
         self.block_enumeration_totals: dict = {}
         self.script_enumeration_totals: dict = {}
@@ -314,16 +309,16 @@ class TestSession:
 
     def start_new_block(self, block_name: str, current_test_block: int):
         """Resets counters and timers for the start of a new test block."""
-        self.current_test_block = current_test_block
         self.block_start_time = time.time()
+        self.current_test_block = current_test_block
         if block_name not in self.test_blocks:
-            self.test_blocks.append(block_name)
-        
-        # Reset current block counters
-        self.current_block_manufacturer_reset_enum = 0
-        self.current_block_oob_enum = 0
-        self.current_block_pin_enum = 0
-        self.current_block_spi_enum = 0
+            self.test_blocks.append(self.current_test_block)
+
+        self.block_enumeration_totals.update({self.current_test_block: {}})
+        self.block_enumeration_totals[self.current_test_block].update({"mfr": 0})
+        self.block_enumeration_totals[self.current_test_block].update({"oob": 0})
+        self.block_enumeration_totals[self.current_test_block].update({"pin": 0})
+        self.block_enumeration_totals[self.current_test_block].update({"spi": 0})
         
         # Initialize dictionaries for this block if not present
         if block_name not in self.block_failure_count:
@@ -349,11 +344,7 @@ class TestSession:
             Increments the counter for a specific type of enumeration.
             Assumes enum_type has already been validated by the caller.
             """
-            attr_name = f"current_block_{enum_type}_enum"
-            
-            # This is a more concise way to handle the increment
-            current_val = getattr(self, attr_name, 0)
-            setattr(self, attr_name, current_val + 1)
+            self.block_enumeration_totals[self.current_test_block][enum_type] += 1
 
     def log_failure(self, block_name: str, failure_summary: str, failure_details: str = ""):
         """Logs a failure for a specific test block."""
@@ -420,23 +411,23 @@ class TestSession:
 
         # --- Enumeration Totals ---
         logger.info("Enumerations Totals:")
-        logger.info("{:>14}  {:^5}  {:^5}  {:^5}".format("Reset", "OOB", "PIN", "SPI"))
+        logger.info("{:>15}   {:^5}   {:^5}   {:^5}".format("Reset", "OOB", "PIN", "SPI"))
         
         total_resets = 0
         total_oob = 0
         total_pin = 0
         total_spi = 0
 
-        for i, block_name in enumerate(self.test_blocks, 1):
-            resets = self.block_enumeration_totals.get(block_name, {}).get('manufacturer_reset', 0)
-            oob = self.block_enumeration_totals.get(block_name, {}).get('oob', 0)
-            pin = self.block_enumeration_totals.get(block_name, {}).get('pin', 0)
-            spi = self.block_enumeration_totals.get(block_name, {}).get('spi', 0)
+        for block in self.test_blocks:
+            resets = self.block_enumeration_totals[block]['mfr']
+            oob = self.block_enumeration_totals[block]['oob']
+            pin = self.block_enumeration_totals[block]['pin']
+            spi = self.block_enumeration_totals[block]['spi']
             total_resets += resets
             total_oob += oob
             total_pin += pin
             total_spi += spi
-            logger.info("Block {:<2}: {:^5} | {:^5} | {:^5} | {:^5} |".format(i, resets, oob, pin, spi))
+            logger.info("Block {:<2}: {:^5} | {:^5} | {:^5} | {:^5} |".format(block, resets, oob, pin, spi))
         
         logger.info("Total   : {:^5} | {:^5} | {:^5} | {:^5} |".format(total_resets, total_oob, total_pin, total_spi))
         logger.info("___________________________________")
@@ -452,9 +443,9 @@ class TestSession:
             warnings = self.warning_block.get(block_name, [])
 
             if not failures and not warnings:
-                logger.info(f"Block {i} ({block_name}): Passed")
+                logger.info(f"Block {block_name}: Passed")
             else:
-                logger.info(f"Block {i} ({block_name}):")
+                logger.info(f"Block {block_name}:")
                 if warnings:
                     logger.warning(f"         Warning(s):")
                     for w_summary in warnings:
@@ -644,10 +635,10 @@ class ApricornDeviceFSM:
             # {'trigger': 'collect_error_number', 'source': '*', 'dest': 'ERROR_MODE'},
 
             # --- 'Idle' Mode Transitions (from POST) ---
-            {'trigger': 'post_pass', 'source': 'POWER_ON_SELF_TEST', 'dest': 'FACTORY_MODE', 'conditions': [CallableCondition(lambda _: not self.dut.completed_cmfr, "dut.completed_cmfr == False")]},
+            {'trigger': 'post_pass', 'source': 'POWER_ON_SELF_TEST', 'dest': 'FACTORY_MODE', 'conditions': [CallableCondition(lambda _: not bool(self.dut.completed_cmfr), "dut.completed_cmfr == False")]},
             {'trigger': 'post_pass', 'source': 'POWER_ON_SELF_TEST', 'dest': 'BRUTE_FORCE', 'conditions': [CallableCondition(lambda _: self.dut.brute_force_counter_current == 0, "dut.brute_force_counter_current == 0")]},
             {'trigger': 'post_pass', 'source': 'POWER_ON_SELF_TEST', 'dest': 'USER_FORCED_ENROLLMENT', 'conditions': [CallableCondition(lambda _: bool(self.dut.user_forced_enrollment), "dut.user_forced_enrollment == True")]},
-            {'trigger': 'post_pass', 'source': 'POWER_ON_SELF_TEST', 'dest': 'OOB_MODE', 'conditions': [CallableCondition(lambda _: not self.dut.admin_pin, "dut.admiPIN not enrolled")]},
+            {'trigger': 'post_pass', 'source': 'POWER_ON_SELF_TEST', 'dest': 'OOB_MODE', 'conditions': [CallableCondition(lambda _: not bool(self.dut.admin_pin), "dut.admiPIN not enrolled")]},
             {'trigger': 'post_pass', 'source': 'POWER_ON_SELF_TEST', 'dest': 'STANDBY_MODE', 'conditions': [CallableCondition(lambda _: bool(self.dut.admin_pin), "dut.admin_pin enrolled")]},
 
             # --- RESET Transitions ---
@@ -656,9 +647,9 @@ class ApricornDeviceFSM:
 
             # --- OOB Mode Transitions ---
             {'trigger': 'enter_diagnostic_mode', 'source': 'OOB_MODE', 'dest': 'DIAGNOSTIC_MODE'},
-            {'trigger': 'exit_diagnostic_mode', 'source': 'DIAGNOSTIC_MODE', 'dest': 'OOB_MODE', 'conditions': [CallableCondition(lambda _: not self.dut.admin_pin, "dut.admin_pin not enrolled")]},
+            {'trigger': 'exit_diagnostic_mode', 'source': 'DIAGNOSTIC_MODE', 'dest': 'OOB_MODE', 'conditions': [CallableCondition(lambda _: not bool(self.dut.admin_pin), "dut.admin_pin not enrolled")]},
             {'trigger': 'enroll_admin', 'source': 'OOB_MODE', 'dest': 'PIN_ENROLLMENT', 'before': '_admin_enrollment'},
-            {'trigger': 'user_reset', 'source': 'OOB_MODE', 'dest': 'OOB_MODE', 'before': '_do_user_reset', 'conditions': [CallableCondition(lambda _: not self.dut.provision_lock, "dut.provision_lock == False")]},
+            {'trigger': 'user_reset', 'source': 'OOB_MODE', 'dest': 'OOB_MODE', 'before': '_do_user_reset', 'conditions': [CallableCondition(lambda _: not bool(self.dut.provision_lock), "dut.provision_lock == False")]},
 
             # --- Standby Mode Transitions ---
             {'trigger': 'admin_mode_login', 'source': 'STANDBY_MODE', 'dest': 'ADMIN_MODE', 'before': '_enter_admin_mode_login'},
@@ -668,7 +659,7 @@ class ApricornDeviceFSM:
             {'trigger': 'enter_diagnostic_mode', 'source': 'STANDBY_MODE', 'dest': 'DIAGNOSTIC_MODE'},
             {'trigger': 'self_destruct', 'source': 'STANDBY_MODE', 'dest': 'UNLOCKED_ADMIN', 'before': '_enter_self_destruct_pin'},
             {'trigger': 'exit_diagnostic_mode', 'source': 'DIAGNOSTIC_MODE', 'dest': 'STANDBY_MODE', 'conditions': [CallableCondition(lambda _: bool(self.dut.admin_pin), "dut.admin_pin enrolled")]},
-            {'trigger': 'user_reset', 'source': 'STANDBY_MODE', 'dest': 'OOB_MODE', 'before': '_do_user_reset', 'conditions': [CallableCondition(lambda _: not self.dut.provision_lock, "dut.provision_lock == False")]},
+            {'trigger': 'user_reset', 'source': 'STANDBY_MODE', 'dest': 'OOB_MODE', 'before': '_do_user_reset', 'conditions': [CallableCondition(lambda _: not bool(self.dut.provision_lock), "dut.provision_lock == False")]},
             {'trigger': 'unlock_user', 'source': 'STANDBY_MODE', 'dest': 'UNLOCKED_USER', 'before': '_enter_user_pin'},
             {'trigger': 'lock_user', 'source': 'UNLOCKED_USER', 'dest': 'STANDBY_MODE', 'before': '_press_lock_button'},
             {'trigger': 'fail_unlock', 'source': 'STANDBY_MODE', 'dest': 'STANDBY_MODE', 'before': '_enter_invalid_pin', 'conditions': [CallableCondition(lambda _: self.dut.brute_force_counter_current > 1 and not (self.dut.brute_force_counter_current == (self.dut.brute_force_counter/2)+1), "Brute Force not triggered")]},
@@ -683,7 +674,7 @@ class ApricornDeviceFSM:
             {'trigger': 'enter_diagnostic_mode', 'source': 'USER_FORCED_ENROLLMENT', 'dest': 'DIAGNOSTIC_MODE'},
             {'trigger': 'exit_diagnostic_mode', 'source': 'DIAGNOSTIC_MODE', 'dest': 'USER_FORCED_ENROLLMENT', 'conditions': [CallableCondition(lambda _: bool(self.dut.user_forced_enrollment), "dut.user_forced_enrollment == True")]},
             {'trigger': 'self_destruct', 'source': 'USER_FORCED_ENROLLMENT', 'dest': 'UNLOCKED_ADMIN', 'before': '_enter_self_destruct_pin'},
-            {'trigger': 'user_reset', 'source': 'USER_FORCED_ENROLLMENT', 'dest': 'OOB_MODE', 'before': '_do_user_reset', 'conditions': [CallableCondition(lambda _: not self.dut.provision_lock, "dut.provision_lock == False")]},
+            {'trigger': 'user_reset', 'source': 'USER_FORCED_ENROLLMENT', 'dest': 'OOB_MODE', 'before': '_do_user_reset', 'conditions': [CallableCondition(lambda _: not bool(self.dut.provision_lock), "dut.provision_lock == False")]},
             {'trigger': 'unlock_user', 'source': 'USER_FORCED_ENROLLMENT', 'dest': 'UNLOCKED_USER', 'before': '_enter_user_pin', 'conditions': [CallableCondition(lambda _: any(pin is not None for pin in self.dut.user_pin.values()), "dut.user_pin(s) enrolled")]},
             {'trigger': 'lock_user', 'source': 'UNLOCKED_USER', 'dest': 'USER_FORCED_ENROLLMENT', 'before': '_press_lock_button'},
             {'trigger': 'fail_unlock', 'source': 'USER_FORCED_ENROLLMENT', 'dest': 'STANDBY_MODE', 'before': '_enter_invalid_pin', 'conditions': [CallableCondition(lambda _: self.dut.brute_force_counter_current > 1 and not (self.dut.brute_force_counter_current == (self.dut.brute_force_counter/2)+1), "Brute Force not triggered")]},
@@ -691,7 +682,7 @@ class ApricornDeviceFSM:
 
             # --- Brute Force Mode Transitions ---
             {'trigger': 'last_try_login', 'source': 'BRUTE_FORCE', 'dest': 'STANDBY_MODE', 'before': '_enter_last_try_pin', 'conditions': [CallableCondition(lambda _: self.dut.brute_force_counter_current == self.dut.brute_force_counter/2, "Brute Force halfway point")]},
-            {'trigger': 'user_reset', 'source': 'BRUTE_FORCE', 'dest': 'OOB_MODE', 'before': '_do_user_reset', 'conditions': [CallableCondition(lambda _: not self.dut.provision_lock, "dut.provision_lock == False")]},
+            {'trigger': 'user_reset', 'source': 'BRUTE_FORCE', 'dest': 'OOB_MODE', 'before': '_do_user_reset', 'conditions': [CallableCondition(lambda _: not bool(self.dut.provision_lock), "dut.provision_lock == False")]},
             {'trigger': 'admin_recovery_failed', 'source': 'BRUTE_FORCE', 'dest': 'BRICKED'},
 
             # --- Admin Mode Enrollment Transitions ---
@@ -965,7 +956,6 @@ class ApricornDeviceFSM:
 
         if self.at.confirm_led_solid(pattern, minimum=3.0, timeout=10.0, replay_extra_context=context):
             self.logger.info("Stable OOB_MODE confirmed.")
-            self._increment_enumeration_count('oob')
         else:
             self.dut.completed_cmfr = False
             self.power_off()
@@ -1027,7 +1017,7 @@ class ApricornDeviceFSM:
             'fsm_current_state': self.source_state,
             'fsm_destination_state': self.state
         }
-        if self.at.confirm_led_solid(LEDs['STANDBY_MODE'], minimum=3.0, timeout=5.0, replay_extra_context=context):
+        if self.at.confirm_led_solid(LEDs['STANDBY_MODE'], minimum=2.5, timeout=15, replay_extra_context=context):
             self.logger.info("Stable STANDBY_MODE confirmed.")
         else:
             self.logger.error("Failed to confirm STANDBY_MODE LEDs.")
@@ -1273,16 +1263,19 @@ class ApricornDeviceFSM:
         self.logger.info("Unlocking self.dut with Admin PIN...")
         self._sequence(self.dut.admin_pin)
         if self.dut.read_only_enabled and self.dut.lock_override:
+            time.sleep(10)
             if not self.at.await_and_confirm_led_pattern(LEDs['ENUM_LOCK_OVERRIDE_READ_ONLY'], timeout=15, replay_extra_context=context):
                 raise TransitionCallbackError("Failed Admin unlock LED pattern")
         elif self.dut.read_only_enabled:
+            time.sleep(10)
             if not self.at.await_and_confirm_led_pattern(LEDs['ENUM_READ_ONLY'], timeout=15, replay_extra_context=context):
                 raise TransitionCallbackError("Failed Admin unlock LED pattern")
         elif self.dut.lock_override:
+            time.sleep(10)
             if not self.at.await_and_confirm_led_pattern(LEDs['ENUM_LOCK_OVERRIDE'], timeout=15, replay_extra_context=context):
                 raise TransitionCallbackError("Failed Admin unlock LED pattern.")
         else:
-            if not self.at.await_and_confirm_led_pattern(LEDs['ENUM'], timeout=15, replay_extra_context=context):
+            if not self.at.await_and_confirm_led_pattern(LEDs['ENUM_LEGACY'], timeout=15, replay_extra_context=context):
                 raise TransitionCallbackError("Failed Admin unlock LED pattern")
         
     def _enter_self_destruct_pin(self, event_data: EventData) -> None:
@@ -1432,7 +1425,7 @@ class ApricornDeviceFSM:
             user_reset_initiate = self.at.await_and_confirm_led_pattern(LEDs["RED_BLUE"], timeout=15, replay_extra_context=context)
             if not user_reset_initiate:
                 raise TransitionCallbackError("Failed to observe user reset initiation pattern")
-        time.sleep(9)
+        time.sleep(5)
         self.at.off("lock", "unlock", "key2")
         user_reset_pattern = self.at.confirm_led_solid(LEDs["KEY_GENERATION"], minimum=10, timeout=15, replay_extra_context=context)
         if not user_reset_pattern:
@@ -2266,8 +2259,29 @@ class ApricornDeviceFSM:
 #################
 ## Verification of Toggled Behavior
 
+    def format_operation(self) -> None:
+        """
+        Needs docstring
+        """
+        self.logger.info(f"Performing format operation...")
+        disk_to_format = int(self.dut.disk_path)
+        
+        if not disk_to_format:
+            self.logger.error("Cannot run format operation: DUT disk path is not set. Ensure the device is unlocked first.")
+            return None
+
+        self.logger.info(f"Initiating format operation on target: {disk_to_format}")
+        results = self.at._format_fat32(disk_to_format)
+        
+        if not results:
+            if self.dut.read_only_enabled:
+                self.logger.info(f"Read-Only prevented drive format")
+            else:
+                self.logger.info(f"DUT format failed")
+
 #################
 ## Speed Test
+
     def speed_test(self) -> Optional[Dict[str, float]]:
         """
         Performs a standardized FIO speed test on the DUT's disk.

@@ -88,6 +88,7 @@ class StressTesting:
         script_logger.info("                 1) Manufacturer Reset")
         script_logger.info("                 2) User Reset")
         script_logger.info("                 3) Power Cycle")
+        script_logger.info("                 4) Read-Only")
 
         while True:
             script_logger.info("")
@@ -397,7 +398,7 @@ def block_0():
         fsm.user_reset()
         fsm.power_off()
         script_logger.info("")
-        script_logger.info(f"Block {test_id} complete after {loop_test.iteration} iteration(s). Tearing down.")
+        script_logger.info(f"Block {test_id} complete after {loop_test.iteration} iteration(s).")
         session.end_block()
 
 def block_1():
@@ -449,7 +450,7 @@ def block_1():
         # --- Block Teardown ---
         fsm.power_off()
         script_logger.info("")
-        script_logger.info(f"Block {test_id} complete after {loop_test.iteration} iteration(s). Tearing down.")
+        script_logger.info(f"Block {test_id} complete after {loop_test.iteration} iteration(s).")
         session.end_block()
 
 def block_2():
@@ -498,7 +499,7 @@ def block_2():
         # --- Block Teardown ---
         fsm.power_off()
         script_logger.info("")
-        script_logger.info(f"Block {test_id} complete after {loop_test.iteration} iteration(s). Tearing down.")
+        script_logger.info(f"Block {test_id} complete after {loop_test.iteration} iteration(s).")
         session.end_block()
 
 def block_3():
@@ -537,16 +538,74 @@ def block_3():
 
         # --- Block Teardown ---
         script_logger.info("")
-        script_logger.info(f"Block {test_id} complete after {loop_test.iteration} iteration(s). Tearing down.")
+        script_logger.info(f"Block {test_id} complete after {loop_test.iteration} iteration(s).")
         session.end_block()
 
+def block_4():
+    """
+    Executes a stress test on the read-only functionality.
+
+    Test Flow:
+    1. Powers on the device and enrolls a new random Admin PIN.
+    2. Enters a loop for the specified duration.
+    3. In each iteration, it unlocks the device with the Admin PIN and performs
+       a format operation to verify read-only, and then locks it again.
+    4. Optionally power-cycles the device between iterations.
+    5. After the loop, it performs a user reset to clean the device for the next block.
+    """
+    test_id = 4
+    block_title = 'Read-Only'
+    if test_id in loop_test.test_list:
+        session.start_new_block(block_name=block_title, current_test_block=test_id)
+        
+        # Determine initial USB protocol based on user/random settings
+        is_usb3_initial = loop_test.setUSBProtocol(test_id)
+        
+        # --- Initial Setup for the Block ---
+        script_logger.info(f"Setting up Block {test_id} ({block_title})...")
+        fsm.power_on(usb3=is_usb3_initial)
+        admin_pin = pin_gen.generate_valid_pin(dut.minimum_pin_counter)
+        fsm.enroll_admin_pin(new_pin_sequence=admin_pin['sequence'])
+        fsm.toggle_read_only()
+        fsm.lock_admin()
+        
+        # --- Main Test Loop ---
+        loop_test.time_check = loop_test.timeComparison(time.time())
+        loop_test.iteration = 0
+        while loop_test.time_check < loop_test.test_duration:
+            loop_test.iteration += 1
+            script_logger.info(f"Beginning iteration {loop_test.iteration}: (Block {session.current_test_block}) (({loop_test.time_check:.2f}h of {loop_test.test_duration}h))")
+            
+            fsm.unlock_admin()
+            fsm.format_operation()
+
+            if loop_test.should_run_action(test_id, loop_test.speed_test_config):
+                script_logger.info(f"ITERATION {loop_test.iteration}: Running speed test.")
+                fsm.speed_test()
+            
+            fsm.lock_admin()
+
+            if loop_test.should_run_action(test_id, loop_test.power_cycle_config):
+                script_logger.info(f"ITERATION {loop_test.iteration}: Power cycling.")
+                fsm.power_off()
+                is_usb3_cycle = loop_test.setUSBProtocol(test_id)
+                fsm.power_on(usb3=is_usb3_cycle)
+                
+            loop_test.time_check = loop_test.timeComparison(time.time())
+        
+        # --- Block Teardown ---
+        fsm.user_reset()
+        fsm.power_off()
+        script_logger.info("")
+        script_logger.info(f"Block {test_id} complete after {loop_test.iteration} iteration(s).")
+        session.end_block()
 
 # Start Script ------------------------------------------------------------------- #
 # Execute Block Testing ---------------- #
 
 loop_test = StressTesting()
 
-functions = [block_0, block_1, block_2, block_3]
+functions = [block_0, block_1, block_2, block_3, block_4]
 for func in functions:
     func()
 

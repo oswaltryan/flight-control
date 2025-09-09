@@ -1,23 +1,21 @@
 {
-    "target_device_profile": "ask3-3639",
-    "battery": true,
     "camera_properties": {
-        "focus": 165,
-        "brightness": 158,
+        "focus": 205,
+        "brightness": 142,
         "exposure": 4
     },
     "roi_settings": {
         "red": {
-            "x": 209,
-            "y": 391
+            "x": 214,
+            "y": 425
         },
         "green": {
-            "x": 286,
-            "y": 389
+            "x": 284,
+            "y": 425
         },
         "blue": {
-            "x": 363,
-            "y": 389
+            "x": 355,
+            "y": 425
         }
     }
 }
