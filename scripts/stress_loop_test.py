@@ -81,14 +81,16 @@ class StressTesting:
         Returns:
             A sorted list of integer test IDs to be executed.
         """
-        options = list(range(6))  # valid IDs 0–5
+        tests = ["Admin PIN",
+                 "Manufacturer Reset",
+                 "User Reset",
+                 "Power Cycle",
+                 "Read-only"]
+        options = list(range(len(tests)))
 
         script_logger.info("Available tests:")
-        script_logger.info("                 0) Admin PIN")
-        script_logger.info("                 1) Manufacturer Reset")
-        script_logger.info("                 2) User Reset")
-        script_logger.info("                 3) Power Cycle")
-        script_logger.info("                 4) Read-Only")
+        for name in tests:
+            script_logger.info(f"                 {tests.index(name)}) {name}")
 
         while True:
             script_logger.info("")
@@ -111,7 +113,7 @@ class StressTesting:
                         invalid.append(token)
 
                 if invalid:
-                    script_logger.warning(f"Invalid entries: {', '.join(invalid)} — please enter numbers 0–5 only.")
+                    script_logger.warning(f"Invalid entries: {', '.join(invalid)} — please enter numbers 0-{len(tests)-1} only.")
                     script_logger.info(f"Invalid test IDs entered: {invalid}")
                     continue
 
