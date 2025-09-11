@@ -179,7 +179,7 @@
         "id_product": "1410"
     },
     "dt-3637": {
-        "name": "dt",
+        "name": "dt-3637",
         "fips": 0,
         "user_count": 4,
         "scb_part_number": null,
@@ -195,7 +195,7 @@
         "id_product": "0315"
     },
     "dtFIPS-3637": {
-        "name": "dtFIPS",
+        "name": "dtFIPS-3637",
         "fips": 1,
         "user_count": 4,
         "scb_part_number": null,
@@ -211,7 +211,7 @@
         "id_product": "1406"
     },
     "fortress-3637": {
-        "name": "fortress",
+        "name": "fortress-3637",
         "fips": 1,
         "user_count": 4,
         "scb_part_number": null,
@@ -243,7 +243,7 @@
         "id_product": "1408"
     },
     "padlock3-3637": {
-        "name": "padlock3",
+        "name": "padlock3-3637",
         "fips": 0,
         "user_count": 4,
         "scb_part_number": null,
@@ -259,7 +259,7 @@
         "id_product": "0310"
     },
     "padlock-nvx": {
-        "name": "NVX",
+        "name": "padlock-NVX",
         "fips": 0,
         "user_count": 4,
         "scb_part_number": null,
@@ -275,7 +275,7 @@
         "id_product": "1413"
     },
     "padlock-ssd-3637": {
-        "name": "padlock-ssd",
+        "name": "padlock-ssd-3637",
         "fips": 1,
         "user_count": 4,
         "scb_part_number": null,

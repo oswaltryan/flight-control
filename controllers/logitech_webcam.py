@@ -110,7 +110,7 @@ DEFAULT_CAMERA_HARDWARE_SETTINGS = {
 # --- End of Camera Hardware Settings ---
 
 # --- ROI Sizing Constants (NEW) ---
-ROI_SIZE_STANDARD_KEYPAD = (30, 40) # Wider for 3-column layout
+ROI_SIZE_STANDARD_KEYPAD = (40, 40) # Wider for 3-column layout
 ROI_SIZE_SECURE_KEYPAD = (50, 25)   # Taller/squarer for 2-column layout
 
 def get_capture_backend():

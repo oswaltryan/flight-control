@@ -41,6 +41,11 @@ except ImportError as e_import:
     module_logger.critical(f"Critical Import Error in unified_controller.py: {e_import}. Check paths and dependencies.", exc_info=True)
     raise
 
+# --- Custom Exception for 'pre-flight' Failures ---
+class LaunchError(Exception):
+    """Custom exception to be raised from 'before' callbacks on failure."""
+    pass
+
 
 class UnifiedController:
     _phidget_controller: Optional[PhidgetController]
@@ -110,7 +115,9 @@ class UnifiedController:
                 self.logger.info("DUT initialization requested to skip initial barcode scan.")
                 dut_kwargs['scanned_serial_number'] = "SCAN_SKIPPED_BY_TOOL"
             
+            print("here")
             self.dut = DeviceUnderTest(**dut_kwargs)
+            print("there")
 
             layout_key = 'Secure Key' if self.dut.secure_key else 'Portable'
             self._keypad_layout = KEYPAD_LAYOUTS[layout_key]
@@ -217,14 +224,21 @@ class UnifiedController:
             self.logger.error("Barcode scanner not available.")
             return None
         
-        scanned_data = self._barcode_scanner.await_scan()
-        
-        if scanned_data:
-            self.logger.debug(f"Scanned Serial Number: {scanned_data}")
-            self.scanned_serial_number = scanned_data
-        else:
-            self.logger.warning("On-demand barcode scan did not return data.")
+        scanned_data = None
+        for retry in range(1, 4):
+            scanned_data = self._barcode_scanner.await_scan()
             
+            if scanned_data:
+                self.logger.debug(f"Scanned Serial Number: {scanned_data}")
+                self.scanned_serial_number = scanned_data
+                break
+            else:
+                if retry < 3:
+                    self.logger.warning(f"Barcode scan attempt {retry} failed. Retrying...")
+                    time.sleep(3)
+                else:
+                    self.logger.warning(f"Barcode scan attempt {retry} failed. On-demand barcode scan did not return data.")
+                
         return scanned_data
 
     # --- LogitechLedChecker Method Delegation ---

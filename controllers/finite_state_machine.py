@@ -54,7 +54,7 @@ _project_root = os.path.dirname(_controllers_dir)
 _json_path = os.path.join(_project_root, 'utils', 'config', 'device_properties.json')
 _hardware_config = os.path.join(_project_root, 'utils', 'config', 'hardware_configuration_settings.json')
 
-_CACHED_SCANNED_SERIAL: Optional[str] = "141820000007"
+_CACHED_SCANNED_SERIAL: Optional[str] = None
 
 
 # --- File I/O and Parsing (operations that can fail are kept in the try block) ---

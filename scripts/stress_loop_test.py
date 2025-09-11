@@ -354,8 +354,6 @@ def block_0():
         fsm.power_on(usb3=is_usb3_initial)
         admin_pin = pin_gen.generate_valid_pin(dut.minimum_pin_counter)
         fsm.enroll_admin_pin(new_pin_sequence=admin_pin['sequence'])
-        print(dut.admin_pin)
-        input("wait")
         fsm.lock_admin()
         
         # --- Main Test Loop ---
