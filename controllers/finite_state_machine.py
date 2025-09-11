@@ -52,6 +52,7 @@ _current_file_path = os.path.abspath(__file__)
 _controllers_dir = os.path.dirname(_current_file_path)
 _project_root = os.path.dirname(_controllers_dir)
 _json_path = os.path.join(_project_root, 'utils', 'config', 'device_properties.json')
+_hardware_config = os.path.join(_project_root, 'utils', 'config', 'hardware_configuration_settings.json')
 
 _CACHED_SCANNED_SERIAL: Optional[str] = "141820000007"
 
@@ -62,6 +63,11 @@ try:
     with open(_json_path, 'r') as f:
         DEVICE_PROPERTIES = json.load(f)
     _fsm_module_logger.debug("Successfully loaded module-level DEVICE_PROPERTIES from JSON.")
+
+    _fsm_module_logger.debug(f"Attempting to load module config from: {_hardware_config}")
+    with open(_hardware_config, 'r') as f:
+        HARDWARE_CONFIG = json.load(f)
+    _fsm_module_logger.debug("Successfully loaded module-level HARDWARE_CONFIG from JSON.")
 except FileNotFoundError:
     _fsm_module_logger.critical(f"Configuration file not found at '{_json_path}'. Cannot continue.")
     raise
@@ -102,11 +108,9 @@ class DeviceUnderTest:
         global _CACHED_SCANNED_SERIAL
         self.at = at_controller
 
-        # Use the provided profile name or fallback to a default with a warning.
         if not target_device_profile:
-            self.device_name = "ask3nx-3861f" # Fallback to prevent crashes
-            power = True # PLACEHOLDER
-            _fsm_module_logger.warning(f"No target_device_profile provided to DUT, falling back to '{self.device_name}'.")
+            self.device_name = HARDWARE_CONFIG['device_properties']['name']
+            power = HARDWARE_CONFIG['device_properties']['name']
         else:
             self.device_name = target_device_profile
 
@@ -298,7 +302,6 @@ class TestSession:
 
         # Failure and Warning Details
         self.failure_block: dict = {}
-        self.failure_description_block: dict = {}
         self.warning_block: dict = {}
         self.warning_description_block: dict = {}
 
@@ -311,8 +314,7 @@ class TestSession:
         """Resets counters and timers for the start of a new test block."""
         self.block_start_time = time.time()
         self.current_test_block = current_test_block
-        if block_name not in self.test_blocks:
-            self.test_blocks.append(self.current_test_block)
+        self.test_blocks.append(self.current_test_block)
 
         self.block_enumeration_totals.update({self.current_test_block: {}})
         self.block_enumeration_totals[self.current_test_block].update({"mfr": 0})
@@ -320,14 +322,11 @@ class TestSession:
         self.block_enumeration_totals[self.current_test_block].update({"pin": 0})
         self.block_enumeration_totals[self.current_test_block].update({"spi": 0})
         
-        # Initialize dictionaries for this block if not present
-        if block_name not in self.block_failure_count:
-            self.block_failure_count[block_name] = 0
-            self.block_warning_count[block_name] = 0
-            self.failure_block[block_name] = []
-            self.failure_description_block[block_name] = []
-            self.warning_block[block_name] = []
-            self.warning_description_block[block_name] = []
+        self.block_failure_count[self.current_test_block] = 0
+        self.block_warning_count[self.current_test_block] = 0
+        self.failure_block[self.current_test_block] = []
+        self.warning_block[self.current_test_block] = []
+        self.warning_description_block[self.current_test_block] = []
 
     def end_block(self):
         """Finalizes metrics for the completed test block."""
@@ -346,19 +345,16 @@ class TestSession:
             """
             self.block_enumeration_totals[self.current_test_block][enum_type] += 1
 
-    def log_failure(self, block_name: str, failure_summary: str, failure_details: str = ""):
+    def log_failure(self, failure_message: str):
         """Logs a failure for a specific test block."""
-        # if block_name not in self.block_failure_count: self.start_new_block(block_name)
-        self.block_failure_count[block_name] += 1
-        self.failure_block[block_name].append(failure_summary)
-        self.failure_description_block[block_name].append(failure_details)
+        self.block_failure_count[self.current_test_block] += 1
+        self.failure_block[self.current_test_block].append(failure_message)
         
     def log_warning(self, block_name: str, warning_summary: str, warning_details: str = ""):
         """Logs a warning for a specific test block."""
-        # if block_name not in self.block_warning_count: self.start_new_block(block_name)
-        self.block_warning_count[block_name] += 1
-        self.warning_block[block_name].append(warning_summary)
-        self.warning_description_block[block_name].append(warning_details)
+        self.block_warning_count[self.current_test_block] += 1
+        self.warning_block[self.current_test_block].append(warning_summary)
+        self.warning_description_block[self.current_test_block].append(warning_details)
         
     def add_speed_test_result(self, result: Any):
         """Adds a speed test result to the session."""
@@ -931,7 +927,7 @@ class ApricornDeviceFSM:
                 self.at.on(key)
                 if not self.at.await_led_state(LEDs['ACCEPT_STATE'], timeout=1, clear_buffer=False, replay_extra_context=context):
                     self.at.off(key)
-                    raise TransitionCallbackError(f"Failed '{key}' confirmation")
+                    self.session.log_failure(f"Failed '{key}' confirmation")
 
     def on_enter_OOB_MODE(self, event_data: EventData) -> None:
         """
@@ -959,7 +955,7 @@ class ApricornDeviceFSM:
         else:
             self.dut.completed_cmfr = False
             self.power_off()
-            return # Exit early if the LED check fails
+            self.session.log_failure("Failed to confirm OOB Mode LED pattern")
 
         serial_to_check = self.dut.scanned_serial_number
         if serial_to_check is None:
@@ -1102,7 +1098,7 @@ class ApricornDeviceFSM:
             event_data: The event data provided by the FSM.
         """
         if not self.at.await_and_confirm_led_pattern(LEDs['ENUM'], timeout=15):
-                raise TransitionCallbackError("Failed Manufacturer Reset unlock LED pattern")
+                self.session.log_failure("Failed Manufacturer Reset unlock LED pattern")
         
         serial_to_check = self.dut.scanned_serial_number
         if serial_to_check is None:
@@ -1194,12 +1190,12 @@ class ApricornDeviceFSM:
         # Example of trigger-specific logic:
         if trigger_name == 'enroll_self_destruct':
             if not self.at.await_and_confirm_led_pattern(LEDs['RED_BLUE'], timeout=5.0, replay_extra_context=context):
-                raise TransitionCallbackError("Did not observe RED_BLUE pattern")
+                self.session.log_failure("Did not observe RED_BLUE pattern")
             else:
                 self.logger.info("Awaiting PIN enrollment...")
         else:
             if not self.at.await_and_confirm_led_pattern(LEDs['GREEN_BLUE'], timeout=5.0, replay_extra_context=context):
-                raise TransitionCallbackError("Did not observe GREEN_BLUE pattern for recovery enrollment")
+                self.session.log_failure("Did not observe GREEN_BLUE pattern for recovery enrollment")
             else:
                 self.logger.info("Awaiting PIN enrollment...")
 
@@ -1230,7 +1226,7 @@ class ApricornDeviceFSM:
             pass
         else:
             if not self.at.confirm_led_pattern(LEDs['RED_GREEN_BLUE'], clear_buffer=True, replay_extra_context=context):
-                raise TransitionCallbackError("Failed Startup Self-Test LED confirmation")
+                self.session.log_failure("Failed Startup Self-Test LED confirmation")
             self.logger.info("Startup Self-Test successful. Proceeding to POWER_ON_SELF_TEST state.")
 
     def _do_power_off(self, event_data: EventData) -> None:
@@ -1265,18 +1261,18 @@ class ApricornDeviceFSM:
         if self.dut.read_only_enabled and self.dut.lock_override:
             time.sleep(10)
             if not self.at.await_and_confirm_led_pattern(LEDs['ENUM_LOCK_OVERRIDE_READ_ONLY'], timeout=15, replay_extra_context=context):
-                raise TransitionCallbackError("Failed Admin unlock LED pattern")
+                self.session.log_failure("Failed Admin unlock LED pattern")
         elif self.dut.read_only_enabled:
             time.sleep(10)
             if not self.at.await_and_confirm_led_pattern(LEDs['ENUM_READ_ONLY'], timeout=15, replay_extra_context=context):
-                raise TransitionCallbackError("Failed Admin unlock LED pattern")
+                self.session.log_failure("Failed Admin unlock LED pattern")
         elif self.dut.lock_override:
             time.sleep(10)
             if not self.at.await_and_confirm_led_pattern(LEDs['ENUM_LOCK_OVERRIDE'], timeout=15, replay_extra_context=context):
-                raise TransitionCallbackError("Failed Admin unlock LED pattern.")
+                self.session.log_failure("Failed Admin unlock LED pattern.")
         else:
             if not self.at.await_and_confirm_led_pattern(LEDs['ENUM_LEGACY'], timeout=15, replay_extra_context=context):
-                raise TransitionCallbackError("Failed Admin unlock LED pattern")
+                self.session.log_failure("Failed Admin unlock LED pattern")
         
     def _enter_self_destruct_pin(self, event_data: EventData) -> None:
         """
@@ -1299,17 +1295,20 @@ class ApricornDeviceFSM:
         self.logger.info("Unlocking self.dut with Self-Destruct PIN...")
         self._sequence(self.dut.self_destruct_pin)
         if self.dut.read_only_enabled and self.dut.lock_override:
+            time.sleep(10)
             if not self.at.await_and_confirm_led_pattern(LEDs['ENUM_LOCK_OVERRIDE_READ_ONLY'], timeout=15, replay_extra_context=context):
-                raise TransitionCallbackError("Failed Self-Destruct unlock LED pattern")
+                self.session.log_failure("Failed Self-Destruct unlock LED pattern")
         elif self.dut.read_only_enabled:
+            time.sleep(10)
             if not self.at.await_and_confirm_led_pattern(LEDs['ENUM_READ_ONLY'], timeout=15, replay_extra_context=context):
-                raise TransitionCallbackError("Failed Self-Destruct unlock LED pattern")
+                self.session.log_failure("Failed Self-Destruct unlock LED pattern")
         elif self.dut.lock_override:
+            time.sleep(10)
             if not self.at.await_and_confirm_led_pattern(LEDs['ENUM_LOCK_OVERRIDE'], timeout=15, replay_extra_context=context):
-                raise TransitionCallbackError("Failed Self-Destruct unlock LED pattern")
+                self.session.log_failure("Failed Self-Destruct unlock LED pattern")
         else:
             if not self.at.await_and_confirm_led_pattern(LEDs['ENUM'], timeout=15, replay_extra_context=context):
-                raise TransitionCallbackError("Failed Self-Destruct unlock LED pattern")
+                self.session.log_failure("Failed Self-Destruct unlock LED pattern")
         
     def _enter_user_pin(self, event_data: EventData) -> None:
         """
@@ -1343,17 +1342,20 @@ class ApricornDeviceFSM:
         self.logger.info(f"Attempting to unlock device with PIN from logical user slot {user_id}...")
         self._sequence(pin_to_enter)
         if self.dut.read_only_enabled and self.dut.lock_override:
+            time.sleep(10)
             if not self.at.await_and_confirm_led_pattern(LEDs['ENUM_LOCK_OVERRIDE_READ_ONLY'], timeout=15, replay_extra_context=context):
-                raise TransitionCallbackError(f"Failed User {user_id} unlock LED pattern")
+                self.session.log_failure(f"Failed User {user_id} unlock LED pattern")
         elif self.dut.read_only_enabled:
+            time.sleep(10)
             if not self.at.await_and_confirm_led_pattern(LEDs['ENUM_READ_ONLY'], timeout=15, replay_extra_context=context):
-                raise TransitionCallbackError(f"Failed User {user_id} unlock LED pattern")
+                self.session.log_failure(f"Failed User {user_id} unlock LED pattern")
         elif self.dut.lock_override:
+            time.sleep(10)
             if not self.at.await_and_confirm_led_pattern(LEDs['ENUM_LOCK_OVERRIDE'], timeout=15, replay_extra_context=context):
-                raise TransitionCallbackError(f"Failed User {user_id} unlock LED pattern")
+                self.session.log_failure(f"Failed User {user_id} unlock LED pattern")
         else:
             if not self.at.await_and_confirm_led_pattern(LEDs['ENUM'], timeout=15, replay_extra_context=context):
-                raise TransitionCallbackError(f"Failed User {user_id} unlock LED pattern")
+                self.session.log_failure(f"Failed User {user_id} unlock LED pattern")
     
 ##########
 ## Logins
@@ -1377,7 +1379,7 @@ class ApricornDeviceFSM:
         context = {'fsm_current_state': self.state, 'fsm_destination_state': dest_state}
         self._press(['key0', 'unlock'], duration_ms=6000)
         if not self.at.confirm_led_pattern(LEDs['RED_LOGIN'], clear_buffer=True, replay_extra_context=context):
-                raise TransitionCallbackError("Failed Admin Mode Login LED confirmation")
+                self.session.log_failure("Failed Admin Mode Login LED confirmation")
         self._sequence(self.dut.admin_pin)
 
     def _enter_last_try_pin(self, event_data: EventData) -> None:
@@ -1394,7 +1396,7 @@ class ApricornDeviceFSM:
         self.logger.info(f"Entering Last Try Login...")
         self._press(['key5', 'unlock'], duration_ms=6000)
         if not self.at.await_and_confirm_led_pattern(LEDs["RED_GREEN"], timeout=10):
-            raise TransitionCallbackError("Failed 'LASTTRY' Login confirmation")
+            self.session.log_failure("Failed 'LASTTRY' Login confirmation")
         self._sequence(['key5', 'key2', 'key7', 'key8', 'key8', 'key7', 'key9', 'unlock']) 
 
 ##########
@@ -1424,12 +1426,12 @@ class ApricornDeviceFSM:
             self.at.on("lock", "unlock", "key2")
             user_reset_initiate = self.at.await_and_confirm_led_pattern(LEDs["RED_BLUE"], timeout=15, replay_extra_context=context)
             if not user_reset_initiate:
-                raise TransitionCallbackError("Failed to observe user reset initiation pattern")
+                self.session.log_failure("Failed to observe user reset initiation pattern")
         time.sleep(5)
         self.at.off("lock", "unlock", "key2")
         user_reset_pattern = self.at.confirm_led_solid(LEDs["KEY_GENERATION"], minimum=10, timeout=15, replay_extra_context=context)
         if not user_reset_pattern:
-            raise TransitionCallbackError("Failed to observe user reset confirmation pattern")
+            self.session.log_failure("Failed to observe user reset confirmation pattern")
         
         self.dut._reset()
         self.logger.info("User reset confirmation pattern observed. Resetting self.dut model state...")
@@ -1451,7 +1453,7 @@ class ApricornDeviceFSM:
             self._press("lock", duration_ms=6000)
 
         if not self.at.await_and_confirm_led_pattern(LEDs['RED_GREEN_BLUE'], timeout=7, clear_buffer=True, replay_extra_context=context):
-            raise TransitionCallbackError("Failed Reset Ready LED confirmation")
+            self.session.log_failure("Failed Reset Ready LED confirmation")
         
         portable = ["key1", "key2", "key3", "key4", "key5", "key6", "key7", "key8", "key9", "lock", "key0", "unlock"]
         secure_key = ["key1", "key2", "key3", "key4", "key5", "key6", "key7", "key8", "key9", "key0", "lock", "unlock"]
@@ -1466,7 +1468,7 @@ class ApricornDeviceFSM:
         self.at.on(FIRST_KEY)
         if not self.at.confirm_led_pattern(LEDs['FIRST_KEY_KEYPAD_TEST'], clear_buffer=False, replay_extra_context=context):      ## First key is special because of previous LED pattern, Reset Ready Mode
             self.at.off(FIRST_KEY)
-            raise TransitionCallbackError("Failed 'key1' confirmation")
+            self.session.log_failure("Failed 'key1' confirmation")
         self.at.off(FIRST_KEY)
         self.at.confirm_led_solid(LEDs["ALL_OFF"], minimum=.15, timeout=1, clear_buffer=False, replay_extra_context=context)
 
@@ -1475,7 +1477,7 @@ class ApricornDeviceFSM:
             self.at.on(key)
             if not self.at.await_led_state(LEDs['ACCEPT_STATE'], timeout=1, clear_buffer=False, replay_extra_context=context):
                 self.at.off(key)
-                raise TransitionCallbackError(f"Failed '{key}' confirmation")
+                self.session.log_failure(f"Failed '{key}' confirmation")
             self.at.off(key)
             self.at.confirm_led_solid(LEDs["ALL_OFF"], minimum=.15, timeout=1, clear_buffer=False, replay_extra_context=context)
 
@@ -1569,7 +1571,7 @@ class ApricornDeviceFSM:
         if pin_entered:
             self.logger.info("Partial PIN was entered before timeout, expecting REJECT pattern.")
             if not self.at.await_and_confirm_led_pattern(LEDs['REJECT'], timeout=5.0, replay_extra_context=context):
-                raise TransitionCallbackError("Did not observe REJECT for PIN enrollment timeout with partial entry")
+                self.session.log_failure("Did not observe REJECT for PIN enrollment timeout with partial entry")
         else:
             self.logger.info("No PIN was entered before timeout, no REJECT pattern expected.")
 
@@ -1652,10 +1654,10 @@ class ApricornDeviceFSM:
             self._press(new_counter[1])
             if int(new_counter) < 2 or int(new_counter) > 10:
                 if not self.at.await_and_confirm_led_pattern(LEDs['REJECT'], timeout=5.0, replay_extra_context=context):
-                    raise TransitionCallbackError("Did not observe REJECT for invalid Brute Force Counter Enrollment value")
+                    self.session.log_failure("Did not observe REJECT for invalid Brute Force Counter Enrollment value")
             else:
                 if not self.at.await_and_confirm_led_pattern(BRUTE_FORCE_COUNTER_ENROLLMENT_FEEDBACK, timeout=5.0, replay_extra_context=context):
-                    raise TransitionCallbackError("Did not observe BRUTE_FORCE_COUNTER_ENROLLMENT_FEEDBACKt pattern")
+                    self.session.log_failure("Did not observe BRUTE_FORCE_COUNTER_ENROLLMENT_FEEDBACKt pattern")
                 
         elif trigger_name == 'enroll_min_pin_counter':
             if not new_counter or not isinstance(new_counter, str):
@@ -1668,10 +1670,10 @@ class ApricornDeviceFSM:
 
             if int(new_counter) < self.dut.default_minimum_pin_counter or int(new_counter) > self.dut.maximum_pin_counter:
                 if not self.at.await_and_confirm_led_pattern(LEDs['REJECT'], timeout=5.0, replay_extra_context=context):
-                    raise TransitionCallbackError("Did not observe REJECT for invalid Brute Force Counter Enrollment value")
+                    self.session.log_failure("Did not observe REJECT for invalid Brute Force Counter Enrollment value")
             else:
                 if not self.at.await_and_confirm_led_pattern(LEDs['ACCEPT_PATTERN'], timeout=5.0, replay_extra_context=context):
-                    raise TransitionCallbackError("Did not observe ACCEPT_PATTERN after Minimum PIN Length Counter Enrollment")
+                    self.session.log_failure("Did not observe ACCEPT_PATTERN after Minimum PIN Length Counter Enrollment")
                 
         elif trigger_name == 'enroll_unattended_auto_lock_counter':
             new_counter = event_data.kwargs.get('new_counter')
@@ -1685,10 +1687,10 @@ class ApricornDeviceFSM:
             # Validate the input range. The condition is the inverse of the valid range (-1 < new_counter < 4).
             if new_counter < 0 or new_counter > 3:
                 if not self.at.await_and_confirm_led_pattern(LEDs['REJECT'], timeout=5.0, replay_extra_context=context):
-                    raise TransitionCallbackError("Did not observe REJECT for invalid Unattended Auto-Lock value")
+                    self.session.log_failure("Did not observe REJECT for invalid Unattended Auto-Lock value")
             else:
                 if not self.at.await_and_confirm_led_pattern(LEDs['ACCEPT_PATTERN'], timeout=5.0, replay_extra_context=context):
-                    raise TransitionCallbackError("Did not observe ACCEPT_PATTERN for setting Auto-Lock to 0")
+                    self.session.log_failure("Did not observe ACCEPT_PATTERN for setting Auto-Lock to 0")
                 else:
                     self.dut.unattended_auto_lock_counter = new_counter
                     self.logger.info(f"Unattended Auto-Lock new_counter set to: {new_counter}")
@@ -1716,7 +1718,7 @@ class ApricornDeviceFSM:
         else:
             time.sleep(30)
             if not self.at.await_and_confirm_led_pattern(LEDs['REJECT'], timeout=5.0, replay_extra_context=context):
-                raise TransitionCallbackError("Did not observe REJECT for counter enrollment timeout")
+                self.session.log_failure("Did not observe REJECT for counter enrollment timeout")
 
 #################
 ## Admin mode PIN Enrollments
@@ -1751,7 +1753,7 @@ class ApricornDeviceFSM:
         
         self._press(['unlock', 'key7'])
         if not self.at.await_and_confirm_led_pattern(LEDs['GREEN_BLUE'], timeout=5.0, replay_extra_context=context):
-            raise TransitionCallbackError("Did not observe GREEN_BLUE pattern for recovery enrollment")
+            self.session.log_failure("Did not observe GREEN_BLUE pattern for recovery enrollment")
         self.dut.pending_enrollment_type = 'recovery'
 
     def _user_enrollment(self, event_data: EventData) -> None:
@@ -1770,7 +1772,7 @@ class ApricornDeviceFSM:
 
         self._press(['unlock', 'key1'])
         if not self.at.await_and_confirm_led_pattern(LEDs['GREEN_BLUE'], timeout=5.0, replay_extra_context=context):
-            raise TransitionCallbackError("Did not observe GREEN_BLUE pattern for user enrollment")
+            self.session.log_failure("Did not observe GREEN_BLUE pattern for user enrollment")
         self.dut.pending_enrollment_type = 'user'
 
     def _self_destruct_pin_enrollment(self, event_data: EventData) -> None:
@@ -1796,7 +1798,7 @@ class ApricornDeviceFSM:
             self.logger.info(f"Attempting Self-Destruct PIN Enrollment without Self-Destruct enabled...")
             self._press(['key3', 'unlock'])
             if not self.at.await_and_confirm_led_pattern(LEDs['REJECT'], timeout=5.0, replay_extra_context=context):
-                raise TransitionCallbackError("Did not observe REJECT for Self-Destruct toggle with Provision Lock enabled")
+                self.session.log_failure("Did not observe REJECT for Self-Destruct toggle with Provision Lock enabled")
         else:
             self.logger.info(f"Entering Self-Destruct PIN Enrollment...")
             self._press(['key3', 'unlock'])
@@ -1835,14 +1837,14 @@ class ApricornDeviceFSM:
             self.logger.info(f"Entering new Admin PIN (first time)...")
             self._sequence(new_pin)
             if not self.at.await_and_confirm_led_pattern(LEDs['ACCEPT_PATTERN'], timeout=5.0, replay_extra_context=context):
-                raise TransitionCallbackError("Did not observe ACCEPT_PATTERN after first PIN entry")
+                self.session.log_failure("Did not observe ACCEPT_PATTERN after first PIN entry")
             if not self.at.await_and_confirm_led_pattern(LEDs['GREEN_BLUE'], timeout=5.0, replay_extra_context=context):
-                raise TransitionCallbackError("Did not observe GREEN_BLUE pattern after first PIN entry")
+                self.session.log_failure("Did not observe GREEN_BLUE pattern after first PIN entry")
 
             self.logger.info("Re-entering Admin PIN for confirmation...")
             self._sequence(new_pin)
             if not self.at.await_led_state(LEDs['ACCEPT_STATE'], timeout=5.0, replay_extra_context=context):
-                raise TransitionCallbackError("Did not observe ACCEPT_PATTERN after PIN confirmation")
+                self.session.log_failure("Did not observe ACCEPT_PATTERN after PIN confirmation")
             else:
                 self.dut.admin_pin = new_pin
                 self.logger.info("Admin enrollment sequence completed successfully. Updated self.dut model.")
@@ -1852,22 +1854,24 @@ class ApricornDeviceFSM:
             if next_available_slot is None:
                 self.logger.warning(f"No available recovery slots. This path assumes a REJECT pattern will be shown by the device.")
                 if not self.at.await_and_confirm_led_pattern(LEDs['REJECT'], timeout=5.0, replay_extra_context=context):
-                    raise TransitionCallbackError("Did not observe REJECT on Recovery PIN Enrollment attempt when slots are full")
-                raise TransitionCallbackError(f"Enrollment failed as expected: All {len(self.dut.recovery_pin)} recovery slots are full")
+                    self.session.log_failure("Did not observe REJECT on Recovery PIN Enrollment attempt when slots are full")
+                self.session.log_failure(f"Enrollment failed as expected: All {len(self.dut.recovery_pin)} recovery slots are full")
+                self.dut.pending_enrollment_type = None
+                return
 
             # If the code reaches here, a slot is available.
             self.logger.info(f"Attempting to enroll new recovery PIN into logical slot #{next_available_slot}...")
             self.logger.info(f"Entering new Recovery PIN (first time)...")
             self._sequence(new_pin)
             if not self.at.await_and_confirm_led_pattern(LEDs['ACCEPT_PATTERN'], timeout=5.0, replay_extra_context=context):
-                raise TransitionCallbackError("Did not observe ACCEPT_PATTERN after first recovery PIN entry")
+                self.session.log_failure("Did not observe ACCEPT_PATTERN after first recovery PIN entry")
             if not self.at.await_and_confirm_led_pattern(LEDs['GREEN_BLUE'], timeout=5.0, replay_extra_context=context):
-                raise TransitionCallbackError("Did not observe GREEN_BLUE pattern after first recovery PIN entry")
+                self.session.log_failure("Did not observe GREEN_BLUE pattern after first recovery PIN entry")
 
             self.logger.info("Re-entering Recovery PIN for confirmation...")
             self._sequence(new_pin)
             if not self.at.confirm_led_solid(LEDs["ACCEPT_STATE"], minimum=1, timeout=3, replay_extra_context=context):
-                raise TransitionCallbackError("Did not observe final ACCEPT_PATTERN for recovery PIN confirmation")
+                self.session.log_failure("Did not observe final ACCEPT_PATTERN for recovery PIN confirmation")
 
             self.dut.recovery_pin[next_available_slot] = new_pin
             self.logger.info(f"Successfully enrolled recovery PIN for logical slot {next_available_slot}.")
@@ -1877,20 +1881,22 @@ class ApricornDeviceFSM:
             self.logger.info(f"Attempting to enroll new user into logical slot #{next_available_slot}...")
             if next_available_slot is None:
                 if not self.at.await_and_confirm_led_pattern(LEDs['REJECT'], timeout=5.0, replay_extra_context=context):
-                    raise TransitionCallbackError("Did not observe REJECT on User PIN Enrollment entry")
-                raise TransitionCallbackError(f"Enrollment failed as expected: All {len(self.dut.user_pin)} user slots are full")
+                    self.session.log_failure("Did not observe REJECT on User PIN Enrollment entry")
+                self.session.log_failure(f"Enrollment failed as expected: All {len(self.dut.user_pin)} user slots are full")
+                self.dut.pending_enrollment_type = None
+                return
             
             self.logger.info(f"Entering new User PIN (first time)...")
             self._sequence(new_pin)
             if not self.at.await_and_confirm_led_pattern(LEDs['ACCEPT_PATTERN'], timeout=5.0, replay_extra_context=context):
-                raise TransitionCallbackError("Did not observe ACCEPT_PATTERN after first user PIN entry")
+                self.session.log_failure("Did not observe ACCEPT_PATTERN after first user PIN entry")
             if not self.at.await_and_confirm_led_pattern(LEDs['GREEN_BLUE'], timeout=5.0, replay_extra_context=context):
-                raise TransitionCallbackError("Did not observe GREEN_BLUE pattern after first user PIN entry")
+                self.session.log_failure("Did not observe GREEN_BLUE pattern after first user PIN entry")
 
             self.logger.info("Re-entering User PIN for confirmation...")
             self._sequence(new_pin)
             if not self.at.confirm_led_solid(LEDs["ACCEPT_STATE"], minimum=1, timeout=3, replay_extra_context=context):
-                raise TransitionCallbackError("Did not observe final ACCEPT_PATTERN for user PIN confirmation")
+                self.session.log_failure("Did not observe final ACCEPT_PATTERN for user PIN confirmation")
             
             self.dut.user_pin[next_available_slot] = new_pin
             self.logger.info(f"Successfully enrolled PIN for logical user {next_available_slot}.")
@@ -1899,14 +1905,14 @@ class ApricornDeviceFSM:
             self.logger.info(f"Entering new Self-Destruct PIN (first time)...")
             self._sequence(new_pin)
             if not self.at.await_and_confirm_led_pattern(LEDs['ACCEPT_PATTERN'], timeout=5.0, replay_extra_context=context):
-                raise TransitionCallbackError("Did not observe ACCEPT_PATTERN after first PIN entry")
+                self.session.log_failure("Did not observe ACCEPT_PATTERN after first PIN entry")
             if not self.at.await_and_confirm_led_pattern(LEDs['RED_BLUE'], timeout=5.0, replay_extra_context=context):
-                raise TransitionCallbackError("Did not observe RED_BLUE pattern after first PIN entry")
+                self.session.log_failure("Did not observe RED_BLUE pattern after first PIN entry")
 
             self.logger.info("Re-entering Self-Destruct PIN for confirmation...")
             self._sequence(new_pin)
             if not self.at.await_led_state(LEDs['ACCEPT_STATE'], timeout=5.0, replay_extra_context=context):
-                raise TransitionCallbackError("Did not observe ACCEPT_PATTERN after PIN confirmation")
+                self.session.log_failure("Did not observe ACCEPT_PATTERN after PIN confirmation")
                 
             self.dut.self_destruct_pin = new_pin
             self.logger.info("Self-Destruct enrollment sequence completed successfully. Updated self.dut model.")
@@ -2005,7 +2011,7 @@ class ApricornDeviceFSM:
         self.logger.info(f"Toggling Basic Disk mode...")
         self._press(['key2', 'key3'])
         if not self.at.await_and_confirm_led_pattern(LEDs['ACCEPT_PATTERN'], timeout=5.0, replay_extra_context=context):
-            raise TransitionCallbackError("Did not observe ACCEPT_PATTERN for Basic Disk toggle")
+            self.session.log_failure("Did not observe ACCEPT_PATTERN for Basic Disk toggle")
         else:
             self.dut.basic_disk = True
             self.logger.info(f"Basic Disk mode: {self.dut.basic_disk}")
@@ -2026,7 +2032,7 @@ class ApricornDeviceFSM:
         self.logger.info(f"Toggling Removable Media mode...")
         self._press(['key3', 'key7'])
         if not self.at.await_and_confirm_led_pattern(LEDs['ACCEPT_PATTERN'], timeout=5.0, replay_extra_context=context):
-            raise TransitionCallbackError("Did not observe ACCEPT_PATTERN for Removable Media toggle")
+            self.session.log_failure("Did not observe ACCEPT_PATTERN for Removable Media toggle")
         else:
             self.dut.removable_media = True
             self.logger.info(f"Removable Media mode: {self.dut.removable_media}")
@@ -2047,7 +2053,7 @@ class ApricornDeviceFSM:
         self.logger.info(f"Enabling LED Flicker mode...")
         self._press(['key0', 'key3'])
         if not self.at.await_and_confirm_led_pattern(LEDs['ACCEPT_PATTERN'], timeout=5.0, replay_extra_context=context):
-            raise TransitionCallbackError("Did not observe ACCEPT_PATTERN for LED Flicker toggle")
+            self.session.log_failure("Did not observe ACCEPT_PATTERN for LED Flicker toggle")
         else:
             self.dut.led_flicker = True
             self.logger.info(f"LED Flicker mode: {self.dut.led_flicker}")
@@ -2068,7 +2074,7 @@ class ApricornDeviceFSM:
         self.logger.info(f"Disabling LED Flicker Mode...")
         self._press(['key0', 'key3'])
         if not self.at.await_and_confirm_led_pattern(LEDs['ACCEPT_PATTERN'], timeout=5.0, replay_extra_context=context):
-            raise TransitionCallbackError("Did not observe ACCEPT_PATTERN for LED Flicker toggle")
+            self.session.log_failure("Did not observe ACCEPT_PATTERN for LED Flicker toggle")
         else:
             self.dut.led_flicker = False
             self.logger.info(f"LED Flicker mode: {self.dut.led_flicker}")
@@ -2089,7 +2095,7 @@ class ApricornDeviceFSM:
         self.logger.info(f"Toggling Lock Override mode...")
         self._press(['key0', 'key3'])
         if not self.at.await_and_confirm_led_pattern(LEDs['ACCEPT_PATTERN'], timeout=5.0, replay_extra_context=context):
-            raise TransitionCallbackError("Did not observe ACCEPT_PATTERN for Lock Override toggle")
+            self.session.log_failure("Did not observe ACCEPT_PATTERN for Lock Override toggle")
         else:
             self.dut.lock_override = not self.dut.lock_override
             self.logger.info(f"LED Override mode: {self.dut.lock_override}")
@@ -2114,12 +2120,12 @@ class ApricornDeviceFSM:
             self.logger.info(f"Toggling Provision Lock with Self-Destruct enabled...")
             self._press(['key2', 'key5'])
             if not self.at.await_and_confirm_led_pattern(LEDs['REJECT'], timeout=5.0, replay_extra_context=context):
-                raise TransitionCallbackError("Did not observe REJECT for Provision Lock toggle with Self-Destruct enabled")
+                self.session.log_failure("Did not observe REJECT for Provision Lock toggle with Self-Destruct enabled")
         else:
             self.logger.info(f"Toggling Provision Lock...")
             self._press(['key2', 'key5'])
             if not self.at.await_and_confirm_led_pattern(LEDs['ACCEPT_PATTERN'], timeout=5.0, replay_extra_context=context):
-                raise TransitionCallbackError("Did not observe ACCEPT_PATTERN for Provision Lock toggle")
+                self.session.log_failure("Did not observe ACCEPT_PATTERN for Provision Lock toggle")
             else:
                 self.dut.provision_lock = not self.dut.provision_lock
                 self.logger.info(f"Provision Lock mode: {self.dut.provision_lock}")
@@ -2140,7 +2146,7 @@ class ApricornDeviceFSM:
         self.logger.info(f"Toggling Read-Only mode...")
         self._press(['key6', 'key7'])
         if not self.at.await_and_confirm_led_pattern(LEDs['ACCEPT_PATTERN'], timeout=5.0, replay_extra_context=context):
-            raise TransitionCallbackError("Did not observe ACCEPT_PATTERN for Read-Only toggle")
+            self.session.log_failure("Did not observe ACCEPT_PATTERN for Read-Only toggle")
         else:
             self.dut.read_only_enabled = True
             self.logger.info(f"Read-Only mode: {self.dut.read_only_enabled}")
@@ -2161,7 +2167,7 @@ class ApricornDeviceFSM:
         self.logger.info(f"Toggling to Read-Write mode...")
         self._press(['key7', 'key9'])
         if not self.at.await_and_confirm_led_pattern(LEDs['ACCEPT_PATTERN'], timeout=5.0, replay_extra_context=context):
-            raise TransitionCallbackError("Did not observe ACCEPT_PATTERN for Read-Write toggle")
+            self.session.log_failure("Did not observe ACCEPT_PATTERN for Read-Write toggle")
         else:
             self.dut.read_only_enabled = False
             self.logger.info(f"Read-Write mode: {self.dut.read_only_enabled}")
@@ -2186,12 +2192,12 @@ class ApricornDeviceFSM:
             self.logger.info(f"Toggling Self-Destruct PIN with Provision Lock enabled...")
             self._press(['key4', 'key7'])
             if not self.at.await_and_confirm_led_pattern(LEDs['REJECT'], timeout=5.0, replay_extra_context=context):
-                raise TransitionCallbackError("Did not observe REJECT for Self-Destruct toggle with Provision Lock enabled")
+                self.session.log_failure("Did not observe REJECT for Self-Destruct toggle with Provision Lock enabled")
         else:
             self.logger.info(f"Toggling Self-Destruct PIN...")
             self._press(['key4', 'key7'])
             if not self.at.await_and_confirm_led_pattern(LEDs['ACCEPT_PATTERN'], timeout=5.0, replay_extra_context=context):
-                raise TransitionCallbackError("Did not observe ACCEPT_PATTERN for Self-Destruct toggle")
+                self.session.log_failure("Did not observe ACCEPT_PATTERN for Self-Destruct toggle")
             else:
                 self.dut.self_destruct_enabled = True
 
@@ -2215,7 +2221,7 @@ class ApricornDeviceFSM:
             self.logger.info(f"Toggling User-Forced Enrollment...")
             self._press(['key0', 'key1'])
             if not self.at.await_and_confirm_led_pattern(LEDs['ACCEPT_PATTERN'], timeout=5.0, replay_extra_context=context):
-                raise TransitionCallbackError("Did not observe ACCEPT_PATTERN for User-Forced Enrollment toggle")
+                self.session.log_failure("Did not observe ACCEPT_PATTERN for User-Forced Enrollment toggle")
             else:
                 self.dut.user_forced_enrollment = True
                 self.logger.info(f"User-Forced Enrollment toggled. New state: {self.dut.user_forced_enrollment}")
@@ -2223,7 +2229,7 @@ class ApricornDeviceFSM:
             self.logger.info(f"Toggling User-Forced Enrollment with User-Forced Enrollment enabled...")
             self._press(['key0', 'key1'])
             if not self.at.await_and_confirm_led_pattern(LEDs['REJECT'], timeout=5.0, replay_extra_context=context):
-                raise TransitionCallbackError("Did not observe REJECT for User-Forced Enrollment toggle")
+                self.session.log_failure("Did not observe REJECT for User-Forced Enrollment toggle")
             else:
                 self.logger.info(f"User-Forced Enrollment cannot be disabled using this toggle...")
 
@@ -2244,14 +2250,14 @@ class ApricornDeviceFSM:
             self.logger.info(f"Toggling Delete PINs...")
             self._press(['key7', 'key8'], duration_ms=6000)
             if not self.at.await_and_confirm_led_pattern(LEDs['ACCEPT_PATTERN'], timeout=5.0, replay_extra_context=context):
-                raise TransitionCallbackError("Did not observe ACCEPT_PATTERN for Delete PINs toggle")
+                self.session.log_failure("Did not observe ACCEPT_PATTERN for Delete PINs toggle")
             else:
                 if not self.at.await_and_confirm_led_pattern(LEDs['RED_BLUE'], timeout=5.0, replay_extra_context=context):
-                    raise TransitionCallbackError("Did not observe RED_BLUE for Delete PINs initiation")
+                    self.session.log_failure("Did not observe RED_BLUE for Delete PINs initiation")
                 else:
                     self._press(['key7', 'key8'], duration_ms=6000)
                     if not self.at.confirm_led_solid(LEDs["ACCEPT_STATE"], minimum=1, timeout=3, replay_extra_context=context):
-                        raise TransitionCallbackError("Did not observe final ACCEPT_PATTERN for recovery PIN confirmation")
+                        self.session.log_failure("Did not observe final ACCEPT_PATTERN for recovery PIN confirmation")
                     else:
                         self.dut._delete_pins()
                         self.logger.info(f"Delete PINs toggled. PINs deleted...")
@@ -2271,7 +2277,7 @@ class ApricornDeviceFSM:
             return None
 
         self.logger.info(f"Initiating format operation on target: {disk_to_format}")
-        results = self.at._format_fat32(disk_to_format)
+        results = self.at._format_disk(disk_to_format)
         
         if not results:
             if self.dut.read_only_enabled:

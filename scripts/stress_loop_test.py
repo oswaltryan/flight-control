@@ -29,17 +29,16 @@ script_logger = logging.getLogger("stress_loop_testing")
 session.script_num = 0
 session.script_title = "Stress Loop Testing"
 
-
 class StressTesting:
     def __init__(self):
         self.time_check: float = 0.0
         self.iteration: int = 0
-        self.test_list: list = self.get_test_list()
-        self.test_duration: float = self.get_test_duration()
+        self.test_list: list = self._get_test_list()
+        self.test_duration: float = self._get_test_duration()
 
-        self.power_cycle_config: dict = self.get_power_cycle_config()
-        self.speed_test_config: dict = self.get_speed_test_config()
-        self.usb_2_config: dict = self.get_usb2_config()
+        self.power_cycle_config: dict = self._get_power_cycle_config()
+        self.speed_test_config: dict = self._get_speed_test_config()
+        self.usb_2_config: dict = self._get_usb2_config()
 
     def _get_list_from_user(self, eligible_tests: list, prompt: str) -> list[int]:
         """A generic helper to get a list of tests from user input."""
@@ -69,7 +68,7 @@ class StressTesting:
                 break
         return selected_list
 
-    def get_test_list(self) -> list[int]:
+    def _get_test_list(self) -> list[int]:
         """
         Prompts the user to select which test blocks to run.
 
@@ -122,7 +121,7 @@ class StressTesting:
             script_logger.info(f"Tests selected for execution: {self.test_list}")
             return self.test_list
 
-    def get_test_duration(self) -> float:
+    def _get_test_duration(self) -> float:
         """
         Prompts the user to enter the duration for each test block.
 
@@ -153,7 +152,7 @@ class StressTesting:
                 script_logger.warning("User cancelled block duration input via KeyboardInterrupt.")
                 raise
 
-    def get_power_cycle_config(self) -> dict:
+    def _get_power_cycle_config(self) -> dict:
         """
         Asks the user how power cycling should be handled for eligible tests.
 
@@ -201,7 +200,7 @@ class StressTesting:
         script_logger.info(f"Power Cycle Mode: '{config['mode']}'. Applied to tests: {config['list']}")
         return config
     
-    def get_speed_test_config(self) -> dict:
+    def _get_speed_test_config(self) -> dict:
         """
         Asks the user how FIO speed tests should be handled for eligible tests.
 
@@ -248,7 +247,7 @@ class StressTesting:
         script_logger.info(f"Speed Test Mode: '{config['mode']}'. Applied to tests: {config['list']}")
         return config
     
-    def get_usb2_config(self) -> dict:
+    def _get_usb2_config(self) -> dict:
         """
         Asks the user how USB protocol selection should be handled.
 
@@ -314,22 +313,6 @@ class StressTesting:
             
         return False
 
-    def should_run_randomized_action(self, test_id: int, action_list: list) -> bool:
-        """
-        Determines if a randomized action should run for the current iteration.
-
-        Args:
-            test_id: The ID of the current test block (e.g., 0, 1, 2).
-            action_list: The list to check against (e.g., self.power_cycle_list).
-
-        Returns:
-            True if the action should run, False otherwise.
-        """
-        if test_id in action_list:
-            # Randomly return True or False. This gives a 50/50 chance.
-            return random.choice([True, False])
-        return False
-
     def setUSBProtocol(self, test_id: int) -> bool:
         """
         Determines the USB protocol for the current iteration.
@@ -371,6 +354,8 @@ def block_0():
         fsm.power_on(usb3=is_usb3_initial)
         admin_pin = pin_gen.generate_valid_pin(dut.minimum_pin_counter)
         fsm.enroll_admin_pin(new_pin_sequence=admin_pin['sequence'])
+        print(dut.admin_pin)
+        input("wait")
         fsm.lock_admin()
         
         # --- Main Test Loop ---

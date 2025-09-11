@@ -1,4 +1,8 @@
 {
+    "device_properties": {
+        "name": "ask3nx-3861f",
+        "battery": true
+    },
     "camera_properties": {
         "focus": 205,
         "brightness": 142,

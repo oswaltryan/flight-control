@@ -418,7 +418,7 @@ class UnifiedController:
         self.logger.info(f"  {DUT_ping_2.idVendor}:{DUT_ping_2.idProduct} [{DUT_ping_2.bcdDevice}] @{DUT_ping_2.bcdUSB} {DUT_ping_2.iSerial} {DUT_ping_2.iProduct}")
         return True, DUT_ping_2
     
-    def _format_fat32(self, device, label="DUT", windows_partition_number=1):
+    def _format_disk(self, device, label="DUT", windows_partition_number=1):
         """
         Format an existing partition as FAT32.  exFAT ON WINDOWS ONLY!!!
         Returns True on success, False on failure.
