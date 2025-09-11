@@ -115,9 +115,7 @@ class UnifiedController:
                 self.logger.info("DUT initialization requested to skip initial barcode scan.")
                 dut_kwargs['scanned_serial_number'] = "SCAN_SKIPPED_BY_TOOL"
             
-            print("here")
             self.dut = DeviceUnderTest(**dut_kwargs)
-            print("there")
 
             layout_key = 'Secure Key' if self.dut.secure_key else 'Portable'
             self._keypad_layout = KEYPAD_LAYOUTS[layout_key]
