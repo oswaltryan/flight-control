@@ -43,7 +43,7 @@ def mock_dependencies():
 class TestUnifiedController:
 
     def test_initialization_success(self, mock_dependencies):
-        controller = UnifiedController()
+        controller = UnifiedController(scan_retry_delay_sec=0)
         mock_dependencies["phidget"].assert_called_once()
         mock_dependencies["camera"].assert_called_once()
         # mock_dependencies["scanner"].assert_called_once()
@@ -115,7 +115,7 @@ class TestUnifiedController:
 
         # --- ACT ---
         with caplog.at_level(logging.WARNING):
-            controller = UnifiedController()
+            controller = UnifiedController(scan_retry_delay_sec=0)
 
         # --- ASSERT ---
         assert controller is not None
@@ -189,7 +189,7 @@ class TestUnifiedController:
         # --- ACT ---
         # Initialize the controller, which should catch the exception
         with caplog.at_level(logging.ERROR):
-            controller = UnifiedController()
+            controller = UnifiedController(scan_retry_delay_sec=0)
 
         # --- ASSERT ---
         # The internal controller instance should not have been assigned
@@ -200,7 +200,7 @@ class TestUnifiedController:
 
     def test_phidget_methods_are_delegated(self, mock_dependencies):
         # NOTE: Parameterizing this test was problematic. Let's test one method directly.
-        controller = UnifiedController()
+        controller = UnifiedController(scan_retry_delay_sec=0)
         mock_phidget_instance = mock_dependencies["phidget"].return_value
 
         controller.press("button1", duration_ms=150)
@@ -214,7 +214,7 @@ class TestUnifiedController:
         path (iteration over channels) and the failure path (uninitialized controller).
         """
         # --- ARRANGE (for success path) ---
-        controller = UnifiedController()
+        controller = UnifiedController(scan_retry_delay_sec=0)
         mock_phidget_instance = mock_dependencies["phidget"].return_value
         
         method_to_call = getattr(controller, method_name)
@@ -250,7 +250,7 @@ class TestUnifiedController:
         delegation and the uninitialized controller failure path.
         """
         # --- ARRANGE (Success Path) ---
-        controller = UnifiedController()
+        controller = UnifiedController(scan_retry_delay_sec=0)
         mock_phidget_instance = mock_dependencies["phidget"].return_value
 
         # --- ACT (Success Path) ---
@@ -307,7 +307,7 @@ class TestUnifiedController:
         Tests delegation and failure paths for sequence, read_input, and wait_for_input.
         """
         # --- ARRANGE (Success Path) ---
-        controller = UnifiedController()
+        controller = UnifiedController(scan_retry_delay_sec=0)
         mock_phidget_instance = mock_dependencies["phidget"].return_value
         method_to_call = getattr(controller, method_name)
         mocked_phidget_method = getattr(mock_phidget_instance, method_name)
@@ -377,14 +377,14 @@ class TestUnifiedController:
         assert f"Failed to initialize LogitechLedChecker for camera {test_camera_id}: {error_message}" in caplog.text
 
     def test_camera_delegation_when_ready(self, mock_dependencies):
-        controller = UnifiedController()
+        controller = UnifiedController(scan_retry_delay_sec=0)
         mock_camera_instance = mock_dependencies["camera"].return_value
         controller.confirm_led_solid({})
         mock_camera_instance.confirm_led_solid.assert_called_once()
 
     def test_camera_delegation_when_not_ready(self, mock_dependencies, caplog):
         mock_dependencies["camera"].return_value.is_camera_initialized = False
-        controller = UnifiedController()
+        controller = UnifiedController(scan_retry_delay_sec=0)
         mock_camera_instance = mock_dependencies["camera"].return_value
         result = controller.confirm_led_solid({})
         mock_camera_instance.confirm_led_solid.assert_not_called()
@@ -408,7 +408,7 @@ class TestUnifiedController:
         # Patch DeviceUnderTest to prevent the implicit scan during controller init.
         # This makes the test a true unit test of the scan_barcode method itself.
         with patch('controllers.finite_state_machine.DeviceUnderTest'):
-            controller = UnifiedController()
+            controller = UnifiedController(scan_retry_delay_sec=0)
         
         mock_scanner_instance = mock_dependencies["scanner"].return_value
         mock_scanner_instance.await_scan.return_value = scan_result
@@ -423,7 +423,7 @@ class TestUnifiedController:
 
         # --- ASSERT ---
         # With the init scan patched, await_scan is now only called once.
-        mock_scanner_instance.await_scan.assert_called_once()
+        assert mock_scanner_instance.await_scan.call_count == (1 if scan_result else 3)
 
         # The return value from scan_barcode() should match the expected outcome
         assert returned_value == expected_return
@@ -443,7 +443,7 @@ class TestUnifiedController:
         Tests that scan_barcode handles the case where the scanner is not initialized.
         """
         # --- ARRANGE ---
-        controller = UnifiedController()
+        controller = UnifiedController(scan_retry_delay_sec=0)
         
         # Manually break the internal scanner reference to simulate an init failure
         controller._barcode_scanner = None
@@ -486,7 +486,7 @@ class TestUnifiedController:
 
         # WHEN: The UnifiedController is initialized.
         with patch('sys.exit') as mock_exit:
-            controller = UnifiedController()
+            controller = UnifiedController(scan_retry_delay_sec=0)
             mock_exit.assert_not_called()
 
         # THEN: The LogitechLedChecker constructor should have been called with
@@ -512,7 +512,7 @@ class TestUnifiedController:
         """
         Tests that the FIO device path is formatted correctly for each OS.
         """
-        controller = UnifiedController()
+        controller = UnifiedController(scan_retry_delay_sec=0)
 
         # GIVEN: Mock JSON outputs for a write test and a read test
         mock_write_json = '{"jobs": [{"write": {"io_bytes": 1, "bw_bytes": 150000000}}]}'
@@ -550,7 +550,7 @@ class TestUnifiedController:
                 assert final_results_linux == {'write': 150.0, 'read': 250.0}
 
     def test_parse_fio_json_output(self, mock_dependencies):
-        controller = UnifiedController()
+        controller = UnifiedController(scan_retry_delay_sec=0)
         
         # Test case with both read and write results
         sample_json_rw = '{"jobs": [{"read": {"io_bytes": 1, "bw_bytes": 250000000}, "write": {"io_bytes": 1, "bw_bytes": 150000000}}]}'
@@ -584,7 +584,7 @@ class TestUnifiedController:
         delegation and the uninitialized camera failure path.
         """
         # --- ARRANGE (Success Path) ---
-        controller = UnifiedController()
+        controller = UnifiedController(scan_retry_delay_sec=0)
         mock_camera_instance = mock_dependencies["camera"].return_value
 
         test_state = {"green": 1}
@@ -624,7 +624,7 @@ class TestUnifiedController:
         delegation and the uninitialized camera failure path.
         """
         # --- ARRANGE (Success Path) ---
-        controller = UnifiedController()
+        controller = UnifiedController(scan_retry_delay_sec=0)
         mock_camera_instance = mock_dependencies["camera"].return_value
 
         test_state = {"blue": 1}
@@ -664,7 +664,7 @@ class TestUnifiedController:
         Tests delegation and failure path for the 'confirm_led_pattern' method.
         """
         # --- ARRANGE (Success Path) ---
-        controller = UnifiedController()
+        controller = UnifiedController(scan_retry_delay_sec=0)
         mock_camera_instance = mock_dependencies["camera"].return_value
 
         test_pattern = [{"state": "A", "duration": 1}]
@@ -701,7 +701,7 @@ class TestUnifiedController:
         Tests delegation and failure path for the 'await_and_confirm_led_pattern' method.
         """
         # --- ARRANGE (Success Path) ---
-        controller = UnifiedController()
+        controller = UnifiedController(scan_retry_delay_sec=0)
         mock_camera_instance = mock_dependencies["camera"].return_value
 
         test_pattern = [{"state": "B", "duration": 2}]
@@ -740,7 +740,7 @@ class TestUnifiedController:
         and exceptions during component cleanup.
         """
         # --- SCENARIO 1: Both components close successfully ---
-        controller = UnifiedController()
+        controller = UnifiedController(scan_retry_delay_sec=0)
         mock_camera_instance = mock_dependencies["camera"].return_value
         mock_phidget_instance = mock_dependencies["phidget"].return_value
         
@@ -928,7 +928,7 @@ class ConfirmEnumBaseTests:
                 return call_count
             mock_time.side_effect = time_incrementer
 
-            controller = UnifiedController()
+            controller = UnifiedController(scan_retry_delay_sec=0)
             find_device_mock = mock_dependencies["find_device"]
             yield controller, find_device_mock
 
@@ -1326,3 +1326,5 @@ class TestFsmEventHandlers:
             controller.handle_critical_error(None)
 
         assert "Handling CRITICAL error. Details from FSM: No details provided" in caplog.text
+
+

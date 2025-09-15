@@ -68,8 +68,8 @@ class UnifiedController:
                  replay_post_failure_duration_sec: Optional[float] = None,
                  replay_output_dir: Optional[str] = None,
                  enable_instant_replay: Optional[bool] = None,
-                 skip_initial_scan: bool = False):
-
+                 skip_initial_scan: bool = False,
+                 scan_retry_delay_sec: Optional[float] = None):
         self.logger = logger_instance if logger_instance else module_logger
         
         self._phidget_controller: Optional[PhidgetController] = None
@@ -79,6 +79,16 @@ class UnifiedController:
         self.dut: Optional['DeviceUnderTest'] = None
         self.is_fully_initialized: bool = False
         self._keypad_layout: Optional[List[List[str]]] = None
+        # Control retry delay for barcode scanning (useful for tests)
+        try:
+            env_delay = float(os.environ.get("SCAN_RETRY_DELAY_SEC", "3"))
+        except ValueError:
+            env_delay = 3.0
+        self.scan_retry_delay_sec: float = (
+            float(scan_retry_delay_sec)
+            if scan_retry_delay_sec is not None
+            else env_delay
+        )
 
         phidget_init_successful = False
         camera_init_successful = False
@@ -731,3 +741,6 @@ if __name__ == '__main__': # pragma: no cover
             direct_test_logger.info("Closing UnifiedController instance from direct test...")
             uc_instance_for_test.close()
         direct_test_logger.info("UnifiedController direct test finished.")
+
+
+

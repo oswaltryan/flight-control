@@ -288,7 +288,8 @@ class TestSession:
 
         # Test Block Management
         self.current_test_block: int = -1
-        self.test_blocks: list = []
+        # Map of block_id -> block_name (in insertion order)
+        self.test_blocks: Dict[int, str] = {}
         self.block_failure_count: dict = {}
         self.block_warning_count: dict = {}
 
@@ -314,7 +315,8 @@ class TestSession:
         """Resets counters and timers for the start of a new test block."""
         self.block_start_time = time.time()
         self.current_test_block = current_test_block
-        self.test_blocks.append(self.current_test_block)
+        # Track mapping from block id to human-readable name
+        self.test_blocks[self.current_test_block] = block_name
 
         self.block_enumeration_totals.update({self.current_test_block: {}})
         self.block_enumeration_totals[self.current_test_block].update({"mfr": 0})
@@ -414,16 +416,16 @@ class TestSession:
         total_pin = 0
         total_spi = 0
 
-        for block in self.test_blocks:
-            resets = self.block_enumeration_totals[block]['mfr']
-            oob = self.block_enumeration_totals[block]['oob']
-            pin = self.block_enumeration_totals[block]['pin']
-            spi = self.block_enumeration_totals[block]['spi']
+        for block_id, _block_name in self.test_blocks.items():
+            resets = self.block_enumeration_totals[block_id]['mfr']
+            oob = self.block_enumeration_totals[block_id]['oob']
+            pin = self.block_enumeration_totals[block_id]['pin']
+            spi = self.block_enumeration_totals[block_id]['spi']
             total_resets += resets
             total_oob += oob
             total_pin += pin
             total_spi += spi
-            logger.info("Block {:<2}: {:^5} | {:^5} | {:^5} | {:^5} |".format(block, resets, oob, pin, spi))
+            logger.info("Block {:<2}: {:^5} | {:^5} | {:^5} | {:^5} |".format(block_id, resets, oob, pin, spi))
         
         logger.info("Total   : {:^5} | {:^5} | {:^5} | {:^5} |".format(total_resets, total_oob, total_pin, total_spi))
         logger.info("___________________________________")
@@ -434,14 +436,14 @@ class TestSession:
         total_failures = sum(len(v) for v in self.failure_block.values())
         total_warnings = sum(len(v) for v in self.warning_block.values())
 
-        for i, block_name in enumerate(self.test_blocks, 1):
-            failures = self.failure_block.get(block_name, [])
-            warnings = self.warning_block.get(block_name, [])
+        for block_id, block_name in self.test_blocks.items():
+            failures = self.failure_block.get(block_id, [])
+            warnings = self.warning_block.get(block_id, [])
 
             if not failures and not warnings:
-                logger.info(f"Block {block_name}: Passed")
+                logger.info(f"Block {block_id} ({block_name}): Passed")
             else:
-                logger.info(f"Block {block_name}:")
+                logger.info(f"Block {block_id} ({block_name}):")
                 if warnings:
                     logger.warning(f"         Warning(s):")
                     for w_summary in warnings:
@@ -488,8 +490,8 @@ class TestSession:
             A single string containing all failure messages, or an empty string if none.
         """
         msg_list = []
-        for i, block_name in enumerate(self.test_blocks, 1):
-            failures = self.failure_block.get(block_name)
+        for i, (block_id, block_name) in enumerate(self.test_blocks.items(), 1):
+            failures = self.failure_block.get(block_id)
             if not failures:
                 continue
             
