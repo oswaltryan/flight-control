@@ -96,6 +96,7 @@ class App:
         # Variables to track toggle button state (default to OFF)
         self.power_state = tk.BooleanVar(value=False)
         self.usb3_state = tk.BooleanVar(value=False)
+        self.hold_state = tk.BooleanVar(value=False)
 
         # Dictionary to hold BooleanVar for each keypad key
         self.keypad_states: Dict[str, tk.BooleanVar] = {key: tk.BooleanVar(value=False) for key in [
@@ -106,6 +107,7 @@ class App:
         self.keypad_frame: Optional[tk.Frame] = None
         self.power_button: Optional[tk.Checkbutton] = None
         self.usb3_button: Optional[tk.Checkbutton] = None
+        self.hold_button: Optional[tk.Checkbutton] = None
         self.scan_button: Optional[tk.Button] = None
         self.tune_led_button: Optional[tk.Button] = None
         self.sliders: list = []
@@ -591,6 +593,22 @@ class App:
         # Calculate the next available row after the keypad
         next_row = len(keypad_layout) + 1
 
+        # If Secure Key device, add a full-width 'Hold' toggle spanning both keypad columns
+        if self.dut and self.dut.secure_key:
+            self.hold_button = tk.Checkbutton(
+                self.keypad_frame,
+                text="Hold",
+                variable=self.hold_state,
+                indicatoron=False,
+                state=tk.NORMAL,
+                relief=tk.RAISED,
+            )
+            self.hold_button.config(
+                command=lambda btn=self.hold_button: self._handle_phidget_toggle("hold", self.hold_state, btn)
+            )
+            self.hold_button.grid(row=next_row, column=0, columnspan=num_columns, sticky="ew", padx=5, pady=(5, 5))
+            next_row += 1
+
         # Add a separator
         separator = tk.Frame(self.keypad_frame, height=2, bd=1, relief=tk.SUNKEN)
         separator.grid(row=next_row, column=0, columnspan=num_columns, sticky="ew", padx=5, pady=10)
@@ -866,6 +884,14 @@ class App:
                         self.controller.off(key_name)
                     except Exception as e:
                         logger.error(f"Error turning off keypad channel {key_name} during cleanup: {e}", exc_info=True)
+
+            # Also ensure the 'hold' cylinder is released if engaged
+            try:
+                if self.hold_state.get():
+                    logger.info("Releasing 'hold' cylinder during shutdown.")
+                    self.controller.off("hold")
+            except Exception as e:
+                logger.error(f"Error releasing 'hold' during cleanup: {e}", exc_info=True)
 
             self.controller.close()
             
