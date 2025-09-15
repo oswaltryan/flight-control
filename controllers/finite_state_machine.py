@@ -330,6 +330,9 @@ class TestSession:
         self.warning_block[self.current_test_block] = []
         self.warning_description_block[self.current_test_block] = []
 
+        if self.dut.secure_key:
+            self.at.on("hold")
+
     def end_block(self):
         """Finalizes metrics for the completed test block."""
         self.block_end_time = time.time()
