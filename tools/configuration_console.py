@@ -291,7 +291,7 @@ class App:
                 self.tune_led_button.config(text=f"Click/drag to place {next_led_key.upper()} LED", fg=next_led_key)
         else:
             # --- FIX: Last LED is done, so apply to live config, save, and finish ---
-            logger.info("Final LED tuned. Applying new ROIs and saving...")
+            logger.info("Final LED tuned. Applied new ROIs to live view. Click Save to persist.")
 
             # --- [BUG FIX START] ---
             # This is the crucial new block. It updates the live, in-memory
@@ -301,11 +301,9 @@ class App:
                     if led_key in self.checker.led_configs:
                         self.checker.led_configs[led_key]['roi'] = new_roi_coords
                         logger.debug(f"Updated live ROI for '{led_key}': {new_roi_coords}")
-            # --- [BUG FIX END] ---
-            
-            self._save_settings() # Save the new settings to the JSON file
+            # --- [BUG FIX END] ---
             if self.tune_led_button:
-                self.tune_led_button.config(text="Tuning Complete!", fg="black")
+                self.tune_led_button.config(text="Tuning Complete - click Save to persist", fg="black")
             
             # Revert UI state after a short delay
             self.root.after(2000, self._finish_tuning)
@@ -860,8 +858,7 @@ class App:
     def _on_closing(self):
         """Cleanup method for closing the application."""
         logger.info("Closing application...")
-        self._save_settings() # Save the UI state first
-
+        # Note: Settings are not auto-saved on exit; use Save Settings button.
         # if self.cap and self.cap.isOpened():
         #     print("\n--- Final Target Values ---")
         #     # CORRECTED: Read from the UI variables, which are the source for the saved file,
