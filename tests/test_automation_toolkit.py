@@ -18,8 +18,17 @@ import importlib
 import io
 import logging
 
+# Patch UnifiedController during import so tests never trigger the physical barcode scanner.
+_initial_uc_patcher = patch("controllers.unified_controller.UnifiedController")
+MockUnifiedController = _initial_uc_patcher.start()
+MockUnifiedController.return_value.dut = MagicMock(name="MockDUT")
+MockUnifiedController.return_value.scan_barcode.return_value = "TEST_SERIAL_123"
+try:
+    import automation_toolkit as at_toolkit
+finally:
+    _initial_uc_patcher.stop()
+
 # We will be reloading this module, so we need a way to reference it.
-import automation_toolkit as at_toolkit
 import runpy
 import sys
 
@@ -348,3 +357,4 @@ class TestAutomationToolkit:
         output = f.getvalue()
         expected_warning = "Global 'at' instance is None; atexit cleanup for 'at' not registered."
         assert expected_warning in output
+
