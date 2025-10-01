@@ -17,6 +17,7 @@ PIN_TEMPLATE = {
     'keypress': {}
 }
 
+
 class PINGenerator:
     """
     A class to generate valid and specific types of invalid PINs for testing.
@@ -29,17 +30,18 @@ class PINGenerator:
         if not hasattr(dut_model, 'self_destruct_pin'):
             raise TypeError("The provided dut_model must have a 'self_destruct_pin' attribute.")
         self.dut_model = dut_model
+        self._digit_usage = collections.Counter({digit: 0 for digit in string.digits})
 
     def _is_pin_invalid(self, pin_string: str) -> Tuple[bool, str]:
         """Checks if a PIN is invalid based on the latest DUT state."""
         current_sdp_list = self.dut_model.self_destruct_pin
-        current_sdp_str = "".join(current_sdp_list) if current_sdp_list else None
-        
+        current_sdp_str = ''.join(current_sdp_list) if current_sdp_list else None
+
         if current_sdp_str and pin_string == current_sdp_str:
             return True, "matches Self-Destruct PIN"
         if len(set(pin_string)) == 1:
             return True, "is repeating"
-        
+
         # This check is now redundant due to the numerical generation, but it's
         # a good safeguard to keep in the validation function.
         all_digits = "0123456789"
@@ -53,7 +55,7 @@ class PINGenerator:
         """Helper function to create the final dictionary from a PIN string."""
         pin_info = copy.deepcopy(PIN_TEMPLATE)
         is_invalid, reason = self._is_pin_invalid(pin_str)
-        
+
         pin_info.update({
             'string': pin_str,
             'digit': len(pin_str),
@@ -65,6 +67,22 @@ class PINGenerator:
         pin_info['keypress'] = dict(collections.Counter(pin_info['sequence']))
         return pin_info
 
+    def _generate_candidate_pin(self, length: int):
+        """Builds a PIN candidate using least-used digits to balance key usage."""
+        usage_snapshot = self._digit_usage.copy()
+        candidate_digits = []
+        for _ in range(length):
+            min_usage = min(self._digit_usage.values())
+            eligible_digits = [
+                digit for digit, count in self._digit_usage.items()
+                if count == min_usage
+            ]
+            selected_digit = random.choice(eligible_digits)
+            candidate_digits.append(selected_digit)
+            self._digit_usage[selected_digit] += 1
+
+        return ''.join(candidate_digits), usage_snapshot
+
     def generate_valid_pin(self, length: int) -> dict:
         """
         Generates a random PIN of a given length that is GUARANTEED to be valid
@@ -72,46 +90,49 @@ class PINGenerator:
         """
         if not 2 <= length <= 16:
             raise ValueError("PIN length must be between 2 and 16.")
-        
-        for _ in range(500): # Safety break
-            pin_str = ''.join(random.choices(string.digits, k=length))
-            if not self._is_pin_invalid(pin_str)[0]:
-                return self._populate_pin_info(pin_str)
-        
+
+        for _ in range(500):  # Safety break
+            pin_str, usage_snapshot = self._generate_candidate_pin(length)
+            if self._is_pin_invalid(pin_str)[0]:
+                self._digit_usage = usage_snapshot
+                continue
+
+            return self._populate_pin_info(pin_str)
+
         raise RuntimeError(f"Could not generate a valid PIN of length {length} after 500 attempts.")
 
     def generate_invalid_pin(self, invalid_type: str, length: int, **kwargs) -> dict:
         """
         Generates a specifically invalid PIN based on the requested type.
         """
-        pin_str = ""
+        pin_str = ''
         if invalid_type == "repeating":
             digit = str(random.randint(0, 9))
             pin_str = digit * length
-        
+
         elif invalid_type == "sequential":
             if not 2 <= length <= 10:
                 raise ValueError("Sequential PIN length must be between 2 and 10.")
-            
+
             if 'reverse' in kwargs:
                 is_reverse = kwargs['reverse']
             else:
                 is_reverse = random.choice([True, False])
-            
+
             if not is_reverse:
                 max_start_digit = 10 - length
                 start_digit = random.randint(0, max_start_digit)
                 pin_list = [str(start_digit + i) for i in range(length)]
-                pin_str = "".join(pin_list)
+                pin_str = ''.join(pin_list)
             else:
                 min_start_digit = length - 1
                 start_digit = random.randint(min_start_digit, 9)
                 pin_list = [str(start_digit - i) for i in range(length)]
-                pin_str = "".join(pin_list)
-            
+                pin_str = ''.join(pin_list)
+
         else:
             raise ValueError(f"Invalid type '{invalid_type}'. Choose from 'repeating' or 'sequential'.")
-        
+
         return self._populate_pin_info(pin_str)
 
     def get_self_destruct_pin_info(self) -> Optional[dict]:
@@ -121,6 +142,6 @@ class PINGenerator:
         current_sdp_list = self.dut_model.self_destruct_pin
         if not current_sdp_list:
             return None
-        
-        pin_str = "".join(current_sdp_list)
+
+        pin_str = ''.join(current_sdp_list)
         return self._populate_pin_info(pin_str)

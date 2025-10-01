@@ -391,78 +391,133 @@ class TestUnifiedController:
         assert "Camera not ready" in caplog.text
         assert result is False
 
-    @pytest.mark.parametrize(
-        "scan_result, log_level, expected_log_msg, expected_return",
-        [
-            # Scenario 1: Successful scan (Updated to match implementation)
-            ("NEW_SERIAL_456", logging.DEBUG, "Scanned Serial Number: NEW_SERIAL_456", "NEW_SERIAL_456"),
-            # Scenario 2: Scan fails or times out (returns None)
-            (None, logging.WARNING, "On-demand barcode scan did not return data.", None),
-        ]
-    )
-    def test_scan_barcode_scenarios(self, mock_dependencies, caplog, scan_result, log_level, expected_log_msg, expected_return):
-        """
-        Tests the scan_barcode method for both success and failure scenarios where the scanner is present.
-        """
-        # --- ARRANGE ---
-        # Patch DeviceUnderTest to prevent the implicit scan during controller init.
-        # This makes the test a true unit test of the scan_barcode method itself.
+    def test_scan_barcode_success(self, mock_dependencies, caplog):
+        """scan_barcode returns the hardware value when the scanner succeeds."""
         with patch('controllers.finite_state_machine.DeviceUnderTest'):
             controller = UnifiedController(scan_retry_delay_sec=0)
-        
+
         mock_scanner_instance = mock_dependencies["scanner"].return_value
-        mock_scanner_instance.await_scan.return_value = scan_result
+        mock_scanner_instance.await_scan.return_value = "NEW_SERIAL_456"
 
-        # With the DUT patched, the initial serial number should be None.
-        initial_serial = controller.scanned_serial_number
-
-        # --- ACT ---
-        # Set the level on the specific logger to ensure DEBUG messages are captured.
         with caplog.at_level(logging.DEBUG, logger='controllers.unified_controller'):
             returned_value = controller.scan_barcode()
 
-        # --- ASSERT ---
-        # With the init scan patched, await_scan is now only called once.
-        assert mock_scanner_instance.await_scan.call_count == (1 if scan_result else 3)
+        mock_scanner_instance.await_scan.assert_called_once()
+        assert returned_value == "NEW_SERIAL_456"
+        assert controller.scanned_serial_number == "NEW_SERIAL_456"
+        assert "Scanned Serial Number: NEW_SERIAL_456" in caplog.text
 
-        # The return value from scan_barcode() should match the expected outcome
-        assert returned_value == expected_return
+    def test_scan_barcode_manual_entry_success(self, mock_dependencies, caplog):
+        """scan_barcode falls back to manual entry when the scanner times out."""
+        with patch('controllers.finite_state_machine.DeviceUnderTest'):
+            controller = UnifiedController(scan_retry_delay_sec=0)
 
-        # The log should contain the expected message
-        assert expected_log_msg in caplog.text
-        
-        # Check if the controller's serial number attribute was updated correctly
-        if scan_result:
-            assert controller.scanned_serial_number == scan_result
-        else:
-            # If the scan failed, the serial number should not have changed from its initial state.
-            assert controller.scanned_serial_number == initial_serial
+        mock_scanner_instance = mock_dependencies["scanner"].return_value
+        mock_scanner_instance.await_scan.side_effect = [None, None, None]
+
+        with patch.object(controller, '_prompt_manual_serial_entry', return_value="123456789012") as mock_prompt:
+            with patch('controllers.unified_controller.time.sleep') as mock_sleep:
+                with caplog.at_level(logging.INFO, logger='controllers.unified_controller'):
+                    returned_value = controller.scan_barcode()
+
+        assert mock_scanner_instance.await_scan.call_count == 3
+        mock_prompt.assert_called_once()
+        assert mock_sleep.call_count == 2
+        assert returned_value == "123456789012"
+        assert controller.scanned_serial_number == "123456789012"
+        assert "Manual serial number entry accepted." in caplog.text
+
+    def test_scan_barcode_rescan_success(self, mock_dependencies, caplog):
+        """Typing 'rescan' should try one extra barcode read."""
+        with patch('controllers.finite_state_machine.DeviceUnderTest'):
+            controller = UnifiedController(scan_retry_delay_sec=0)
+
+        mock_scanner_instance = mock_dependencies["scanner"].return_value
+        mock_scanner_instance.await_scan.side_effect = [None, None, None, "123456789012"]
+
+        with patch('controllers.unified_controller.time.sleep'):
+            with patch('builtins.input', side_effect=['rescan']) as mock_input:
+                with caplog.at_level(logging.INFO, logger='controllers.unified_controller'):
+                    returned_value = controller.scan_barcode()
+
+        assert mock_scanner_instance.await_scan.call_count == 4
+        mock_input.assert_called_once()
+        assert returned_value == "123456789012"
+        assert controller.scanned_serial_number == "123456789012"
+        assert "Manual rescan requested after barcode failures." in caplog.text
+
+    def test_scan_barcode_rescan_invalid_then_manual(self, mock_dependencies, caplog):
+        """Invalid rescan data should force manual entry of a valid serial."""
+        with patch('controllers.finite_state_machine.DeviceUnderTest'):
+            controller = UnifiedController(scan_retry_delay_sec=0)
+
+        mock_scanner_instance = mock_dependencies["scanner"].return_value
+        mock_scanner_instance.await_scan.side_effect = [None, None, None, 'BADSCAN']
+
+        with patch('controllers.unified_controller.time.sleep'):
+            with patch('builtins.input', side_effect=['rescan', '123456789012']) as mock_input:
+                with caplog.at_level(logging.WARNING, logger='controllers.unified_controller'):
+                    returned_value = controller.scan_barcode()
+
+        assert mock_scanner_instance.await_scan.call_count == 4
+        assert mock_input.call_count == 2
+        assert returned_value == '123456789012'
+        assert controller.scanned_serial_number == '123456789012'
+        assert "Rescan did not return a valid 12-digit serial. Please enter the serial manually." in caplog.text
+
+    def test_scan_barcode_manual_entry_requires_value(self, mock_dependencies, caplog):
+        """Blank input and invalid formats must re-prompt until a 12-digit serial is provided."""
+        with patch('controllers.finite_state_machine.DeviceUnderTest'):
+            controller = UnifiedController(scan_retry_delay_sec=0)
+
+        mock_scanner_instance = mock_dependencies["scanner"].return_value
+        mock_scanner_instance.await_scan.side_effect = [None, None, None]
+
+        with patch('controllers.unified_controller.time.sleep'):
+            with patch('builtins.input', side_effect=['   ', 'ABC123', '123456789012']) as mock_input:
+                with caplog.at_level(logging.WARNING, logger='controllers.unified_controller'):
+                    returned_value = controller.scan_barcode()
+
+        assert mock_scanner_instance.await_scan.call_count == 3
+        assert mock_input.call_count == 3
+        assert returned_value == "123456789012"
+        assert controller.scanned_serial_number == "123456789012"
+        assert "Serial number is required" in caplog.text
+        assert "Serial number must be exactly 12 digits." in caplog.text
+
+    def test_scan_barcode_keyboard_interrupt(self, mock_dependencies, caplog):
+        """Ctrl+C during manual entry should abort via SystemExit."""
+        with patch('controllers.finite_state_machine.DeviceUnderTest'):
+            controller = UnifiedController(scan_retry_delay_sec=0)
+
+        mock_scanner_instance = mock_dependencies["scanner"].return_value
+        mock_scanner_instance.await_scan.side_effect = [None, None, None]
+
+        with patch('controllers.unified_controller.time.sleep'):
+            with patch('builtins.input', side_effect=KeyboardInterrupt):
+                with caplog.at_level(logging.WARNING, logger='controllers.unified_controller'):
+                    with pytest.raises(SystemExit) as excinfo:
+                        controller.scan_barcode()
+
+        assert excinfo.value.code == "KeyboardInterrupt"
+        assert mock_scanner_instance.await_scan.call_count == 3
+        assert "Serial number entry interrupted by operator. Aborting barcode capture." in caplog.text
 
     def test_scan_barcode_no_scanner(self, mock_dependencies, caplog):
-        """
-        Tests that scan_barcode handles the case where the scanner is not initialized.
-        """
-        # --- ARRANGE ---
-        controller = UnifiedController(scan_retry_delay_sec=0)
-        
-        # Manually break the internal scanner reference to simulate an init failure
+        """Tests that scan_barcode handles the case where the scanner is not initialized."""
+        with patch('controllers.finite_state_machine.DeviceUnderTest'):
+            controller = UnifiedController(scan_retry_delay_sec=0)
+
         controller._barcode_scanner = None
-        
         mock_scanner_instance = mock_dependencies["scanner"].return_value
 
-        # --- ACT ---
         with caplog.at_level(logging.ERROR):
             result = controller.scan_barcode()
 
-        # --- ASSERT ---
-        # The method should return None because the scanner is unavailable
         assert result is None
-        
-        # The correct error should be logged
         assert "Barcode scanner not available." in caplog.text
-        
-        # The underlying scanner's await_scan method should NOT have been called
         mock_scanner_instance.await_scan.assert_not_called()
+
 
     @pytest.mark.parametrize("is_secure, expected_layout_key", [
         (True, 'Secure Key'),
@@ -494,7 +549,7 @@ class TestUnifiedController:
         expected_layout = KEYPAD_LAYOUTS[expected_layout_key]
         mock_camera_constructor = mock_dependencies["camera"]
 
-        # [BUG FIX] Add the new 'camera_hw_settings' parameter to the assertion.
+        # Include camera_hw_settings to validate the new parameter.
         mock_camera_constructor.assert_called_once_with(
             camera_id=ANY,
             led_configs=ANY,
@@ -505,7 +560,7 @@ class TestUnifiedController:
             replay_output_dir=ANY,
             enable_instant_replay=ANY,
             keypad_layout=expected_layout,
-            camera_hw_settings=ANY # <-- ADD THIS LINE
+            camera_hw_settings=ANY
         )
 
     def test_run_fio_tests_path_formatting(self, mock_dependencies, monkeypatch):

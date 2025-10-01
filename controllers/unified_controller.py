@@ -224,31 +224,90 @@ class UnifiedController:
     def scan_barcode(self) -> Optional[str]:
         """
         Triggers a new barcode scan and updates the controller's serial number.
-        
+
         Returns:
-            The scanned serial number string, or None if the scan failed or timed out.
+            The scanned serial number string, or None if the scan failed or the scanner is unavailable.
         """
         if not self._barcode_scanner:
             self.logger.error("Barcode scanner not available.")
             return None
-        
+
         scanned_data = None
         for retry in range(1, 4):
             scanned_data = self._barcode_scanner.await_scan()
-            
+
             if scanned_data:
                 self.logger.debug(f"Scanned Serial Number: {scanned_data}")
                 self.scanned_serial_number = scanned_data
-                break
-            else:
-                if retry < 3:
-                    self.logger.warning(f"Barcode scan attempt {retry} failed. Retrying...")
-                    time.sleep(3)
-                else:
-                    self.logger.warning(f"Barcode scan attempt {retry} failed. On-demand barcode scan did not return data.")
-                
-        return scanned_data
+                return scanned_data
 
+            if retry < 3:
+                self.logger.warning(
+                    f"Barcode scan attempt {retry} failed. Retrying in {self.scan_retry_delay_sec:.1f}s..."
+                )
+                time.sleep(self.scan_retry_delay_sec)
+            else:
+                self.logger.warning(
+                    f"Barcode scan attempt {retry} failed. On-demand barcode scan did not return data."
+                )
+
+        manual_entry = self._prompt_manual_serial_entry()
+        self.scanned_serial_number = manual_entry
+        self.logger.info("Manual serial number entry accepted.")
+        return manual_entry
+
+    def _prompt_manual_serial_entry(self) -> str:
+        """Prompt the operator for a serial number, allowing a single ad-hoc rescan."""
+        prompt = (
+            "Barcode scan failed after 3 attempts. Enter serial number manually ",
+            "(type 'rescan' to try one more barcode read): ",
+        )
+
+        while True:
+            try:
+                manual_input = input(''.join(prompt))
+            except KeyboardInterrupt:
+                raise SystemExit("\nKeyboardInterrupt")
+            except EOFError:
+                self.logger.warning(
+                    "Serial number entry interrupted (EOF). Please enter a serial number or press Ctrl+C to abort."
+                )
+                continue
+
+            manual_serial = (manual_input or "").strip()
+
+            if not manual_serial:
+                self.logger.warning("Serial number is required. Please enter a value or type 'rescan'.")
+                continue
+
+            if manual_serial.lower() == "rescan":
+                if not self._barcode_scanner:
+                    self.logger.error(
+                        "Rescan requested but barcode scanner is unavailable. Please enter the serial manually."
+                    )
+                    continue
+
+                self.logger.info("Manual rescan requested after barcode failures.")
+                rescanned_data = self._barcode_scanner.await_scan()
+                if rescanned_data:
+                    cleaned_rescan = rescanned_data.strip()
+                    if cleaned_rescan.isdigit() and len(cleaned_rescan) == 12:
+                        self.logger.debug(f"Rescan succeeded with serial: {cleaned_rescan}")
+                        return cleaned_rescan
+
+                    self.logger.warning(
+                        "Rescan did not return a valid 12-digit serial. Please enter the serial manually."
+                    )
+                    continue
+
+                self.logger.warning("Rescan attempt did not return data. Please enter the serial manually.")
+                continue
+
+            if not (manual_serial.isdigit() and len(manual_serial) == 12):
+                self.logger.warning("Serial number must be exactly 12 digits.")
+                continue
+
+            return manual_serial
     # --- LogitechLedChecker Method Delegation ---
     @property
     def is_camera_ready(self) -> bool:
