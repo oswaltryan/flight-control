@@ -98,3 +98,42 @@ def test_fsm_initializes_with_dependencies(fsm, mock_at, dut_instance):
     assert fsm.at is mock_at
     assert fsm.dut is dut_instance
     assert hasattr(fsm, "machine")
+
+def test_release_valve_blocks_transition_on_failure(fsm, session_instance, mock_at):
+    session_instance.start_new_block(block_name="guard", current_test_block=1)
+    fsm.machine.set_state("STANDBY_MODE")
+
+    fsm.dut.admin_pin = ['key1', 'key2', 'unlock']
+    fsm.dut.read_only_enabled = False
+    fsm.dut.lock_override = False
+
+    mock_at.sequence = MagicMock()
+    mock_at.await_and_confirm_led_pattern = MagicMock(return_value=False)
+    mock_at.confirm_drive_enum = MagicMock()
+
+    fsm.unlock_admin()
+
+    assert fsm.state == "STANDBY_MODE"
+    mock_at.sequence.assert_called_once()
+    mock_at.await_and_confirm_led_pattern.assert_called_once()
+    mock_at.confirm_drive_enum.assert_not_called()
+
+
+def test_release_valve_allows_transition_on_success(fsm, session_instance, mock_at):
+    session_instance.start_new_block(block_name="guard", current_test_block=1)
+    fsm.machine.set_state("STANDBY_MODE")
+
+    fsm.dut.admin_pin = ['key1', 'key2', 'unlock']
+    fsm.dut.read_only_enabled = False
+    fsm.dut.lock_override = False
+
+    mock_at.sequence = MagicMock()
+    mock_at.await_and_confirm_led_pattern = MagicMock(return_value=True)
+    mock_at.confirm_drive_enum = MagicMock(return_value=(True, MagicMock()))
+
+    fsm.unlock_admin()
+
+    assert fsm.state == "UNLOCKED_ADMIN"
+    mock_at.sequence.assert_called_once()
+    mock_at.await_and_confirm_led_pattern.assert_called_once()
+    mock_at.confirm_drive_enum.assert_called_once()

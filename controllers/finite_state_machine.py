@@ -38,6 +38,11 @@ class TransitionCallbackError(Exception):
     """Custom exception to be raised from 'before' callbacks on failure."""
     pass
 
+def release_valve(func):
+    """Mark a transition callback so its return value can gate the transition."""
+    setattr(func, '_release_valve', True)
+    return func
+
 # --- Load External JSON Configuration ---
 # Get a logger for this module-level operation
 _fsm_module_logger = logging.getLogger(__name__)
@@ -354,6 +359,7 @@ class TestSession:
         """Logs a failure for a specific test block."""
         self.block_failure_count[self.current_test_block] += 1
         self.failure_block[self.current_test_block].append(failure_message)
+        self.logger.warning(failure_message)
         
     def log_warning(self, block_name: str, warning_summary: str, warning_details: str = ""):
         """Logs a warning for a specific test block."""
@@ -720,6 +726,25 @@ class ApricornDeviceFSM:
             {'trigger': 'toggle_user_forced_enrollment', 'source': 'ADMIN_MODE', 'dest': 'ADMIN_MODE', 'before': '_user_forced_enrollment_toggle'},
         ]
 
+        release_valve_transitions: List[Tuple[Dict[str, Any], Callable[[EventData], Any]]] = []
+        for transition in transitions:
+            before_name = transition.get('before')
+            if not before_name:
+                continue
+            candidate = getattr(self, before_name, None)
+            if callable(candidate) and getattr(candidate, '_release_valve', False):
+                release_valve_transitions.append((transition, candidate))
+
+        for transition, method in release_valve_transitions:
+            transition.pop('before', None)
+            transition.setdefault('conditions', [])
+            transition['conditions'].append(
+                CallableCondition(
+                    lambda event_data, bound_method=method: bool(bound_method(event_data)),
+                    f"{method.__name__} release valve"
+                )
+            )
+
         machine_kwargs = {
             'model': self,
             'states': ApricornDeviceFSM.STATES,
@@ -822,7 +847,7 @@ class ApricornDeviceFSM:
     def _increment_enumeration_count(self, enum_type: str):
         """Validates the enumeration type and logs it to the session."""
         # Define the valid enumeration types in one central place.
-        valid_enum_types = ['pin', 'oob', 'reset', 'spi']
+        valid_enum_types = ['pin', 'oob', 'mfr', 'spi']
 
         if enum_type in valid_enum_types:
             self.session.log_enumeration(enum_type)
@@ -1119,9 +1144,9 @@ class ApricornDeviceFSM:
             # Optional: You can now use the returned device_info object if needed.
             # For example, to update the DUT model with the most current info.
             if device_info:
-                self._increment_enumeration_count('reset')
+                self._increment_enumeration_count('mfr')
                 self.dut.serial_number = device_info.iSerial
-                if sys.platform == 'win32':
+                if sys.platform.startswith('win32'):
                     self.dut.disk_path = device_info.physicalDriveNum
                 elif sys.platform.startswith('linux'):
                     self.dut.disk_path = device_info.blockDevice
@@ -1210,7 +1235,8 @@ class ApricornDeviceFSM:
 ##########
 ## Power
 
-    def _do_power_on(self, event_data: EventData) -> None:
+    @release_valve
+    def _do_power_on(self, event_data: EventData) -> bool:
         """Handles the physical power-on sequence for the dut."""
         dest_state = event_data.transition.dest if event_data.transition else "UNKNOWN"
         context = {'fsm_current_state': self.state, 'fsm_destination_state': dest_state}
@@ -1232,7 +1258,10 @@ class ApricornDeviceFSM:
         else:
             if not self.at.confirm_led_pattern(LEDs['RED_GREEN_BLUE'], clear_buffer=True, replay_extra_context=context):
                 self.session.log_failure("Failed Startup Self-Test LED confirmation")
+                return False
             self.logger.info("Startup Self-Test successful. Proceeding to POWER_ON_SELF_TEST state.")
+        return True
+
 
     def _do_power_off(self, event_data: EventData) -> None:
         """Handles the physical power-off sequence for the dut."""
@@ -1243,7 +1272,8 @@ class ApricornDeviceFSM:
 ##########
 ## Unlocks
 
-    def _enter_admin_pin(self, event_data: EventData) -> None:
+    @release_valve
+    def _enter_admin_pin(self, event_data: EventData) -> bool:
         """
         Performs the sequence to unlock the device with the Admin PIN.
 
@@ -1263,23 +1293,24 @@ class ApricornDeviceFSM:
 
         self.logger.info("Unlocking self.dut with Admin PIN...")
         self._sequence(self.dut.admin_pin)
+        duration = 10
         if self.dut.read_only_enabled and self.dut.lock_override:
-            time.sleep(10)
-            if not self.at.await_and_confirm_led_pattern(LEDs['ENUM_LOCK_OVERRIDE_READ_ONLY'], timeout=15, replay_extra_context=context):
-                self.session.log_failure("Failed Admin unlock LED pattern")
+            pattern = 'ENUM_LOCK_OVERRIDE_READ_ONLY'
         elif self.dut.read_only_enabled:
-            time.sleep(10)
-            if not self.at.await_and_confirm_led_pattern(LEDs['ENUM_READ_ONLY'], timeout=15, replay_extra_context=context):
-                self.session.log_failure("Failed Admin unlock LED pattern")
+            pattern = 'ENUM_READ_ONLY'
         elif self.dut.lock_override:
-            time.sleep(10)
-            if not self.at.await_and_confirm_led_pattern(LEDs['ENUM_LOCK_OVERRIDE'], timeout=15, replay_extra_context=context):
-                self.session.log_failure("Failed Admin unlock LED pattern.")
+            pattern = 'ENUM_LOCK_OVERRIDE'
         else:
-            if not self.at.await_and_confirm_led_pattern(LEDs['ENUM_LEGACY'], timeout=15, replay_extra_context=context):
-                self.session.log_failure("Failed Admin unlock LED pattern")
-        
-    def _enter_self_destruct_pin(self, event_data: EventData) -> None:
+            pattern = 'ENUM'
+            duration = 0
+        time.sleep(duration)
+        if not self.at.await_and_confirm_led_pattern(LEDs[pattern], timeout=15, replay_extra_context=context):
+            self.session.log_failure("Failed Admin unlock LED pattern")
+            return False
+        return True
+    
+    @release_valve
+    def _enter_self_destruct_pin(self, event_data: EventData) -> bool:
         """
         Performs the sequence to unlock the device with the Self-Destruct PIN.
 
@@ -1299,23 +1330,24 @@ class ApricornDeviceFSM:
 
         self.logger.info("Unlocking self.dut with Self-Destruct PIN...")
         self._sequence(self.dut.self_destruct_pin)
+        duration = 10
         if self.dut.read_only_enabled and self.dut.lock_override:
-            time.sleep(10)
-            if not self.at.await_and_confirm_led_pattern(LEDs['ENUM_LOCK_OVERRIDE_READ_ONLY'], timeout=15, replay_extra_context=context):
-                self.session.log_failure("Failed Self-Destruct unlock LED pattern")
+            pattern = 'ENUM_LOCK_OVERRIDE_READ_ONLY'
         elif self.dut.read_only_enabled:
-            time.sleep(10)
-            if not self.at.await_and_confirm_led_pattern(LEDs['ENUM_READ_ONLY'], timeout=15, replay_extra_context=context):
-                self.session.log_failure("Failed Self-Destruct unlock LED pattern")
+            pattern = 'ENUM_READ_ONLY'
         elif self.dut.lock_override:
-            time.sleep(10)
-            if not self.at.await_and_confirm_led_pattern(LEDs['ENUM_LOCK_OVERRIDE'], timeout=15, replay_extra_context=context):
-                self.session.log_failure("Failed Self-Destruct unlock LED pattern")
+            pattern = 'ENUM_LOCK_OVERRIDE'
         else:
-            if not self.at.await_and_confirm_led_pattern(LEDs['ENUM'], timeout=15, replay_extra_context=context):
-                self.session.log_failure("Failed Self-Destruct unlock LED pattern")
-        
-    def _enter_user_pin(self, event_data: EventData) -> None:
+            pattern = 'ENUM'
+            duration = 0
+        time.sleep(duration)
+        if not self.at.await_and_confirm_led_pattern(LEDs[pattern], timeout=15, replay_extra_context=context):
+            self.session.log_failure("Failed Self-Destruct unlock LED pattern")
+            return False
+        return True
+    
+    @release_valve
+    def _enter_user_pin(self, event_data: EventData) -> bool:
         """
         Performs the sequence to unlock the device with a User PIN.
 
@@ -1346,26 +1378,27 @@ class ApricornDeviceFSM:
 
         self.logger.info(f"Attempting to unlock device with PIN from logical user slot {user_id}...")
         self._sequence(pin_to_enter)
+        duration = 10
         if self.dut.read_only_enabled and self.dut.lock_override:
-            time.sleep(10)
-            if not self.at.await_and_confirm_led_pattern(LEDs['ENUM_LOCK_OVERRIDE_READ_ONLY'], timeout=15, replay_extra_context=context):
-                self.session.log_failure(f"Failed User {user_id} unlock LED pattern")
+            pattern = 'ENUM_LOCK_OVERRIDE_READ_ONLY'
         elif self.dut.read_only_enabled:
-            time.sleep(10)
-            if not self.at.await_and_confirm_led_pattern(LEDs['ENUM_READ_ONLY'], timeout=15, replay_extra_context=context):
-                self.session.log_failure(f"Failed User {user_id} unlock LED pattern")
+            pattern = 'ENUM_READ_ONLY'
         elif self.dut.lock_override:
-            time.sleep(10)
-            if not self.at.await_and_confirm_led_pattern(LEDs['ENUM_LOCK_OVERRIDE'], timeout=15, replay_extra_context=context):
-                self.session.log_failure(f"Failed User {user_id} unlock LED pattern")
+            pattern = 'ENUM_LOCK_OVERRIDE'
         else:
-            if not self.at.await_and_confirm_led_pattern(LEDs['ENUM'], timeout=15, replay_extra_context=context):
-                self.session.log_failure(f"Failed User {user_id} unlock LED pattern")
+            pattern = 'ENUM'
+            duration = 0
+        time.sleep(duration)
+        if not self.at.await_and_confirm_led_pattern(LEDs[pattern], timeout=15, replay_extra_context=context):
+            self.session.log_failure(f"Failed User {user_id} unlock LED pattern")
+            return False
+        return True
     
 ##########
 ## Logins
 
-    def _enter_admin_mode_login(self, event_data: EventData) -> None:
+    @release_valve
+    def _enter_admin_mode_login(self, event_data: EventData) -> bool:
         """
         Performs the sequence to enter Admin configuration mode.
 
@@ -1384,10 +1417,13 @@ class ApricornDeviceFSM:
         context = {'fsm_current_state': self.state, 'fsm_destination_state': dest_state}
         self._press(['key0', 'unlock'], duration_ms=6000)
         if not self.at.confirm_led_pattern(LEDs['RED_LOGIN'], clear_buffer=True, replay_extra_context=context):
-                self.session.log_failure("Failed Admin Mode Login LED confirmation")
+            self.session.log_failure("Failed Admin Mode Login LED confirmation")
+            return False
         self._sequence(self.dut.admin_pin)
+        return True
 
-    def _enter_last_try_pin(self, event_data: EventData) -> None:
+    @release_valve
+    def _enter_last_try_pin(self, event_data: EventData) -> bool:
         """
         Performs the special login sequence for the 'last try' from brute force.
 
@@ -1402,12 +1438,15 @@ class ApricornDeviceFSM:
         self._press(['key5', 'unlock'], duration_ms=6000)
         if not self.at.await_and_confirm_led_pattern(LEDs["RED_GREEN"], timeout=10):
             self.session.log_failure("Failed 'LASTTRY' Login confirmation")
-        self._sequence(['key5', 'key2', 'key7', 'key8', 'key8', 'key7', 'key9', 'unlock']) 
+            return False
+        self._sequence(['key5', 'key2', 'key7', 'key8', 'key8', 'key7', 'key9', 'unlock'])
+        return True
 
 ##########
 ## Resets
 
-    def _do_user_reset(self, event_data: EventData) -> None:
+    @release_valve
+    def _do_user_reset(self, event_data: EventData) -> bool:
         """
         Performs a user reset (factory default) of the device.
 
@@ -1432,19 +1471,23 @@ class ApricornDeviceFSM:
             user_reset_initiate = self.at.await_and_confirm_led_pattern(LEDs["RED_BLUE"], timeout=15, replay_extra_context=context)
             if not user_reset_initiate:
                 self.session.log_failure("Failed to observe user reset initiation pattern")
+                return False
         time.sleep(5)
         self.at.off("lock", "unlock", "key2")
         user_reset_pattern = self.at.confirm_led_solid(LEDs["KEY_GENERATION"], minimum=10, timeout=15, replay_extra_context=context)
         if not user_reset_pattern:
             self.session.log_failure("Failed to observe user reset confirmation pattern")
+            return False
         
         self.dut._reset()
         self.logger.info("User reset confirmation pattern observed. Resetting self.dut model state...")
         self.dut.admin_pin = []
         self.dut.user_pin = {1: None, 2: None, 3: None, 4: None}
         self.logger.info("dut model state has been reset.")
+        return True
 
-    def _do_manufacturer_reset(self, event_data: EventData) -> None:
+    @release_valve
+    def _do_manufacturer_reset(self, event_data: EventData) -> bool:
         dest_state = event_data.transition.dest if event_data.transition else "UNKNOWN"
         context = {'fsm_current_state': self.state, 'fsm_destination_state': dest_state}
         if self.state == 'FACTORY_MODE':
@@ -1453,12 +1496,13 @@ class ApricornDeviceFSM:
             self._press("lock", duration_ms=6000)
         else:
             self.logger.info("Initiating Manufacturer Reset...")
-            self._sequence([["lock", "key2"], "key3", "key8"], pause_duration_ms=200)
+            self._sequence([["unlock", "key2"], "key3", "key8"], pause_duration_ms=200)
             time.sleep(.2)
-            self._press("lock", duration_ms=6000)
+            self._press("unlock", duration_ms=6000)
 
         if not self.at.await_and_confirm_led_pattern(LEDs['RED_GREEN_BLUE'], timeout=7, clear_buffer=True, replay_extra_context=context):
             self.session.log_failure("Failed Reset Ready LED confirmation")
+            return False
         
         portable = ["key1", "key2", "key3", "key4", "key5", "key6", "key7", "key8", "key9", "lock", "key0", "unlock"]
         secure_key = ["key1", "key2", "key3", "key4", "key5", "key6", "key7", "key8", "key9", "key0", "lock", "unlock"]
@@ -1474,6 +1518,7 @@ class ApricornDeviceFSM:
         if not self.at.confirm_led_pattern(LEDs['FIRST_KEY_KEYPAD_TEST'], clear_buffer=False, replay_extra_context=context):      ## First key is special because of previous LED pattern, Reset Ready Mode
             self.at.off(FIRST_KEY)
             self.session.log_failure("Failed 'key1' confirmation")
+            return False
         self.at.off(FIRST_KEY)
         self.at.confirm_led_solid(LEDs["ALL_OFF"], minimum=.15, timeout=1, clear_buffer=False, replay_extra_context=context)
 
@@ -1483,13 +1528,18 @@ class ApricornDeviceFSM:
             if not self.at.await_led_state(LEDs['ACCEPT_STATE'], timeout=1, clear_buffer=False, replay_extra_context=context):
                 self.at.off(key)
                 self.session.log_failure(f"Failed '{key}' confirmation")
+                return False
             self.at.off(key)
             self.at.confirm_led_solid(LEDs["ALL_OFF"], minimum=.15, timeout=1, clear_buffer=False, replay_extra_context=context)
 
         self.logger.info(f"Testing key: {LAST_KEY}")
         self._press(LAST_KEY)
-        self.at.confirm_led_solid(LEDs['KEY_GENERATION'], minimum=10, timeout=15, replay_extra_context=context)
+        if not self.at.confirm_led_solid(LEDs['KEY_GENERATION'], minimum=2, timeout=5, replay_extra_context=context):
+            self.session.log_failure("Failed Encryption Key confirmation")
+            return False
+        self.at.confirm_led_solid(LEDs['KEY_GENERATION'], minimum=6, timeout=15, replay_extra_context=context)
         self.dut._reset()
+        return True
 
 
 ##########

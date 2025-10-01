@@ -363,13 +363,13 @@ def block_0():
             loop_test.iteration += 1
             script_logger.info(f"Beginning iteration {loop_test.iteration}: (Block {session.current_test_block}) (({loop_test.time_check:.2f}h of {loop_test.test_duration}h))")
             
-            fsm.unlock_admin()
+            if fsm.unlock_admin():
 
-            if loop_test.should_run_action(test_id, loop_test.speed_test_config):
-                script_logger.info(f"ITERATION {loop_test.iteration}: Running speed test.")
-                fsm.speed_test()
-            
-            fsm.lock_admin()
+                if loop_test.should_run_action(test_id, loop_test.speed_test_config):
+                    script_logger.info(f"ITERATION {loop_test.iteration}: Running speed test.")
+                    fsm.speed_test()
+                
+                fsm.lock_admin()
 
             if loop_test.should_run_action(test_id, loop_test.power_cycle_config):
                 script_logger.info(f"ITERATION {loop_test.iteration}: Power cycling.")
@@ -416,13 +416,13 @@ def block_1():
             loop_test.iteration += 1
             script_logger.info(f"Beginning iteration {loop_test.iteration}: (Block {session.current_test_block}) (({loop_test.time_check:.2f}h of {loop_test.test_duration}h))")
             
-            fsm.manufacturer_reset()
+            if fsm.manufacturer_reset():
 
-            if loop_test.should_run_action(test_id, loop_test.speed_test_config):
-                script_logger.info(f"ITERATION {loop_test.iteration}: Running speed test.")
-                fsm.speed_test()
-                
-            fsm.lock_reset()
+                if loop_test.should_run_action(test_id, loop_test.speed_test_config):
+                    script_logger.info(f"ITERATION {loop_test.iteration}: Running speed test.")
+                    fsm.speed_test()
+                    
+                fsm.lock_reset()
 
             if loop_test.should_run_action(test_id, loop_test.power_cycle_config):
                 script_logger.info(f"ITERATION {loop_test.iteration}: Power cycling.")
@@ -561,14 +561,14 @@ def block_4():
             loop_test.iteration += 1
             script_logger.info(f"Beginning iteration {loop_test.iteration}: (Block {session.current_test_block}) (({loop_test.time_check:.2f}h of {loop_test.test_duration}h))")
             
-            fsm.unlock_admin()
-            fsm.format_operation()
+            if fsm.unlock_admin():
+                fsm.format_operation()
 
-            if loop_test.should_run_action(test_id, loop_test.speed_test_config):
-                script_logger.info(f"ITERATION {loop_test.iteration}: Running speed test.")
-                fsm.speed_test()
-            
-            fsm.lock_admin()
+                if loop_test.should_run_action(test_id, loop_test.speed_test_config):
+                    script_logger.info(f"ITERATION {loop_test.iteration}: Running speed test.")
+                    fsm.speed_test()
+                
+                fsm.lock_admin()
 
             if loop_test.should_run_action(test_id, loop_test.power_cycle_config):
                 script_logger.info(f"ITERATION {loop_test.iteration}: Power cycling.")
