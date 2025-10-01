@@ -4,6 +4,7 @@ import logging
 from pprint import pprint
 import random
 import time
+from functools import partial
 
 # --- Path Setup ---
 SCRIPT_DIR_ENROLL = os.path.dirname(os.path.abspath(__file__))
@@ -80,7 +81,7 @@ class StressTesting:
         Returns:
             A sorted list of integer test IDs to be executed.
         """
-        tests = ["Admin PIN",
+        tests = ["PIN Unlock (Random)",
                  "Manufacturer Reset",
                  "User Reset",
                  "Power Cycle",
@@ -330,19 +331,19 @@ class StressTesting:
     
 def block_0():
     """
-    Executes a stress test on the Admin PIN functionality.
+    Executes a stress test on the PIN unlock functionality.
 
     Test Flow:
-    1. Powers on the device and enrolls a new random Admin PIN.
+    1. Powers on the device and enrolls a random PIN (Admin or User) for each available slot.
     2. Enters a loop for the specified duration.
-    3. In each iteration, it unlocks the device with the Admin PIN to verify
+    3. In each iteration, it unlocks the device with randomly selected PIN to verify
        data access, and then locks it again.
     4. Optionally runs a speed test while unlocked.
     5. Optionally power-cycles the device between iterations.
     6. After the loop, it performs a user reset to clean the device for the next block.
     """
     test_id = 0
-    block_title = 'Admin PIN Unlock'
+    block_title = 'PIN Unlock'
     if test_id in loop_test.test_list:
         session.start_new_block(block_name=block_title, current_test_block=test_id)
         
@@ -352,8 +353,14 @@ def block_0():
         # --- Initial Setup for the Block ---
         script_logger.info(f"Setting up Block {test_id} ({block_title})...")
         fsm.power_on(usb3=is_usb3_initial)
+        options = []
         admin_pin = pin_gen.generate_valid_pin(dut.minimum_pin_counter)
         fsm.enroll_admin_pin(new_pin_sequence=admin_pin['sequence'])
+        options.append(fsm.unlock_admin)
+        for i in range(1, dut.user_count+1):
+            user_pin = pin_gen.generate_valid_pin(dut.minimum_pin_counter)
+            fsm.enroll_user_pin(new_pin_sequence=user_pin['sequence'])
+            options.append(partial(fsm.unlock_user, user_id=i))
         fsm.lock_admin()
         
         # --- Main Test Loop ---
@@ -363,13 +370,17 @@ def block_0():
             loop_test.iteration += 1
             script_logger.info(f"Beginning iteration {loop_test.iteration}: (Block {session.current_test_block}) (({loop_test.time_check:.2f}h of {loop_test.test_duration}h))")
             
-            if fsm.unlock_admin():
+            selected_option = random.choice(options)
+            if selected_option():
 
                 if loop_test.should_run_action(test_id, loop_test.speed_test_config):
                     script_logger.info(f"ITERATION {loop_test.iteration}: Running speed test.")
                     fsm.speed_test()
                 
-                fsm.lock_admin()
+                if fsm.state == "UNLOCKED_ADMIN":
+                    fsm.lock_admin()
+                elif fsm.state == "UNLOCKED_USER":
+                    fsm.lock_user()
 
             if loop_test.should_run_action(test_id, loop_test.power_cycle_config):
                 script_logger.info(f"ITERATION {loop_test.iteration}: Power cycling.")

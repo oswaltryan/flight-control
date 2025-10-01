@@ -1075,7 +1075,7 @@ class ApricornDeviceFSM:
             if device_info:
                 self._increment_enumeration_count('pin')
                 self.dut.serial_number = device_info.iSerial
-                if sys.platform == 'win32':
+                if sys.platform.startswith('win32'):
                     self.dut.disk_path = device_info.physicalDriveNum
                 elif sys.platform.startswith('linux'):
                     self.dut.disk_path = device_info.blockDevice
@@ -1301,7 +1301,7 @@ class ApricornDeviceFSM:
         elif self.dut.lock_override:
             pattern = 'ENUM_LOCK_OVERRIDE'
         else:
-            pattern = 'ENUM'
+            pattern = 'ENUM_LEGACY'
             duration = 0
         time.sleep(duration)
         if not self.at.await_and_confirm_led_pattern(LEDs[pattern], timeout=15, replay_extra_context=context):
@@ -1386,7 +1386,7 @@ class ApricornDeviceFSM:
         elif self.dut.lock_override:
             pattern = 'ENUM_LOCK_OVERRIDE'
         else:
-            pattern = 'ENUM'
+            pattern = 'ENUM_LEGACY'
             duration = 0
         time.sleep(duration)
         if not self.at.await_and_confirm_led_pattern(LEDs[pattern], timeout=15, replay_extra_context=context):
