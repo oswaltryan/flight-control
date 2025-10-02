@@ -359,7 +359,7 @@ class TestSession:
         """Logs a failure for a specific test block."""
         self.block_failure_count[self.current_test_block] += 1
         self.failure_block[self.current_test_block].append(failure_message)
-        self.logger.warning(failure_message)
+        self.logger.error(failure_message)
         
     def log_warning(self, block_name: str, warning_summary: str, warning_details: str = ""):
         """Logs a warning for a specific test block."""
@@ -454,17 +454,17 @@ class TestSession:
             else:
                 logger.info(f"Block {block_id} ({block_name}):")
                 if warnings:
-                    logger.warning(f"         Warning(s):")
+                    logger.info(f"         Warning(s):")
                     for w_summary in warnings:
-                        logger.warning(f"                     - {w_summary}")
+                        logger.info(f"                     - {w_summary}")
                 if failures:
                     logger.error(f"         Failure(s):")
                     for f_summary in failures:
                         logger.error(f"                     - {f_summary}")
         
                 logger.info("")
-        if total_warnings > 0: logger.warning(f"Total Number of Warnings: {total_warnings}")
-        if total_failures > 0: logger.error(f"Total Number of Failures: {total_failures}")
+        if total_warnings > 0: logger.info(f"Total Number of Warnings: {total_warnings}")
+        if total_failures > 0: logger.info(f"Total Number of Failures: {total_failures}")
         logger.info("")
 
         # --- Speed Test Results ---
@@ -486,7 +486,7 @@ class TestSession:
             logger.info("___________________________________")
 
         if self.usb3_fail_count > 0:
-            logger.warning(f"{self.usb3_fail_count} USB3 Failures detected during the session.")
+            logger.info(f"{self.usb3_fail_count} USB3 Failures detected during the session.")
 
         logger.info(f"{self.script_title} script complete.")
         logger.info("")
@@ -517,43 +517,20 @@ class TestSession:
         Returns:
             A string containing an aggregated summary of all failures, or None if no failures.
         """
-        # Step 1: Handle any missing data, like the interactive serial number prompt.
-        self._handle_missing_serial_number()
         
-        # Step 2: Generate and log the detailed report using the session object.
+        # Step 1: Generate and log the detailed report using the session object.
         self.generate_summary_report()
 
-        # Step 3: Perform final hardware cleanup.
+        # Step 2: Perform final hardware cleanup.
         self.logger.info("Powering down device at end of session.")
         self.at.off("usb3")
         self.at.off("connect")
         
-        # Step 4: Aggregate failure messages for external tools.
+        # Step 3: Aggregate failure messages for external tools.
         failure_string = self.get_failure_summary_string()
         if failure_string:
             return failure_string
         return None
-    
-    def _handle_missing_serial_number(self):
-        """
-        If the DUT serial number was not detected automatically, this method
-        prompts the user to enter it manually. This is an interactive step.
-        """
-        # This logic is specific to non-dev boards.
-        if self.dut.serial_number or "development-board" in self.dut.device_name:
-            return
-
-        while not self.dut.serial_number:
-            self.logger.info("")
-            user_input = input("DEVICE DID NOT ENUMERATE. Please input the 12-digit serial number: ")
-            self.logger.info("")
-
-            if not user_input.isnumeric() or len(user_input) != 12:
-                self.logger.warning(f"Invalid input. Serial number must be exactly 12 digits, but you entered {len(user_input)}.")
-                continue
-            
-            self.dut.serial_number = user_input
-            self.logger.info(f"Serial number manually set to: {self.dut.serial_number}")
 
 class CallableCondition:
     """
@@ -790,7 +767,6 @@ class ApricornDeviceFSM:
         self.lock_reset: Callable
         self.lock_user: Callable
         self.manufacturer_reset: Callable
-        self.post_fail: Callable
         self.post_pass: Callable
         self.power_off: Callable
         self.power_on: Callable
@@ -902,8 +878,7 @@ class ApricornDeviceFSM:
             self.post_pass()
         else:
             if not self.at.await_and_confirm_led_pattern(LEDs['ACCEPT_PATTERN'], timeout=5.0, replay_extra_context=context):
-                self.logger.error("Did not observe ACCEPT_PATTERN pattern. POST failed.")
-                self.post_fail()
+                self.session.log_failure("Did not observe ACCEPT_PATTERN pattern. POST failed.")
             else:
                 self.post_pass()
 
@@ -987,16 +962,10 @@ class ApricornDeviceFSM:
             self.power_off()
             self.session.log_failure("Failed to confirm OOB Mode LED pattern")
 
-        serial_to_check = self.dut.scanned_serial_number
-        if serial_to_check is None:
-            self.logger.error("Cannot confirm device enumeration: No serial number was scanned at startup.")
-            self.post_fail(details="OOB_ENUM_FAILED_NO_SERIAL")
-            return
-        
+        serial_to_check = self.dut.scanned_serial_number        
         is_stable, device_info = self.at.confirm_device_enum(serial_number=serial_to_check)
         if not is_stable:
-            self.logger.error(f"Device with serial {serial_to_check} did not enumerate correctly in OOB_MODE.")
-            self.post_fail(details="OOB_MODE_ENUM_FAILED")
+            self.session.log_failure(f"Device with serial {serial_to_check} did not enumerate correctly in OOB_MODE.")
         else:
             # Optional: You can now use the returned device_info object if needed.
             # For example, to update the DUT model with the most current info.
@@ -1060,15 +1029,9 @@ class ApricornDeviceFSM:
             event_data: The event data provided by the FSM.
         """
         serial_to_check = self.dut.scanned_serial_number
-        if serial_to_check is None:
-            self.logger.error("Cannot confirm device enumeration: No serial number was scanned at startup.")
-            self.post_fail(details="ADMIN_ENUM_FAILED_NO_SERIAL")
-            return
-        
         is_stable, device_info = self.at.confirm_drive_enum(serial_number=serial_to_check)
         if not is_stable:
-            self.logger.error(f"Device with serial {serial_to_check} did not enumerate correctly in UNLOCKED_ADMIN.")
-            self.post_fail(details="UNLOCKED_ADMIN_ENUM_FAILED")
+            self.session.log_failure(f"Device with serial {serial_to_check} did not enumerate correctly in UNLOCKED_ADMIN.")
         else:
             # Optional: You can now use the returned device_info object if needed.
             # For example, to update the DUT model with the most current info.
@@ -1094,15 +1057,9 @@ class ApricornDeviceFSM:
             event_data: The event data provided by the FSM.
         """
         serial_to_check = self.dut.scanned_serial_number
-        if serial_to_check is None:
-            self.logger.error("Cannot confirm device enumeration: No serial number was scanned at startup.")
-            self.post_fail(details="USER_ENUM_FAILED_NO_SERIAL")
-            return
-        
         is_stable, device_info = self.at.confirm_drive_enum(serial_number=serial_to_check)
         if not is_stable:
-            self.logger.error(f"Device with serial {serial_to_check} did not enumerate correctly in UNLOCKED_USER.")
-            self.post_fail(details="UNLOCKED_USER_ENUM_FAILED")
+            self.session.log_failure(f"Device with serial {serial_to_check} did not enumerate correctly in UNLOCKED_USER.")
         else:
             # Optional: You can now use the returned device_info object if needed.
             # For example, to update the DUT model with the most current info.
@@ -1130,16 +1087,10 @@ class ApricornDeviceFSM:
         if not self.at.await_and_confirm_led_pattern(LEDs['ENUM'], timeout=15):
                 self.session.log_failure("Failed Manufacturer Reset unlock LED pattern")
         
-        serial_to_check = self.dut.scanned_serial_number
-        if serial_to_check is None:
-            self.logger.error("Cannot confirm device enumeration: No serial number was scanned at startup.")
-            self.post_fail(details="RESET_ENUM_FAILED_NO_SERIAL")
-            return
-        
+        serial_to_check = self.dut.scanned_serial_number        
         is_stable, device_info = self.at.confirm_drive_enum(serial_number=serial_to_check)
         if not is_stable:
-            self.logger.error(f"Device with serial {serial_to_check} did not enumerate correctly in UNLOCKED_RESET.")
-            self.post_fail(details="UNLOCKED_RESET_ENUM_FAILED")
+            self.session.log_failure(f"Device with serial {serial_to_check} did not enumerate correctly in UNLOCKED_RESET.")
         else:
             # Optional: You can now use the returned device_info object if needed.
             # For example, to update the DUT model with the most current info.
@@ -1907,10 +1858,9 @@ class ApricornDeviceFSM:
         elif enrollment_type == 'recovery':
             next_available_slot = next((i for i in self.dut.recovery_pin.keys() if self.dut.recovery_pin.get(i) is None), None)
             if next_available_slot is None:
-                self.logger.warning(f"No available recovery slots. This path assumes a REJECT pattern will be shown by the device.")
                 if not self.at.await_and_confirm_led_pattern(LEDs['REJECT'], timeout=5.0, replay_extra_context=context):
                     self.session.log_failure("Did not observe REJECT on Recovery PIN Enrollment attempt when slots are full")
-                self.session.log_failure(f"Enrollment failed as expected: All {len(self.dut.recovery_pin)} recovery slots are full")
+                self.logger.info(f"Enrollment failed as expected: All {len(self.dut.recovery_pin)} recovery slots are full")
                 self.dut.pending_enrollment_type = None
                 return
 

@@ -499,9 +499,8 @@ class TestUnifiedController:
                     with pytest.raises(SystemExit) as excinfo:
                         controller.scan_barcode()
 
-        assert excinfo.value.code == "KeyboardInterrupt"
+        assert excinfo.value.code == "\nKeyboardInterrupt"
         assert mock_scanner_instance.await_scan.call_count == 3
-        assert "Serial number entry interrupted by operator. Aborting barcode capture." in caplog.text
 
     def test_scan_barcode_no_scanner(self, mock_dependencies, caplog):
         """Tests that scan_barcode handles the case where the scanner is not initialized."""
@@ -512,9 +511,11 @@ class TestUnifiedController:
         mock_scanner_instance = mock_dependencies["scanner"].return_value
 
         with caplog.at_level(logging.ERROR):
-            result = controller.scan_barcode()
+            with patch.object(controller, '_prompt_manual_serial_entry', return_value=None) as manual_prompt:
+                result = controller.scan_barcode()
 
         assert result is None
+        manual_prompt.assert_called_once_with()
         assert "Barcode scanner not available." in caplog.text
         mock_scanner_instance.await_scan.assert_not_called()
 

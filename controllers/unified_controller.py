@@ -221,7 +221,7 @@ class UnifiedController:
         if not self._phidget_controller: self.logger.error("Phidget not init for 'wait_for_input'."); return False
         return self._phidget_controller.wait_for_input(channel_name, expected_state, timeout_s, poll_interval_s)
     
-    def scan_barcode(self) -> Optional[str]:
+    def scan_barcode(self) -> str:
         """
         Triggers a new barcode scan and updates the controller's serial number.
 
@@ -230,26 +230,26 @@ class UnifiedController:
         """
         if not self._barcode_scanner:
             self.logger.error("Barcode scanner not available.")
-            return None
+            pass
+        else:
+            scanned_data = None
+            for retry in range(1, 4):
+                scanned_data = self._barcode_scanner.await_scan()
 
-        scanned_data = None
-        for retry in range(1, 4):
-            scanned_data = self._barcode_scanner.await_scan()
+                if scanned_data:
+                    self.logger.debug(f"Scanned Serial Number: {scanned_data}")
+                    self.scanned_serial_number = scanned_data
+                    return scanned_data
 
-            if scanned_data:
-                self.logger.debug(f"Scanned Serial Number: {scanned_data}")
-                self.scanned_serial_number = scanned_data
-                return scanned_data
-
-            if retry < 3:
-                self.logger.warning(
-                    f"Barcode scan attempt {retry} failed. Retrying in {self.scan_retry_delay_sec:.1f}s..."
-                )
-                time.sleep(self.scan_retry_delay_sec)
-            else:
-                self.logger.warning(
-                    f"Barcode scan attempt {retry} failed. On-demand barcode scan did not return data."
-                )
+                if retry < 3:
+                    self.logger.warning(
+                        f"Barcode scan attempt {retry} failed. Retrying in {self.scan_retry_delay_sec:.1f}s..."
+                    )
+                    time.sleep(self.scan_retry_delay_sec)
+                else:
+                    self.logger.warning(
+                        f"Barcode scan attempt {retry} failed. On-demand barcode scan did not return data."
+                    )
 
         manual_entry = self._prompt_manual_serial_entry()
         self.scanned_serial_number = manual_entry
