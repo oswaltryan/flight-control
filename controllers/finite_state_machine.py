@@ -172,6 +172,7 @@ class DeviceUnderTest:
         self.read_only_enabled: bool = False
 
         self.unattended_auto_lock_counter: int = 0
+        self.needs_block_orientation: bool = False
 
         self.user_forced_enrollment: bool = False
         self.user_forced_enrollment_used: bool = False
@@ -320,6 +321,7 @@ class TestSession:
         """Resets counters and timers for the start of a new test block."""
         self.block_start_time = time.time()
         self.current_test_block = current_test_block
+        self.dut.needs_block_orientation = True
         # Track mapping from block id to human-readable name
         self.test_blocks[self.current_test_block] = block_name
 
@@ -338,9 +340,15 @@ class TestSession:
         if self.dut.secure_key:
             self.at.on("hold")
 
+        self.logger.info(f"__________"*10)
+        self.logger.info("")
+
     def end_block(self):
         """Finalizes metrics for the completed test block."""
         self.block_end_time = time.time()
+        self.dut.needs_block_orientation = False
+        self.logger.info(f"__________"*10)
+        self.logger.info("")
 
     def log_key_press(self, key_name: str):
         """Increments the counter for a specific key press."""
@@ -383,7 +391,7 @@ class TestSession:
         logger = self.logger
         dut = self.dut
 
-        logger.info("" + "___________________________________" * 2)
+        # logger.info("" + "___________________________________" * 2)
         logger.info(f"{self.script_title} Script Details:")
         logger.info("___________________________________")
 
@@ -614,9 +622,18 @@ class ApricornDeviceFSM:
         # Define all transitions in a single list of dictionaries, including lambdas.
         transitions = [
             # --- Power On/Off Transitions ---
-            {'trigger': 'power_on', 'source': 'OFF', 'dest': 'POWER_ON_SELF_TEST', 'before': '_do_power_on'},
+            {'trigger': 'power_on', 'source': 'OFF', 'dest': 'POWER_ON_SELF_TEST', 'before': '_do_power_on', 'conditions': [CallableCondition(lambda _: not bool(self.dut.battery), "dut.battery == False")]},
             {'trigger': 'power_off', 'source': '*', 'dest': 'OFF', 'before': '_do_power_off'},
             # {'trigger': 'collect_error_number', 'source': '*', 'dest': 'ERROR_MODE'},
+
+            # --- 'Idle' Mode Transitions (battery-powered) ---
+            {'trigger': 'power_on', 'source': 'OFF', 'dest': 'FACTORY_MODE',  'before': '_do_power_on', 'conditions': [CallableCondition(lambda _: not bool(self.dut.completed_cmfr), "dut.completed_cmfr == False")]},
+            {'trigger': 'power_on', 'source': 'OFF', 'dest': 'BRUTE_FORCE',  'before': '_do_power_on', 'conditions': [CallableCondition(lambda _: self.dut.brute_force_counter_current == 0, "dut.brute_force_counter_current == 0")]},
+            {'trigger': 'power_on', 'source': 'OFF', 'dest': 'USER_FORCED_ENROLLMENT',  'before': '_do_power_on', 'conditions': [CallableCondition(lambda _: bool(self.dut.user_forced_enrollment), "dut.user_forced_enrollment == True")]},
+            {'trigger': 'power_on', 'source': 'OFF', 'dest': 'OOB_MODE',  'before': '_do_power_on', 'conditions': [CallableCondition(lambda _: not bool(self.dut.admin_pin), "dut.admiPIN not enrolled")]},
+            {'trigger': 'power_on', 'source': 'OFF', 'dest': 'STANDBY_MODE',  'before': '_do_power_on', 'conditions': [CallableCondition(lambda _: bool(self.dut.admin_pin), "dut.admin_pin enrolled")]},
+            {'trigger': 'user_reset', 'source': 'OFF', 'dest': 'OOB_MODE', 'before': '_do_user_reset', 'conditions': [CallableCondition(lambda _: not bool(self.dut.provision_lock) and bool (self.dut.battery), "dut.provision_lock == False AND dut.battery == True")]},
+            {'trigger': 'manufacturer_reset', 'source': 'OFF', 'dest': 'OOB_MODE', 'before': '_do_manufacturer_reset', 'conditions': [CallableCondition(lambda _: not bool(self.dut.provision_lock) and bool (self.dut.battery), "dut.provision_lock == False AND dut.battery == True")]},
 
             # --- 'Idle' Mode Transitions (from POST) ---
             {'trigger': 'post_pass', 'source': 'POWER_ON_SELF_TEST', 'dest': 'FACTORY_MODE', 'conditions': [CallableCondition(lambda _: not bool(self.dut.completed_cmfr), "dut.completed_cmfr == False")]},
@@ -740,6 +757,9 @@ class ApricornDeviceFSM:
         self.machine = Machine(**machine_kwargs)
         self.transition_config = transitions
 
+        self._block_orientation_log: Dict[int, str] = {}
+        self.orienting: bool = False
+
         # --- Public functions --- #
         self.admin_mode_login: Callable
         self.admin_recovery_failed: Callable
@@ -783,6 +803,49 @@ class ApricornDeviceFSM:
         self.unlock_user: Callable
         self.user_reset: Callable
 
+    def orient_for_block(
+        self,
+        *,
+        usb3: bool = True,
+        retry_attempts: int = 1,
+        retry_delay_sec: float = 3.0,
+    ) -> None:
+        """Ensure the device boots into OOB_MODE before block actions begin."""
+        self.orienting = True
+        self.logger.warning(
+            f"=== Block {self.session.current_test_block}: '{self.session.test_blocks[self.session.current_test_block]}' mode orientation ==="
+        )
+
+        self.dut.needs_block_orientation = False
+        total_attempts = max(0, int(retry_attempts)) + 1
+
+        for attempt in range(1, total_attempts + 1):
+            self.logger.info(
+                f"Mode orientation attempt {attempt}/{total_attempts} (usb3={usb3})."
+            )
+
+            if self.dut.provision_lock:
+                if self.manufacturer_reset():
+                    self.lock_reset()
+                    self.orienting = False
+                    self.dut.needs_block_orientation = False
+                    self.logger.warning(
+                        f"=== Block {self.session.current_test_block}: '{self.session.test_blocks[self.session.current_test_block]}' mode orientation success ==="
+                    )
+                    return
+            else:
+                if self.user_reset():
+                    self.orienting = False
+                    self.dut.needs_block_orientation = False
+                    self.logger.warning(
+                        f"=== Block {self.session.current_test_block}: '{self.session.test_blocks[self.session.current_test_block]}' mode orientation success ==="
+                    )
+                    return
+            time.sleep(retry_delay_sec)
+        self.logger.error("Mode orientation failed")
+        self.session.generate_summary_report()
+        raise SystemExit()
+
     def _log_state_change_details(self, event_data: EventData) -> None:
         """
         Logs the details of every state transition.
@@ -819,6 +882,15 @@ class ApricornDeviceFSM:
         else:
             self.session.log_key_press(channel_or_channels)
         self.at.press(channel_or_channels, **kwargs)
+
+    def _on(self, channel_or_channels: str, **kwargs):
+        """Tracks each key press and then executes the on action."""
+        if isinstance(channel_or_channels, list):
+            for key in channel_or_channels:
+                self.session.log_key_press(key)
+        else:
+            self.session.log_key_press(channel_or_channels)
+        self.at.on(channel_or_channels, **kwargs)
 
     def _increment_enumeration_count(self, enum_type: str):
         """Validates the enumeration type and logs it to the session."""
@@ -874,13 +946,10 @@ class ApricornDeviceFSM:
             'fsm_current_state': self.source_state,
             'fsm_destination_state': self.state
         }
-        if self.dut.battery:
-            self.post_pass()
-        else:
-            if not self.at.await_and_confirm_led_pattern(LEDs['ACCEPT_PATTERN'], timeout=5.0, replay_extra_context=context):
+        if not self.at.await_and_confirm_led_pattern(LEDs['ACCEPT_PATTERN'], timeout=5.0, replay_extra_context=context):
                 self.session.log_failure("Did not observe ACCEPT_PATTERN pattern. POST failed.")
-            else:
-                self.post_pass()
+        else:
+            self.post_pass()
 
     def on_enter_OFF(self, event_data: EventData) -> None:
         """
@@ -929,7 +998,7 @@ class ApricornDeviceFSM:
         else:
             keypad_test = ["key1", "key2", "key3", "key4", "key5", "key6", "key7", "key8", "key9", "lock", "key0", "unlock"]
             for key in keypad_test:
-                self.at.on(key)
+                self._on(key)
                 if not self.at.await_led_state(LEDs['ACCEPT_STATE'], timeout=1, clear_buffer=False, replay_extra_context=context):
                     self.at.off(key)
                     self.session.log_failure(f"Failed '{key}' confirmation")
@@ -959,8 +1028,9 @@ class ApricornDeviceFSM:
             self.logger.info("Stable OOB_MODE confirmed.")
         else:
             self.dut.completed_cmfr = False
-            self.power_off()
             self.session.log_failure("Failed to confirm OOB Mode LED pattern")
+            if self.dut.needs_block_orientation:
+                self.orient_for_block()
 
         serial_to_check = self.dut.scanned_serial_number        
         is_stable, device_info = self.at.confirm_device_enum(serial_number=serial_to_check)
@@ -1418,14 +1488,21 @@ class ApricornDeviceFSM:
         if self.state == "ADMIN_MODE":
             self._sequence([["lock", "unlock", "key2"]], pause_duration_ms=100)
         else:
-            self.at.on("lock", "unlock", "key2")
-            user_reset_initiate = self.at.await_and_confirm_led_pattern(LEDs["RED_BLUE"], timeout=15, replay_extra_context=context)
+            self._on("lock")
+            self._on("unlock")
+            self._on("key2")
+            if self.dut.battery:
+                pattern = LEDs["USER_RESET_KEY"]
+            else:
+                pattern = LEDs["RED_BLUE"]
+            user_reset_initiate = self.at.await_and_confirm_led_pattern(pattern, timeout=15, replay_extra_context=context)
             if not user_reset_initiate:
+                self.at.off("lock", "unlock", "key2")
                 self.session.log_failure("Failed to observe user reset initiation pattern")
                 return False
-        time.sleep(5)
+        time.sleep(10)
         self.at.off("lock", "unlock", "key2")
-        user_reset_pattern = self.at.confirm_led_solid(LEDs["KEY_GENERATION"], minimum=10, timeout=15, replay_extra_context=context)
+        user_reset_pattern = self.at.confirm_led_solid(LEDs["KEY_GENERATION"], minimum=8, timeout=15, replay_extra_context=context)
         if not user_reset_pattern:
             self.session.log_failure("Failed to observe user reset confirmation pattern")
             return False
@@ -1435,6 +1512,8 @@ class ApricornDeviceFSM:
         self.dut.admin_pin = []
         self.dut.user_pin = {1: None, 2: None, 3: None, 4: None}
         self.logger.info("dut model state has been reset.")
+        if self.orienting:
+            self.at.on("connect")
         return True
 
     @release_valve
@@ -1447,9 +1526,9 @@ class ApricornDeviceFSM:
             self._press("lock", duration_ms=6000)
         else:
             self.logger.info("Initiating Manufacturer Reset...")
-            self._sequence([["unlock", "key2"], "key3", "key8"], pause_duration_ms=200)
+            self._sequence([["lock", "key2"], "key3", "key8"], pause_duration_ms=200)
             time.sleep(.2)
-            self._press("unlock", duration_ms=6000)
+            self._press("lock", duration_ms=6000)
 
         if not self.at.await_and_confirm_led_pattern(LEDs['RED_GREEN_BLUE'], timeout=7, clear_buffer=True, replay_extra_context=context):
             self.session.log_failure("Failed Reset Ready LED confirmation")
@@ -1465,7 +1544,7 @@ class ApricornDeviceFSM:
             OTHER_KEYS = portable[1:-1]
 
         self.logger.info(f"Testing key: {FIRST_KEY}")
-        self.at.on(FIRST_KEY)
+        self._on(FIRST_KEY)
         if not self.at.confirm_led_pattern(LEDs['FIRST_KEY_KEYPAD_TEST'], clear_buffer=False, replay_extra_context=context):      ## First key is special because of previous LED pattern, Reset Ready Mode
             self.at.off(FIRST_KEY)
             self.session.log_failure("Failed 'key1' confirmation")
@@ -1475,7 +1554,7 @@ class ApricornDeviceFSM:
 
         for key in OTHER_KEYS:
             self.logger.info(f"Testing key: {key}")
-            self.at.on(key)
+            self._on(key)
             if not self.at.await_led_state(LEDs['ACCEPT_STATE'], timeout=1, clear_buffer=False, replay_extra_context=context):
                 self.at.off(key)
                 self.session.log_failure(f"Failed '{key}' confirmation")

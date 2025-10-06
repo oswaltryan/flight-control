@@ -374,7 +374,6 @@ def block_0():
             if selected_option():
 
                 if loop_test.should_run_action(test_id, loop_test.speed_test_config):
-                    script_logger.info(f"ITERATION {loop_test.iteration}: Running speed test.")
                     fsm.speed_test()
                 
                 if fsm.state == "UNLOCKED_ADMIN":
@@ -383,7 +382,6 @@ def block_0():
                     fsm.lock_user()
 
             if loop_test.should_run_action(test_id, loop_test.power_cycle_config):
-                script_logger.info(f"ITERATION {loop_test.iteration}: Power cycling.")
                 fsm.power_off()
                 is_usb3_cycle = loop_test.setUSBProtocol(test_id)
                 fsm.power_on(usb3=is_usb3_cycle)
@@ -430,13 +428,11 @@ def block_1():
             if fsm.manufacturer_reset():
 
                 if loop_test.should_run_action(test_id, loop_test.speed_test_config):
-                    script_logger.info(f"ITERATION {loop_test.iteration}: Running speed test.")
                     fsm.speed_test()
                     
                 fsm.lock_reset()
 
             if loop_test.should_run_action(test_id, loop_test.power_cycle_config):
-                script_logger.info(f"ITERATION {loop_test.iteration}: Power cycling.")
                 fsm.power_off()
                 is_usb3_cycle = loop_test.setUSBProtocol(test_id)
                 fsm.power_on(usb3=is_usb3_cycle)
@@ -481,11 +477,11 @@ def block_2():
             # User Reset requires being in Admin Mode. The device starts in OOB mode after the last reset.
             admin_pin = pin_gen.generate_valid_pin(dut.minimum_pin_counter)
             fsm.enroll_admin_pin(new_pin_sequence=admin_pin['sequence'])
+            fsm.lock_admin()
             fsm.user_reset()
             # After a user reset, we are back in OOB mode, ready for the next iteration.
 
             if loop_test.should_run_action(test_id, loop_test.power_cycle_config):
-                script_logger.info(f"ITERATION {loop_test.iteration}: Power cycling.")
                 fsm.power_off()
                 is_usb3_cycle = loop_test.setUSBProtocol(test_id)
                 fsm.power_on(usb3=is_usb3_cycle)
@@ -576,13 +572,11 @@ def block_4():
                 fsm.format_operation()
 
                 if loop_test.should_run_action(test_id, loop_test.speed_test_config):
-                    script_logger.info(f"ITERATION {loop_test.iteration}: Running speed test.")
                     fsm.speed_test()
                 
                 fsm.lock_admin()
 
             if loop_test.should_run_action(test_id, loop_test.power_cycle_config):
-                script_logger.info(f"ITERATION {loop_test.iteration}: Power cycling.")
                 fsm.power_off()
                 is_usb3_cycle = loop_test.setUSBProtocol(test_id)
                 fsm.power_on(usb3=is_usb3_cycle)
