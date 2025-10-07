@@ -347,8 +347,6 @@ class TestSession:
         """Finalizes metrics for the completed test block."""
         self.block_end_time = time.time()
         self.dut.needs_block_orientation = False
-        self.logger.info(f"__________"*10)
-        self.logger.info("")
 
     def log_key_press(self, key_name: str):
         """Increments the counter for a specific key press."""
@@ -391,9 +389,10 @@ class TestSession:
         logger = self.logger
         dut = self.dut
 
-        # logger.info("" + "___________________________________" * 2)
-        logger.info(f"{self.script_title} Script Details:")
-        logger.info("___________________________________")
+        self.logger.info(f"__________"*10)
+        self.logger.info("")
+        self.logger.info(f"{self.script_title} Script Details:")
+        self.logger.info("____"*10)
 
         # --- Keypress Totals ---
         logger.info("Keypress Totals:")
@@ -422,7 +421,7 @@ class TestSession:
                 logger.info(row_str)
         else:
             logger.info("  No key presses were tracked.")
-        logger.info("___________________________________")
+        self.logger.info("____"*10)
 
         # --- Enumeration Totals ---
         logger.info("Enumerations Totals:")
@@ -445,7 +444,7 @@ class TestSession:
             logger.info("Block {:<2}: {:^5} | {:^5} | {:^5} | {:^5} |".format(block_id, resets, oob, pin, spi))
         
         logger.info("Total   : {:^5} | {:^5} | {:^5} | {:^5} |".format(total_resets, total_oob, total_pin, total_spi))
-        logger.info("___________________________________")
+        self.logger.info("____"*10)
 
         # --- Block Results (Failures/Warnings) ---
         logger.info("Block Result:")
@@ -453,14 +452,23 @@ class TestSession:
         total_failures = sum(len(v) for v in self.failure_block.values())
         total_warnings = sum(len(v) for v in self.warning_block.values())
 
+        block_headers = {
+            block_id: f"Block {block_id} ({block_name}):"
+            for block_id, block_name in self.test_blocks.items()
+        }
+        header_width = max((len(text) for text in block_headers.values()), default=0)
+        status_padding = 2  # Align status labels with a consistent gap
+
         for block_id, block_name in self.test_blocks.items():
             failures = self.failure_block.get(block_id, [])
             warnings = self.warning_block.get(block_id, [])
+            header = block_headers[block_id]
 
             if not failures and not warnings:
-                logger.info(f"Block {block_id} ({block_name}): Passed")
+                padded_header = f"{header:<{header_width + status_padding}}"
+                logger.info(f"{padded_header}Passed")
             else:
-                logger.info(f"Block {block_id} ({block_name}):")
+                logger.info(header)
                 if warnings:
                     logger.info(f"         Warning(s):")
                     for w_summary in warnings:
@@ -491,7 +499,7 @@ class TestSession:
             if all_writes:
                 logger.info("  Write:")
                 logger.info(f"    Min: {min(all_writes):.1f} MB/s, Max: {max(all_writes):.1f} MB/s, Avg: {statistics.mean(all_writes):.1f} MB/s")
-            logger.info("___________________________________")
+            self.logger.info("____"*10)
 
         if self.usb3_fail_count > 0:
             logger.info(f"{self.usb3_fail_count} USB3 Failures detected during the session.")
