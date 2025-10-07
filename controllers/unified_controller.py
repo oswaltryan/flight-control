@@ -620,121 +620,245 @@ class UnifiedController:
             self.logger.error(f"Failed to parse FIO JSON output: {e}", exc_info=True)
             return None
 
-    def run_fio_tests(self, disk_path: str, duration: int = 10, tests_to_run: Optional[List[Dict[str, Any]]] = None) -> Optional[Dict[str, float]]:
-        """
-        Runs a series of specified FIO speed tests directly on the block device.
+
+    def _has_admin_privileges(self) -> bool:
+        '''Return True if the process is running with raw disk privileges.'''
+        if sys.platform != 'win32':
+            return True
+        try:
+            import ctypes  # type: ignore
+            return bool(ctypes.windll.shell32.IsUserAnAdmin())
+        except Exception:  # pragma: no cover - defensive; should not trigger on Windows
+            self.logger.debug(
+                'Unable to determine Windows administrator privileges; assuming elevated.',
+                exc_info=True,
+            )
+            return True
+
+    def _normalize_windows_drive_letter(self, drive_letter: Optional[str]) -> Optional[str]:
+        '''Normalize a drive letter string (e.g., "E:" or "E:, F:") to the form "E:".'''
+        if not drive_letter:
+            return None
+        candidate = drive_letter.split(',')[0].strip()
+        if not candidate or candidate.upper() == 'N/A':
+            return None
+        candidate = candidate.replace('\\', '').replace('/', '')
+        if candidate.endswith(':'):
+            candidate = candidate[:-1]
+        if len(candidate) != 1 or not candidate.isalpha():
+            return None
+        return f"{candidate.upper()}:"
+
+    def run_fio_tests(
+        self,
+        disk_path: str,
+        duration: int = 10,
+        tests_to_run: Optional[List[Dict[str, Any]]] = None,
+        drive_letter: Optional[str] = None,
+    ) -> Optional[Dict[str, float]]:
+        '''
+        Runs a series of specified FIO speed tests directly on the block device
+        or via a file-based fallback when elevated privileges are unavailable.
 
         Args:
-            disk_path (str): The device path.
-                             On Linux: e.g., '/dev/sdb'
-                             On Windows: e.g., 'PhysicalDrive1'
-            duration (int): The runtime in seconds for each test.
-            tests_to_run (Optional[List[Dict]]): A list of dictionaries defining
-                custom tests. If None, default tests are used.
-        
+            disk_path: Device path (e.g., '/dev/sdb' or 'PhysicalDrive1').
+            duration: Runtime in seconds for each test.
+            tests_to_run: Optional set of test definitions; defaults to sequential R/W.
+            drive_letter: Optional drive letter for Windows fallback testing.
+
         Returns:
-            A single dictionary containing all results, or None if the sequence failed.
-        """
+            Aggregated read/write results when successful; otherwise None.
+        '''
         if tests_to_run is None:
-            self.logger.debug("No specific tests provided, using default sequential R/W tests.")
+            self.logger.debug('No specific tests provided, using default sequential R/W tests.')
             tests_to_run = [
                 {
-                    "name": "W-SEQ-1M-Q32",
-                    "rw": "write",
-                    "bs": "1m",
-                    "iodepth": 32
+                    'name': 'W-SEQ-1M-Q32',
+                    'rw': 'write',
+                    'bs': '1m',
+                    'iodepth': 32,
                 },
                 {
-                    "name": "R-SEQ-1M-Q32",
-                    "rw": "read",
-                    "bs": "1m",
-                    "iodepth": 32
-                }
+                    'name': 'R-SEQ-1M-Q32',
+                    'rw': 'read',
+                    'bs': '1m',
+                    'iodepth': 32,
+                },
             ]
 
-        self.logger.debug(f"Starting FIO speed test sequence for {duration}s each.")
-        
+        self.logger.debug('Starting FIO speed test sequence for %ss each.', duration)
+
         try:
             fio_path = self._get_fio_path()
-        except (FileNotFoundError, NotImplementedError) as e:
-            self.logger.error(f"Cannot run FIO tests: {e}")
+        except (FileNotFoundError, NotImplementedError) as exc:
+            self.logger.error('Cannot run FIO tests: %s', exc)
             raise
-        
+
+        temp_file_path: Optional[str] = None
+        using_temp_file = False
+
         if sys.platform == 'win32':
             disk_path_str = str(disk_path)
-            # Check if the path is just a number (e.g., "3"). If so, prepend "PhysicalDrive".
             if disk_path_str.isdigit():
-                win_path = f"PhysicalDrive{disk_path_str}"
+                win_path = f'PhysicalDrive{disk_path_str}'
+            elif disk_path_str.lower().startswith('\\.') and len(disk_path_str) > 4 and disk_path_str[4] == '\\':
+                win_path = disk_path_str[4:]
             else:
-                win_path = disk_path_str # Assume it's already correctly named "PhysicalDriveX"
+                win_path = disk_path_str
 
-            # For raw device access on Windows, the format is \\.\PhysicalDriveN
             fio_target_device = f"\\\\.\\{win_path}"
-            self.logger.debug(f"Targeting raw Windows device: {fio_target_device}")
-        else:
-            # On Linux, the path is already in the correct format (e.g., /dev/sdb)
-            fio_target_device = disk_path
-            self.logger.debug(f"Targeting raw Linux device: {fio_target_device}")
 
-        combined_results = {}
-
-        for test_params in tests_to_run:
-            self.logger.debug(f"--- Preparing FIO test: {test_params.get('name', 'Unnamed')} ---")
-            
-            base_command = [fio_path]
-
-            if sys.platform.startswith('linux'):
-                base_command.extend(["--ioengine=libaio"])
-            elif sys.platform == 'win32':
-                base_command.extend(["--ioengine=windowsaio", "--thread"])
-            
-            base_command.extend([
-                "--direct=1",
-                "--output-format=json",
-                "--random_generator=tausworthe64",
-                f"--filename={fio_target_device}", # Use the correctly formatted device path
-                f"--runtime={duration}",
-                f"--name={test_params.get('name')}",
-                f"--rw={test_params.get('rw')}",
-                f"--bs={test_params.get('bs')}",
-                f"--iodepth={test_params.get('iodepth')}",
-                "--group_reporting"
-            ])
-            
-            try:
-                self.logger.debug(f"Executing command: {' '.join(base_command)}")
-                # IMPORTANT: FIO may require administrator/root privileges for raw device access.
-                # The calling script should be run with sudo/as Administrator.
-                result = subprocess.run(base_command, check=True, capture_output=True, text=True)
-                
-                parsed_result = self._parse_fio_json_output(result.stdout)
-                if parsed_result:
-                    self.logger.debug(f"--- FIO Test '{test_params.get('name')}' Result: {parsed_result} MB/s")
-                    combined_results.update(parsed_result)
-                else:
-                    self.logger.error(f"Failed to parse results for FIO test '{test_params.get('name')}'.")
+            if not self._has_admin_privileges():
+                normalized_drive = self._normalize_windows_drive_letter(drive_letter)
+                if not normalized_drive:
+                    self.logger.error(
+                        'Administrator privileges are required for raw disk testing and no drive letter fallback was provided.',
+                    )
+                    self.logger.error(
+                        'Run the toolkit as Administrator or provide a mounted drive letter for file-based FIO testing.',
+                    )
                     return None
 
-                if result.stderr:
-                    self.logger.warning(f"FIO Stderr: {result.stderr}")
+                drive_root = f"{normalized_drive}{os.sep}"
+                if not os.path.isdir(drive_root):
+                    self.logger.error(
+                        'Fallback drive letter %s is not accessible.',
+                        normalized_drive,
+                    )
+                    return None
 
-            except FileNotFoundError:
-                self.logger.error(f"FIO command not found at '{fio_path}'.")
-                raise
-            except subprocess.CalledProcessError as e:
-                self.logger.error(f"FIO test '{test_params.get('name')}' failed with exit code {e.returncode}.")
-                self.logger.error(f"  This can happen if the script is not run with administrator/root privileges.")
-                self.logger.error(f"  Stdout: {e.stdout}")
-                self.logger.error(f"  Stderr: {e.stderr}")
-                return None
-            except Exception as e:
-                self.logger.error(f"An unexpected error occurred during FIO test: {e}", exc_info=True)
-                return None
-        
-        self.logger.info(f"Read: {combined_results['read']}")
-        self.logger.info(f"Write: {combined_results['write']}")
-        self.logger.info("FIO test sequence completed successfully.")
-        return combined_results
+                temp_file_path = os.path.normpath(
+                    os.path.join(drive_root, 'apricorn_fio_benchmark.bin')
+                )
+
+                if os.path.exists(temp_file_path):
+                    try:
+                        os.remove(temp_file_path)
+                        self.logger.debug(
+                            'Removed stale FIO benchmark file %s.',
+                            temp_file_path,
+                        )
+                    except OSError as cleanup_error:
+                        self.logger.warning(
+                            'Could not remove existing benchmark file %s: %s',
+                            temp_file_path,
+                            cleanup_error,
+                        )
+
+                fio_target_device = temp_file_path
+                using_temp_file = True
+                self.logger.warning(
+                    'Administrator privileges not detected; running FIO against temporary file %s.',
+                    fio_target_device,
+                )
+                self.logger.debug(
+                    'Targeting Windows fallback file: %s',
+                    fio_target_device,
+                )
+            else:
+                self.logger.debug(
+                    'Targeting raw Windows device: %s',
+                    fio_target_device,
+                )
+        else:
+            fio_target_device = disk_path
+            self.logger.debug(
+                'Targeting raw Linux device: %s',
+                fio_target_device,
+            )
+
+        combined_results: Dict[str, float] = {}
+
+        try:
+            for test_params in tests_to_run:
+                self.logger.debug('--- Preparing FIO test: %s ---', test_params.get('name', 'Unnamed'))
+
+                base_command = [fio_path]
+
+                if sys.platform.startswith('linux'):
+                    base_command.extend(['--ioengine=libaio'])
+                elif sys.platform == 'win32':
+                    base_command.extend(['--ioengine=windowsaio', '--thread'])
+
+                base_command.extend([
+                    '--direct=1',
+                    '--output-format=json',
+                    '--random_generator=tausworthe64',
+                    f'--filename={fio_target_device}',
+                    f'--runtime={duration}',
+                    f"--name={test_params.get('name')}",
+                    f"--rw={test_params.get('rw')}",
+                    f"--bs={test_params.get('bs')}",
+                    f"--iodepth={test_params.get('iodepth')}",
+                    '--group_reporting',
+                ])
+
+                try:
+                    self.logger.debug('Executing command: %s', ' '.join(base_command))
+                    result = subprocess.run(base_command, check=True, capture_output=True, text=True)
+
+                    parsed_result = self._parse_fio_json_output(result.stdout)
+                    if parsed_result:
+                        self.logger.debug(
+                            "--- FIO Test '%s' Result: %s MB/s",
+                            test_params.get('name'),
+                            parsed_result,
+                        )
+                        combined_results.update(parsed_result)
+                    else:
+                        self.logger.error(
+                            "Failed to parse results for FIO test '%s'.",
+                            test_params.get('name'),
+                        )
+                        return None
+
+                    if result.stderr:
+                        self.logger.warning('FIO Stderr: %s', result.stderr)
+
+                except FileNotFoundError:
+                    self.logger.error("FIO command not found at '%s'.", fio_path)
+                    raise
+                except subprocess.CalledProcessError as exc:
+                    self.logger.error(
+                        "FIO test '%s' failed with exit code %s.",
+                        test_params.get('name'),
+                        exc.returncode,
+                    )
+                    self.logger.error(
+                        '  This can happen if the script is not run with administrator/root privileges.',
+                    )
+                    self.logger.error('  Stdout: %s', exc.stdout)
+                    self.logger.error('  Stderr: %s', exc.stderr)
+                    return None
+                except Exception as exc:  # pragma: no cover - defensive
+                    self.logger.error(
+                        'An unexpected error occurred during FIO test: %s',
+                        exc,
+                        exc_info=True,
+                    )
+                    return None
+
+            if 'read' in combined_results:
+                self.logger.info('Read: %s', combined_results['read'])
+            if 'write' in combined_results:
+                self.logger.info('Write: %s', combined_results['write'])
+            if combined_results:
+                self.logger.info('FIO test sequence completed successfully.')
+            return combined_results if combined_results else None
+        finally:
+            if using_temp_file and temp_file_path and os.path.exists(temp_file_path):
+                try:
+                    os.remove(temp_file_path)
+                    self.logger.debug(
+                        'Removed temporary FIO benchmark file %s.',
+                        temp_file_path,
+                    )
+                except OSError as cleanup_error:
+                    self.logger.warning(
+                        'Failed to remove temporary FIO benchmark file %s: %s',
+                        temp_file_path,
+                        cleanup_error,
+                    )
 
     # --- FSM Event Handling Callbacks (High-Level) ---
     def handle_post_failure(self, event_data: Any) -> None: 

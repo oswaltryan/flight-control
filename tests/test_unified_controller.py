@@ -570,40 +570,33 @@ class TestUnifiedController:
         """
         controller = UnifiedController(scan_retry_delay_sec=0)
 
-        # GIVEN: Mock JSON outputs for a write test and a read test
         mock_write_json = '{"jobs": [{"write": {"io_bytes": 1, "bw_bytes": 150000000}}]}'
         mock_read_json = '{"jobs": [{"read": {"io_bytes": 1, "bw_bytes": 250000000}}]}'
 
-        # Configure the mock subprocess to return these outputs in sequence
         mock_write_result = MagicMock(stdout=mock_write_json)
         mock_read_result = MagicMock(stdout=mock_read_json)
-        
-        with patch.object(unified_controller_module, 'subprocess') as mock_subprocess:
-            with patch.object(controller, '_get_fio_path', return_value='mock_fio_path'):
-                # Set the side_effect to return the write result first, then the read result
-                mock_subprocess.run.side_effect = [mock_write_result, mock_read_result]
-                
-                # --- Test Windows Path ---
-                monkeypatch.setattr(sys, 'platform', 'win32')
-                # WHEN
-                final_results_win = controller.run_fio_tests(disk_path="3")
-                
-                # THEN
-                fio_command_args_win = mock_subprocess.run.call_args_list[0].args[0]
-                assert any(arg.endswith("\\\\.\\PhysicalDrive3") for arg in fio_command_args_win)
-                assert final_results_win == {'write': 150.0, 'read': 250.0}
 
-                # --- Test Linux Path ---
-                mock_subprocess.run.reset_mock()
-                mock_subprocess.run.side_effect = [mock_write_result, mock_read_result] # Reset side effect
-                monkeypatch.setattr(sys, 'platform', 'linux')
-                # WHEN
-                final_results_linux = controller.run_fio_tests(disk_path="/dev/sdb")
-                
-                # THEN
-                fio_command_args_linux = mock_subprocess.run.call_args_list[0].args[0]
-                assert any(arg.endswith("/dev/sdb") for arg in fio_command_args_linux)
-                assert final_results_linux == {'write': 150.0, 'read': 250.0}
+        with patch.object(unified_controller_module, 'subprocess') as mock_subprocess, \
+             patch.object(controller, '_get_fio_path', return_value='mock_fio_path'), \
+             patch.object(controller, '_has_admin_privileges', return_value=True):
+            mock_subprocess.run.side_effect = [mock_write_result, mock_read_result]
+
+            monkeypatch.setattr(sys, 'platform', 'win32')
+            final_results_win = controller.run_fio_tests(disk_path="3", drive_letter="E:")
+
+            fio_command_args_win = mock_subprocess.run.call_args_list[0].args[0]
+            assert any(arg.endswith('\\.\\PhysicalDrive3') for arg in fio_command_args_win)
+            assert final_results_win == {'write': 150.0, 'read': 250.0}
+
+            mock_subprocess.run.reset_mock()
+            mock_subprocess.run.side_effect = [mock_write_result, mock_read_result]
+            monkeypatch.setattr(sys, 'platform', 'linux')
+
+            final_results_linux = controller.run_fio_tests(disk_path='/dev/sdb')
+
+            fio_command_args_linux = mock_subprocess.run.call_args_list[0].args[0]
+            assert any(arg.endswith('/dev/sdb') for arg in fio_command_args_linux)
+            assert final_results_linux == {'write': 150.0, 'read': 250.0}
 
     def test_parse_fio_json_output(self, mock_dependencies):
         controller = UnifiedController(scan_retry_delay_sec=0)
@@ -1197,7 +1190,8 @@ class TestFioHelpers:
         # --- ARRANGE ---
         monkeypatch.setattr(sys, 'platform', 'win32')
         with patch.object(controller, '_get_fio_path', return_value='fio.exe'), \
-             patch.object(unified_controller_module, 'subprocess') as mock_subprocess:
+             patch.object(unified_controller_module, 'subprocess') as mock_subprocess, \
+             patch.object(controller, '_has_admin_privileges', return_value=True):
             
             # THE FIX: Configure the mock to return a valid result object.
             # This prevents the TypeError inside json.loads().
@@ -1205,7 +1199,7 @@ class TestFioHelpers:
             mock_subprocess.run.return_value = mock_result
             
             # --- ACT ---
-            controller.run_fio_tests(disk_path="PhysicalDrive1")
+            controller.run_fio_tests(disk_path="PhysicalDrive1", drive_letter="E:")
 
         # --- ASSERT ---
         called_args = mock_subprocess.run.call_args.args[0]
@@ -1234,6 +1228,7 @@ class TestFioHelpers:
         # Mock _get_fio_path to prevent its own logic from running
         # Patch subprocess.run directly within the module where it's imported (unified_controller_module).
         with patch.object(controller, '_get_fio_path', return_value='fio'), \
+             patch.object(controller, '_has_admin_privileges', return_value=True), \
              patch.object(unified_controller_module.subprocess, 'run') as mock_subprocess_run:
             
             # Configure the mocked run method to raise the exception for this test case
@@ -1259,7 +1254,8 @@ class TestFioHelpers:
 
         # Patch the specific `run` function within the module's `subprocess` object
         # FIX: Use patch.object on the module's subprocess.run for precise control.
-        with patch.object(unified_controller_module.subprocess, 'run') as mock_subprocess_run:
+        with patch.object(controller, '_has_admin_privileges', return_value=True), \
+             patch.object(unified_controller_module.subprocess, 'run') as mock_subprocess_run:
             # Configure subprocess.run to raise the FileNotFoundError
             # FIX: Raise the FileNotFoundError instance. The exact message is OS-dependent,
             # but the type is consistent.
@@ -1290,6 +1286,7 @@ class TestFioHelpers:
         # --- ARRANGE ---
         # Mock all dependencies to isolate the parsing logic.
         with patch.object(controller, '_get_fio_path', return_value='fio'), \
+             patch.object(controller, '_has_admin_privileges', return_value=True), \
              patch.object(unified_controller_module, 'subprocess') as mock_subprocess, \
              patch.object(controller, '_parse_fio_json_output', return_value=None) as mock_parse:
             
@@ -1305,6 +1302,32 @@ class TestFioHelpers:
             assert "Failed to parse results" in caplog.text
             mock_parse.assert_called_once()
 
+    def test_run_fio_tests_windows_fallback_to_file_when_not_admin(self, controller, monkeypatch):
+        monkeypatch.setattr(sys, 'platform', 'win32')
+        with patch.object(controller, '_get_fio_path', return_value='fio.exe'), \
+             patch.object(controller, '_has_admin_privileges', return_value=False), \
+             patch.object(unified_controller_module, 'subprocess') as mock_subprocess, \
+             patch.object(unified_controller_module.os.path, 'isdir', return_value=True), \
+             patch.object(unified_controller_module.os.path, 'exists') as mock_exists, \
+             patch.object(unified_controller_module.os, 'remove') as mock_remove:
+            mock_write_result = MagicMock(
+                stdout='{"jobs": [{"write": {"io_bytes": 1, "bw_bytes": 125000000}}]}'
+            )
+            mock_read_result = MagicMock(
+                stdout='{"jobs": [{"read": {"io_bytes": 1, "bw_bytes": 150000000}}]}'
+            )
+            mock_subprocess.run.side_effect = [mock_write_result, mock_read_result]
+
+            exist_calls = iter([False, True])
+            mock_exists.side_effect = lambda _path: next(exist_calls, True)
+
+            result = controller.run_fio_tests(disk_path='3', drive_letter='E:')
+
+            assert result == {'write': 125.0, 'read': 150.0}
+            fio_args = mock_subprocess.run.call_args_list[0].args[0]
+            expected_path = os.path.normpath(os.path.join('E:\\', 'apricorn_fio_benchmark.bin'))
+            assert any(arg == f'--filename={expected_path}' for arg in fio_args)
+            mock_remove.assert_called_with(expected_path)
 class TestFsmEventHandlers:
     """Tests for high-level FSM event handling callbacks."""
 

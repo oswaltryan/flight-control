@@ -129,6 +129,7 @@ class DeviceUnderTest:
         self.secure_key: bool = DEVICE_PROPERTIES[self.device_name]['secure_key']
         self.usb3: bool = False
         self.disk_path: str = ""
+        self.drive_letter: str = ""
         self.mounted: bool = False
         self.serial_number: str = ""
         self.dev_keypad_serial_number: str = ""
@@ -1118,8 +1119,10 @@ class ApricornDeviceFSM:
                 self.dut.serial_number = device_info.iSerial
                 if sys.platform.startswith('win32'):
                     self.dut.disk_path = device_info.physicalDriveNum
+                    self.dut.drive_letter = getattr(device_info, 'driveLetter', '') or ''
                 elif sys.platform.startswith('linux'):
                     self.dut.disk_path = device_info.blockDevice
+                    self.dut.drive_letter = ''
                 # You could update other properties here as well if they can change
                 self.logger.info(f"Successfully confirmed enumeration for S/N: {self.dut.serial_number}")
 
@@ -1146,8 +1149,10 @@ class ApricornDeviceFSM:
                 self.dut.serial_number = device_info.iSerial
                 if sys.platform == 'win32':
                     self.dut.disk_path = device_info.physicalDriveNum
+                    self.dut.drive_letter = getattr(device_info, 'driveLetter', '') or ''
                 elif sys.platform.startswith('linux'):
                     self.dut.disk_path = device_info.blockDevice
+                    self.dut.drive_letter = ''
                 # You could update other properties here as well if they can change
                 self.logger.info(f"Successfully confirmed enumeration for S/N: {self.dut.serial_number}")
 
@@ -1177,8 +1182,10 @@ class ApricornDeviceFSM:
                 self.dut.serial_number = device_info.iSerial
                 if sys.platform.startswith('win32'):
                     self.dut.disk_path = device_info.physicalDriveNum
+                    self.dut.drive_letter = getattr(device_info, 'driveLetter', '') or ''
                 elif sys.platform.startswith('linux'):
                     self.dut.disk_path = device_info.blockDevice
+                    self.dut.drive_letter = ''
                 # You could update other properties here as well if they can change
                 self.logger.info(f"Successfully confirmed enumeration for S/N: {self.dut.serial_number}")
 
@@ -2401,7 +2408,10 @@ class ApricornDeviceFSM:
             return None
 
         self.logger.info(f"Initiating speed test on target: {disk_to_test}")
-        results = self.at.run_fio_tests(disk_path=disk_to_test)
+        results = self.at.run_fio_tests(
+            disk_path=disk_to_test,
+            drive_letter=self.dut.drive_letter
+        )
         
         if results:
             self.session.add_speed_test_result(results)
