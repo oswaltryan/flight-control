@@ -7,12 +7,13 @@ import json
 import logging
 import sys
 import os
-import time 
+import time
 from typing import Optional, List, Dict, Any, Union, Tuple, TYPE_CHECKING
 import threading
 from pprint import pprint
 import subprocess
 import copy
+import textwrap
 
 # --- Path Setup ---
 CONTROLLERS_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -499,14 +500,20 @@ class UnifiedController:
         self.logger.info(f"  {DUT_ping_2.idVendor}:{DUT_ping_2.idProduct} [{DUT_ping_2.bcdDevice}] @{DUT_ping_2.bcdUSB} {DUT_ping_2.iSerial} {DUT_ping_2.iProduct}")
         return True, DUT_ping_2
     
-    def _format_disk(self, device, label="DUT", windows_partition_number=1):
+    def _format_disk(
+        self,
+        device,
+        label="DUT",
+        drive_letter: Optional[str] = None,
+        windows_partition_number: Optional[int] = None,
+    ):
         """
         Format an existing partition as FAT32.  exFAT ON WINDOWS ONLY!!!
         Returns True on success, False on failure.
 
         Windows:
         - device: disk number (int or str, e.g., 2)
-        - windows_partition_number: required (int or str, e.g., 1)
+        - windows_partition_number: optional (int or str, e.g., 1)
         - Requires Admin; partition must already exist.
 
         Linux:
@@ -519,20 +526,56 @@ class UnifiedController:
         """
         try:
             if sys.platform.startswith("win32"):
-                if windows_partition_number is None:
-                    raise ValueError("On Windows you must supply windows_partition_number")
                 dn = str(device).strip()
-                pn = str(windows_partition_number).strip()
-                ps = f"""
-                    $ErrorActionPreference = 'Stop'
-                    $part = Get-Partition -DiskNumber {dn} -PartitionNumber {pn}
-                    if (-not $part.DriveLetter) {{ $part | Add-PartitionAccessPath -AssignDriveLetter:$true }}
-                    $letter = (Get-Partition -DiskNumber {dn} -PartitionNumber {pn}).DriveLetter
-                    Format-Volume -DriveLetter $letter -FileSystem exFAT -NewFileSystemLabel '{label}' -Force -Confirm:$false
-                    """
+                if not dn:
+                    raise ValueError("On Windows you must supply a disk number.")
+
+                ps_label = label.replace("'", "''")
+                normalized_letter: Optional[str] = None
+                if drive_letter:
+                    normalized_letter = self._normalize_windows_drive_letter(drive_letter)
+                    if not normalized_letter:
+                        self.logger.warning(
+                            "Received an invalid drive letter '%s' for formatting; "
+                            "falling back to automatic assignment.",
+                            drive_letter,
+                        )
+
+                prep_info = self._prepare_windows_disk_for_format(
+                    disk_number=dn,
+                    desired_drive_letter=normalized_letter,
+                    partition_hint=windows_partition_number,
+                )
+                normalized_letter = prep_info.get("DriveLetter")
+                partition_number = prep_info.get("PartitionNumber")
+                if partition_number is not None:
+                    try:
+                        windows_partition_number = int(partition_number)
+                    except (TypeError, ValueError):
+                        windows_partition_number = None
+
+                if not normalized_letter:
+                    raise RuntimeError(
+                        f"Unable to determine a drive letter for disk {dn} after preparation."
+                    )
+
+                vol_letter = normalized_letter.rstrip(":")
+                ps = (
+                    "$ErrorActionPreference = 'Stop';"
+                    f"Format-Volume -DriveLetter '{vol_letter}' "
+                    "-FileSystem exFAT "
+                    f"-NewFileSystemLabel '{ps_label}' -Force -Confirm:$false"
+                )
                 subprocess.run(
-                    ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", ps],
-                    check=True
+                    [
+                        "powershell",
+                        "-NoProfile",
+                        "-ExecutionPolicy",
+                        "Bypass",
+                        "-Command",
+                        ps,
+                    ],
+                    check=True,
                 )
                 return True
 
@@ -548,8 +591,8 @@ class UnifiedController:
                 raise NotImplementedError(f"Unsupported platform: {sys.platform}")
 
         except Exception as e:
+            self.logger.error("Disk format failed: %s", e, exc_info=True)
             return False
-    
     def _get_fio_path(self) -> str:
         """
         Determines the correct path to the bundled FIO binary based on the OS.
@@ -648,6 +691,128 @@ class UnifiedController:
         if len(candidate) != 1 or not candidate.isalpha():
             return None
         return f"{candidate.upper()}:"
+
+    def _prepare_windows_disk_for_format(
+        self,
+        disk_number: str,
+        desired_drive_letter: Optional[str],
+        partition_hint: Optional[int],
+    ) -> Dict[str, Any]:
+        """
+        Ensure the specified Windows disk has a writable partition with a drive letter.
+
+        If the disk is raw or uninitialized, this helper initializes it, creates a
+        single partition, and assigns a drive letter so that a subsequent Format-Volume
+        call succeeds.
+
+        Args:
+            disk_number: Disk number understood by PowerShell.
+            desired_drive_letter: Optional normalized drive letter (e.g., "E:").
+            partition_hint: Optional partition number to target.
+
+        Returns:
+            A dictionary with 'PartitionNumber' and 'DriveLetter' keys.
+        """
+        letter_token = "$null"
+        if desired_drive_letter:
+            letter_token = f'"{desired_drive_letter.rstrip(":")}"'
+        partition_token = "$null" if partition_hint is None else str(partition_hint)
+
+        ps = textwrap.dedent(
+            f"""
+            $ErrorActionPreference = 'Stop';
+            $diskNumber = {disk_number};
+            $desiredLetter = {letter_token};
+            $partitionHint = {partition_token};
+
+            $disk = Get-Disk -Number $diskNumber -ErrorAction Stop;
+            if ($disk.IsOffline) {{
+                Set-Disk -Number $diskNumber -IsOffline:$false -PassThru | Out-Null
+            }}
+            if ($disk.IsReadOnly) {{
+                Set-Disk -Number $diskNumber -IsReadOnly:$false -PassThru | Out-Null
+            }}
+            if ($disk.PartitionStyle -eq 'RAW') {{
+                Initialize-Disk -Number $diskNumber -PartitionStyle GPT -PassThru | Out-Null
+            }}
+
+            $partition = $null
+            if ($partitionHint -ne $null) {{
+                $partition = Get-Partition -DiskNumber $diskNumber -PartitionNumber $partitionHint -ErrorAction SilentlyContinue
+            }}
+
+            if (-not $partition) {{
+                $partition = Get-Partition -DiskNumber $diskNumber |
+                    Where-Object {{ $_.Type -ne 'Reserved' -and $_.Type -ne 'Unknown' }} |
+                    Sort-Object PartitionNumber |
+                    Select-Object -First 1
+            }}
+
+            if (-not $partition) {{
+                if ($desiredLetter) {{
+                    $partition = New-Partition -DiskNumber $diskNumber -UseMaximumSize -DriveLetter $desiredLetter -ErrorAction Stop
+                }} else {{
+                    $partition = New-Partition -DiskNumber $diskNumber -UseMaximumSize -AssignDriveLetter -ErrorAction Stop
+                }}
+            }}
+
+            if (-not $partition.DriveLetter) {{
+                if ($desiredLetter) {{
+                    $partition = Set-Partition -InputObject $partition -NewDriveLetter $desiredLetter -PassThru
+                }} else {{
+                    Add-PartitionAccessPath -InputObject $partition -AssignDriveLetter | Out-Null
+                    $partition = Get-Partition -DiskNumber $diskNumber -PartitionNumber $partition.PartitionNumber
+                }}
+            }}
+
+            if ($desiredLetter -and $partition.DriveLetter -ne $desiredLetter) {{
+                $partition = Set-Partition -InputObject $partition -NewDriveLetter $desiredLetter -PassThru
+            }}
+
+            if ($partition.DriveLetter) {{
+                $driveLetter = ($partition.DriveLetter + ':')
+            }} else {{
+                $driveLetter = $null
+            }}
+
+            [PSCustomObject]@{{
+                PartitionNumber = $partition.PartitionNumber
+                DriveLetter = $driveLetter
+            }} | ConvertTo-Json -Compress
+            """
+        )
+
+        try:
+            completed = subprocess.run(
+                [
+                    "powershell",
+                    "-NoProfile",
+                    "-ExecutionPolicy",
+                    "Bypass",
+                    "-Command",
+                    ps,
+                ],
+                capture_output=True,
+                text=True,
+                check=True,
+            )
+        except subprocess.CalledProcessError as exc:
+            raise RuntimeError(
+                f"Failed to prepare disk {disk_number} for formatting: {exc.stderr or exc}"
+            ) from exc
+
+        raw_output = completed.stdout.strip()
+        if not raw_output:
+            raise RuntimeError(f"Preparation script returned no data for disk {disk_number}.")
+
+        try:
+            parsed = json.loads(raw_output)
+        except json.JSONDecodeError as exc:
+            raise RuntimeError(
+                f"Preparation script produced invalid JSON for disk {disk_number}: {raw_output}"
+            ) from exc
+
+        return parsed if isinstance(parsed, dict) else {}
 
     def run_fio_tests(
         self,
@@ -924,6 +1089,3 @@ if __name__ == '__main__': # pragma: no cover
             direct_test_logger.info("Closing UnifiedController instance from direct test...")
             uc_instance_for_test.close()
         direct_test_logger.info("UnifiedController direct test finished.")
-
-
-

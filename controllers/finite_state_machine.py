@@ -2366,23 +2366,68 @@ class ApricornDeviceFSM:
 
     def format_operation(self) -> None:
         """
-        Needs docstring
-        """
-        self.logger.info(f"Performing format operation...")
-        disk_to_format = int(self.dut.disk_path)
-        
-        if not disk_to_format:
-            self.logger.error("Cannot run format operation: DUT disk path is not set. Ensure the device is unlocked first.")
-            return None
+        Format the DUT's exposed storage volume using the unified controller.
 
-        self.logger.info(f"Initiating format operation on target: {disk_to_format}")
-        results = self.at._format_disk(disk_to_format)
-        
-        if not results:
-            if self.dut.read_only_enabled:
-                self.logger.info(f"Read-Only prevented drive format")
-            else:
-                self.logger.info(f"DUT format failed")
+        This delegates to `UnifiedController._format_disk`, allowing the controller
+        to pick the correct OS-specific tooling. When the disk is not available
+        (e.g., device still locked) the operation is skipped gracefully.
+        """
+        self.logger.info("Performing format operation...")
+
+        disk_identifier = self.dut.disk_path
+        if not disk_identifier:
+            self.logger.error(
+                "Cannot run format operation: DUT disk path is not set. "
+                "Ensure the device is unlocked first."
+            )
+            return
+
+        drive_letter = (self.dut.drive_letter or "").strip() or None
+
+        if sys.platform.startswith("win32"):
+            disk_str = str(disk_identifier).strip()
+            if not disk_str:
+                self.logger.error(
+                    "Cannot run format operation: missing disk number for Windows format."
+                )
+                return
+            target_display = f"Disk {disk_str}"
+            device_arg: Union[str, int] = int(disk_str) if disk_str.isdigit() else disk_str
+            partition_hint: Optional[int] = None
+        else:
+            device_arg = str(disk_identifier)
+            target_display = device_arg
+            partition_hint = None
+
+        self.logger.info("Initiating format operation on target: %s", target_display)
+
+        format_kwargs: Dict[str, Any] = {"device": device_arg}
+        if sys.platform.startswith("win32"):
+            if drive_letter:
+                format_kwargs["drive_letter"] = drive_letter
+            format_kwargs["windows_partition_number"] = partition_hint
+
+        try:
+            results = self.at._format_disk(**format_kwargs)
+        except TypeError as exc:
+            self.logger.debug(
+                "UnifiedController._format_disk signature mismatch (%s); "
+                "retrying with legacy arguments.",
+                exc,
+            )
+            format_kwargs.pop("drive_letter", None)
+            if format_kwargs.get("windows_partition_number") is None:
+                format_kwargs["windows_partition_number"] = 1
+            results = self.at._format_disk(**format_kwargs)
+
+        if results:
+            self.logger.info("Format operation completed successfully.")
+            return
+
+        if self.dut.read_only_enabled:
+            self.logger.info("Read-Only prevented drive format.")
+        else:
+            self.logger.info("DUT format failed.")
 
 #################
 ## Speed Test

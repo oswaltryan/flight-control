@@ -426,6 +426,7 @@ def block_1():
             script_logger.info(f"Beginning iteration {loop_test.iteration}: (Block {session.current_test_block}) (({loop_test.time_check:.2f}h of {loop_test.test_duration}h))")
             
             if fsm.manufacturer_reset():
+                # fsm.format_operation()
 
                 if loop_test.should_run_action(test_id, loop_test.speed_test_config):
                     fsm.speed_test()
