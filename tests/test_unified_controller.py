@@ -578,14 +578,18 @@ class TestUnifiedController:
 
         with patch.object(unified_controller_module, 'subprocess') as mock_subprocess, \
              patch.object(controller, '_get_fio_path', return_value='mock_fio_path'), \
-             patch.object(controller, '_has_admin_privileges', return_value=True):
+             patch.object(controller, '_has_admin_privileges', return_value=True), \
+             patch.object(unified_controller_module.os.path, 'isdir', return_value=True), \
+             patch.object(unified_controller_module.os.path, 'exists', return_value=False), \
+             patch.object(unified_controller_module.os, 'remove'):
             mock_subprocess.run.side_effect = [mock_write_result, mock_read_result]
 
             monkeypatch.setattr(sys, 'platform', 'win32')
             final_results_win = controller.run_fio_tests(disk_path="3", drive_letter="E:")
 
             fio_command_args_win = mock_subprocess.run.call_args_list[0].args[0]
-            assert any(arg.endswith('\\.\\PhysicalDrive3') for arg in fio_command_args_win)
+            expected_path = os.path.normpath(os.path.join('E:\\', 'apricorn_fio_benchmark.bin'))
+            assert any(arg == f'--filename={expected_path}' for arg in fio_command_args_win)
             assert final_results_win == {'write': 150.0, 'read': 250.0}
 
             mock_subprocess.run.reset_mock()
@@ -1191,11 +1195,14 @@ class TestFioHelpers:
         monkeypatch.setattr(sys, 'platform', 'win32')
         with patch.object(controller, '_get_fio_path', return_value='fio.exe'), \
              patch.object(unified_controller_module, 'subprocess') as mock_subprocess, \
-             patch.object(controller, '_has_admin_privileges', return_value=True):
+             patch.object(controller, '_has_admin_privileges', return_value=True), \
+             patch.object(unified_controller_module.os.path, 'isdir', return_value=True), \
+             patch.object(unified_controller_module.os.path, 'exists', return_value=False), \
+             patch.object(unified_controller_module.os, 'remove'):
             
             # THE FIX: Configure the mock to return a valid result object.
             # This prevents the TypeError inside json.loads().
-            mock_result = MagicMock(stdout='{"jobs": [{"read": {"io_bytes": 1}}]}')
+            mock_result = MagicMock(stdout='{"jobs": [{"read": {"io_bytes": 1, "bw_bytes": 1000}}]}')
             mock_subprocess.run.return_value = mock_result
             
             # --- ACT ---
@@ -1203,7 +1210,8 @@ class TestFioHelpers:
 
         # --- ASSERT ---
         called_args = mock_subprocess.run.call_args.args[0]
-        assert any(arg.endswith("\\\\.\\PhysicalDrive1") for arg in called_args)
+        expected_path = os.path.normpath(os.path.join('E:\\', 'apricorn_fio_benchmark.bin'))
+        assert any(arg == f'--filename={expected_path}' for arg in called_args)
 
     @pytest.mark.parametrize(
         "exception_to_raise, expected_log_msg",

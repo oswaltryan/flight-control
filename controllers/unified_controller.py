@@ -23,6 +23,9 @@ if PROJECT_ROOT not in sys.path:
 
 module_logger = logging.getLogger(__name__)
 
+# Default size for the temporary FIO file used during Windows fallback testing.
+DEFAULT_FIO_FALLBACK_FILE_SIZE = os.environ.get('FIO_FALLBACK_FILE_SIZE') or '512M'
+
 try:
     from controllers.phidget_board import PhidgetController, DEFAULT_SCRIPT_CHANNEL_MAP_CONFIG
     from controllers.logitech_webcam import (
@@ -723,7 +726,6 @@ class UnifiedController:
             $ErrorActionPreference = 'Stop';
             $diskNumber = {disk_number};
             $desiredLetter = {letter_token};
-            $partitionHint = {partition_token};
 
             $disk = Get-Disk -Number $diskNumber -ErrorAction Stop;
             if ($disk.IsOffline) {{
@@ -736,17 +738,10 @@ class UnifiedController:
                 Initialize-Disk -Number $diskNumber -PartitionStyle GPT -PassThru | Out-Null
             }}
 
-            $partition = $null
-            if ($partitionHint -ne $null) {{
-                $partition = Get-Partition -DiskNumber $diskNumber -PartitionNumber $partitionHint -ErrorAction SilentlyContinue
-            }}
-
-            if (-not $partition) {{
-                $partition = Get-Partition -DiskNumber $diskNumber |
-                    Where-Object {{ $_.Type -ne 'Reserved' -and $_.Type -ne 'Unknown' }} |
-                    Sort-Object PartitionNumber |
-                    Select-Object -First 1
-            }}
+            $partition = Get-Partition -DiskNumber $diskNumber |
+                Where-Object {{ $_.Type -ne 'Reserved' -and $_.Type -ne 'Unknown' }} |
+                Sort-Object PartitionNumber |
+                Select-Object -First 1
 
             if (-not $partition) {{
                 if ($desiredLetter) {{
@@ -756,17 +751,20 @@ class UnifiedController:
                 }}
             }}
 
+            $partitionNumber = $partition.PartitionNumber
+
             if (-not $partition.DriveLetter) {{
                 if ($desiredLetter) {{
-                    $partition = Set-Partition -InputObject $partition -NewDriveLetter $desiredLetter -PassThru
+                    Set-Partition -InputObject $partition -NewDriveLetter $desiredLetter | Out-Null
                 }} else {{
                     Add-PartitionAccessPath -InputObject $partition -AssignDriveLetter | Out-Null
-                    $partition = Get-Partition -DiskNumber $diskNumber -PartitionNumber $partition.PartitionNumber
                 }}
+                $partition = Get-Partition -DiskNumber $diskNumber -PartitionNumber $partitionNumber -ErrorAction Stop
             }}
 
             if ($desiredLetter -and $partition.DriveLetter -ne $desiredLetter) {{
-                $partition = Set-Partition -InputObject $partition -NewDriveLetter $desiredLetter -PassThru
+                Set-Partition -InputObject $partition -NewDriveLetter $desiredLetter | Out-Null
+                $partition = Get-Partition -DiskNumber $diskNumber -PartitionNumber $partitionNumber -ErrorAction Stop
             }}
 
             if ($partition.DriveLetter) {{
@@ -781,7 +779,6 @@ class UnifiedController:
             }} | ConvertTo-Json -Compress
             """
         )
-
         try:
             completed = subprocess.run(
                 [
@@ -813,6 +810,320 @@ class UnifiedController:
             ) from exc
 
         return parsed if isinstance(parsed, dict) else {}
+
+    def _windows_system_drive(self) -> Optional[str]:
+        """Return the normalized system drive letter (e.g., 'C:') if available."""
+        raw_drive = os.environ.get('SystemDrive')
+        return self._normalize_windows_drive_letter(raw_drive)
+
+    def _wait_for_drive_root(
+        self,
+        drive_letter: str,
+        timeout_sec: float = 5.0,
+        poll_interval_sec: float = 0.25,
+    ) -> bool:
+        """
+        Wait for the OS to expose the root directory for the provided drive letter.
+
+        Args:
+            drive_letter: Normalized drive letter (e.g., 'E:').
+            timeout_sec: Total time to wait before giving up.
+            poll_interval_sec: Interval between existence checks.
+
+        Returns:
+            True when the drive root exists, otherwise False.
+        """
+        normalized = self._normalize_windows_drive_letter(drive_letter)
+        if not normalized:
+            return False
+        drive_root = f"{normalized}{os.sep}"
+        deadline = time.time() + max(0.0, timeout_sec)
+        while time.time() <= deadline:
+            if os.path.isdir(drive_root):
+                return True
+            time.sleep(max(0.01, poll_interval_sec))
+        return False
+
+    def _get_windows_disk_drive_letters(self, disk_number: str) -> Optional[List[str]]:
+        """
+        Return the list of drive letters currently assigned to the provided disk.
+
+        Args:
+            disk_number: Windows disk number as a string.
+
+        Returns:
+            A list of normalized drive letters (e.g., ['E:']) or None on failure.
+        """
+        ps = textwrap.dedent(
+            f"""
+            $ErrorActionPreference = 'Stop';
+            $diskNumber = {disk_number};
+            $letters = Get-Partition -DiskNumber $diskNumber -ErrorAction Stop |
+                Get-Volume -ErrorAction Stop |
+                Where-Object {{ $_.DriveLetter -and $_.DriveLetter -ne '' }} |
+                Select-Object -ExpandProperty DriveLetter;
+            if ($letters) {{
+                $letters -join `n
+            }}
+            """
+        )
+        try:
+            completed = subprocess.run(
+                [
+                    "powershell",
+                    "-NoProfile",
+                    "-ExecutionPolicy",
+                    "Bypass",
+                    "-Command",
+                    ps,
+                ],
+                capture_output=True,
+                text=True,
+                check=True,
+            )
+        except subprocess.CalledProcessError as exc:
+            self.logger.error(
+                "Failed to query drive letters for disk %s: %s",
+                disk_number,
+                exc.stderr or exc,
+            )
+            return None
+
+        output = completed.stdout.strip()
+        if not output:
+            return []
+
+        normalized_letters: List[str] = []
+        for value in output.splitlines():
+            normalized = self._normalize_windows_drive_letter(value)
+            if normalized and normalized not in normalized_letters:
+                normalized_letters.append(normalized)
+        return normalized_letters
+
+    def _select_fallback_drive_letter(
+        self,
+        disk_number: Optional[str],
+        initial_letter: Optional[str],
+    ) -> Optional[str]:
+        """
+        Determine a safe drive letter to use for Windows FIO fallback operations.
+
+        Preference order:
+            1. The provided initial letter (typically from enumeration)
+            2. Any current drive letters assigned to the disk
+
+        The system drive (e.g., 'C:') is always ignored.
+        """
+        system_drive = self._windows_system_drive()
+        normalized_initial = self._normalize_windows_drive_letter(initial_letter)
+
+        if normalized_initial and normalized_initial != system_drive:
+            return normalized_initial
+
+        if disk_number is not None:
+            letters = self._get_windows_disk_drive_letters(disk_number)
+            if letters:
+                for candidate in letters:
+                    normalized = self._normalize_windows_drive_letter(candidate)
+                    if normalized and normalized != system_drive:
+                        return normalized
+
+        return None
+
+    def _prepare_windows_fio_file(self, drive_letter: str) -> Optional[str]:
+        """
+        Prepare a temporary file path for Windows FIO fallback testing.
+
+        Args:
+            drive_letter: Normalized drive letter like "E:".
+
+        Returns:
+            Absolute path to the benchmark file, or None on failure.
+        """
+        normalized = self._normalize_windows_drive_letter(drive_letter)
+        if not normalized:
+            self.logger.error(
+                "Cannot prepare Windows FIO fallback file: invalid drive letter input '%s'.",
+                drive_letter,
+            )
+            return None
+
+        system_drive = self._windows_system_drive()
+        if system_drive and normalized == system_drive:
+            self.logger.error(
+                "Refusing to use system drive %s for FIO fallback testing.",
+                system_drive,
+            )
+            return None
+
+        if not self._wait_for_drive_root(normalized):
+            self.logger.error(
+                "Fallback drive letter %s is not accessible.",
+                normalized,
+            )
+            return None
+
+        drive_root = f"{normalized}{os.sep}"
+        temp_path = os.path.normpath(
+            os.path.join(drive_root, "apricorn_fio_benchmark.bin")
+        )
+
+        if os.path.exists(temp_path):
+            try:
+                os.remove(temp_path)
+                self.logger.debug(
+                    "Removed stale FIO benchmark file %s.",
+                    temp_path,
+                )
+            except OSError as cleanup_error:
+                self.logger.warning(
+                    "Could not remove existing benchmark file %s: %s",
+                    temp_path,
+                    cleanup_error,
+                )
+
+        return temp_path
+    def _ensure_windows_test_mount(
+        self,
+        disk_number: str,
+        drive_letter: Optional[str],
+        ensure_temp_dir: bool = False,
+    ) -> Optional[str]:
+        """
+        Ensure a Windows disk is mounted with a drive letter for FIO testing.
+
+        This is used when the toolkit lacks admin privileges or when raw-device
+        writes fail, providing a best-effort partition discovery/creation flow.
+
+        Args:
+            disk_number: The Windows disk number as a string.
+            drive_letter: Optional desired drive letter (normalized form expected).
+            ensure_temp_dir: When True, ensures the drive hosts a writable temp file.
+
+        Returns:
+            Normalized drive letter (e.g., "E:") on success, else None.
+        """
+        desired = self._normalize_windows_drive_letter(drive_letter)
+        partition_hint: Optional[int] = None
+
+        letter_token = "$null"
+        if desired:
+            letter_token = f'"{desired.rstrip(":")}"'
+
+        ps = textwrap.dedent(
+            f"""
+            $ErrorActionPreference = 'Stop';
+            $diskNumber = {disk_number};
+            $desiredLetter = {letter_token};
+
+            $disk = Get-Disk -Number $diskNumber -ErrorAction Stop;
+            if ($disk.IsOffline) {{
+                Set-Disk -Number $diskNumber -IsOffline:$false -PassThru | Out-Null
+            }}
+            if ($disk.IsReadOnly) {{
+                Set-Disk -Number $diskNumber -IsReadOnly:$false -PassThru | Out-Null
+            }}
+            if ($disk.PartitionStyle -eq 'RAW') {{
+                Initialize-Disk -Number $diskNumber -PartitionStyle GPT -PassThru | Out-Null
+            }}
+
+            $partition = Get-Partition -DiskNumber $diskNumber |
+                Where-Object {{ $_.Type -ne 'Reserved' -and $_.Type -ne 'Unknown' }} |
+                Sort-Object PartitionNumber |
+                Select-Object -First 1
+
+            if (-not $partition) {{
+                if ($desiredLetter) {{
+                    $partition = New-Partition -DiskNumber $diskNumber -UseMaximumSize -DriveLetter $desiredLetter -ErrorAction Stop
+                }} else {{
+                    $partition = New-Partition -DiskNumber $diskNumber -UseMaximumSize -AssignDriveLetter -ErrorAction Stop
+                }}
+            }}
+
+            $partitionNumber = $partition.PartitionNumber
+
+            if (-not $partition.DriveLetter) {{
+                if ($desiredLetter) {{
+                    Set-Partition -InputObject $partition -NewDriveLetter $desiredLetter | Out-Null
+                }} else {{
+                    Add-PartitionAccessPath -InputObject $partition -AssignDriveLetter | Out-Null
+                }}
+                $partition = Get-Partition -DiskNumber $diskNumber -PartitionNumber $partitionNumber -ErrorAction Stop
+            }}
+
+            if ($desiredLetter -and $partition.DriveLetter -ne $desiredLetter) {{
+                Set-Partition -InputObject $partition -NewDriveLetter $desiredLetter | Out-Null
+                $partition = Get-Partition -DiskNumber $diskNumber -PartitionNumber $partitionNumber -ErrorAction Stop
+            }}
+
+            if ($partition.DriveLetter) {{
+                $driveLetter = ($partition.DriveLetter + ':')
+            }} else {{
+                $driveLetter = $null
+            }}
+
+            [PSCustomObject]@{{
+                PartitionNumber = $partition.PartitionNumber
+                DriveLetter = $driveLetter
+            }} | ConvertTo-Json -Compress
+            """
+        )
+        try:
+            completed = subprocess.run(
+                [
+                    "powershell",
+                    "-NoProfile",
+                    "-ExecutionPolicy",
+                    "Bypass",
+                    "-Command",
+                    ps,
+                ],
+                capture_output=True,
+                text=True,
+                check=True,
+            )
+        except subprocess.CalledProcessError as exc:
+            self.logger.error(
+                "Unable to prepare Windows disk %s for FIO fallback: %s",
+                disk_number,
+                exc.stderr or exc,
+            )
+            return None
+
+        raw_output = completed.stdout.strip()
+        if not raw_output:
+            self.logger.error(
+                "Preparation script returned no data while preparing disk %s.",
+                disk_number,
+            )
+            return None
+
+        try:
+            parsed = json.loads(raw_output)
+        except json.JSONDecodeError as exc:
+            self.logger.error(
+                "Preparation script produced invalid JSON for disk %s: %s (raw=%r)",
+                disk_number,
+                exc,
+                raw_output,
+            )
+            return None
+
+        normalized_drive = parsed.get("DriveLetter")
+        normalized_drive = self._normalize_windows_drive_letter(normalized_drive)
+        if not normalized_drive:
+            self.logger.error(
+                "Failed to assign or detect a drive letter for disk %s during FIO setup.",
+                disk_number,
+            )
+            return None
+
+        if ensure_temp_dir:
+            temp_path = self._prepare_windows_fio_file(normalized_drive)
+            if not temp_path:
+                return None
+
+        return normalized_drive
 
     def run_fio_tests(
         self,
@@ -862,53 +1173,77 @@ class UnifiedController:
         temp_file_path: Optional[str] = None
         using_temp_file = False
 
+        normalized_drive_letter: Optional[str] = None
+
+        disk_number_for_mount: Optional[str] = None
+        fallback_file_size = DEFAULT_FIO_FALLBACK_FILE_SIZE
+
         if sys.platform == 'win32':
             disk_path_str = str(disk_path)
             if disk_path_str.isdigit():
                 win_path = f'PhysicalDrive{disk_path_str}'
+                disk_number_for_mount = disk_path_str
             elif disk_path_str.lower().startswith('\\.') and len(disk_path_str) > 4 and disk_path_str[4] == '\\':
                 win_path = disk_path_str[4:]
+                suffix = win_path[len('PhysicalDrive'):] if win_path.lower().startswith('physicaldrive') else ''
+                if suffix.isdigit():
+                    disk_number_for_mount = suffix
             else:
                 win_path = disk_path_str
 
             fio_target_device = f"\\\\.\\{win_path}"
 
-            if not self._has_admin_privileges():
-                normalized_drive = self._normalize_windows_drive_letter(drive_letter)
-                if not normalized_drive:
-                    self.logger.error(
-                        'Administrator privileges are required for raw disk testing and no drive letter fallback was provided.',
-                    )
-                    self.logger.error(
-                        'Run the toolkit as Administrator or provide a mounted drive letter for file-based FIO testing.',
-                    )
+            normalized_drive_letter = self._normalize_windows_drive_letter(drive_letter)
+
+            if normalized_drive_letter:
+                self.logger.info(
+                    "Formatted drive detected (letter '%s'). Using file-based FIO test.",
+                    normalized_drive_letter,
+                )
+                temp_path = self._prepare_windows_fio_file(normalized_drive_letter)
+                if not temp_path:
                     return None
 
-                drive_root = f"{normalized_drive}{os.sep}"
-                if not os.path.isdir(drive_root):
-                    self.logger.error(
-                        'Fallback drive letter %s is not accessible.',
-                        normalized_drive,
-                    )
-                    return None
-
-                temp_file_path = os.path.normpath(
-                    os.path.join(drive_root, 'apricorn_fio_benchmark.bin')
+                temp_file_path = temp_path
+                fio_target_device = temp_file_path
+                using_temp_file = True
+                self.logger.debug(
+                    'Targeting Windows fallback file: %s',
+                    fio_target_device,
+                )
+            elif not self._has_admin_privileges():
+                candidate_drive = normalized_drive_letter
+                selected_letter = self._select_fallback_drive_letter(
+                    disk_number=disk_number_for_mount,
+                    initial_letter=candidate_drive,
                 )
 
-                if os.path.exists(temp_file_path):
-                    try:
-                        os.remove(temp_file_path)
-                        self.logger.debug(
-                            'Removed stale FIO benchmark file %s.',
-                            temp_file_path,
-                        )
-                    except OSError as cleanup_error:
-                        self.logger.warning(
-                            'Could not remove existing benchmark file %s: %s',
-                            temp_file_path,
-                            cleanup_error,
-                        )
+                if not selected_letter and disk_number_for_mount:
+                    assigned_letter = self._ensure_windows_test_mount(
+                        disk_number=disk_number_for_mount,
+                        drive_letter=candidate_drive,
+                        ensure_temp_dir=False,
+                    )
+                    selected_letter = self._select_fallback_drive_letter(
+                        disk_number=disk_number_for_mount,
+                        initial_letter=assigned_letter,
+                    )
+
+                if not selected_letter:
+                    self.logger.error(
+                        'Administrator privileges are required for raw disk testing and no drive letter fallback was available.',
+                    )
+                    self.logger.error(
+                        'Run the toolkit as Administrator or ensure the device is mounted with a drive letter for file-based FIO testing.',
+                    )
+                    return None
+
+                temp_path = self._prepare_windows_fio_file(selected_letter)
+                if not temp_path:
+                    return None
+
+                normalized_drive_letter = selected_letter
+                temp_file_path = temp_path
 
                 fio_target_device = temp_file_path
                 using_temp_file = True
@@ -933,76 +1268,148 @@ class UnifiedController:
             )
 
         combined_results: Dict[str, float] = {}
-
         try:
             for test_params in tests_to_run:
                 self.logger.debug('--- Preparing FIO test: %s ---', test_params.get('name', 'Unnamed'))
 
-                base_command = [fio_path]
+                attempt = 0
+                while attempt < 2:
+                    attempt += 1
 
-                if sys.platform.startswith('linux'):
-                    base_command.extend(['--ioengine=libaio'])
-                elif sys.platform == 'win32':
-                    base_command.extend(['--ioengine=windowsaio', '--thread'])
+                    base_command = [fio_path]
 
-                base_command.extend([
-                    '--direct=1',
-                    '--output-format=json',
-                    '--random_generator=tausworthe64',
-                    f'--filename={fio_target_device}',
-                    f'--runtime={duration}',
-                    f"--name={test_params.get('name')}",
-                    f"--rw={test_params.get('rw')}",
-                    f"--bs={test_params.get('bs')}",
-                    f"--iodepth={test_params.get('iodepth')}",
-                    '--group_reporting',
-                ])
+                    if sys.platform.startswith('linux'):
+                        base_command.extend(['--ioengine=libaio'])
+                    elif sys.platform == 'win32':
+                        base_command.extend(['--ioengine=windowsaio', '--thread'])
 
-                try:
-                    self.logger.debug('Executing command: %s', ' '.join(base_command))
-                    result = subprocess.run(base_command, check=True, capture_output=True, text=True)
+                    base_command.extend([
+                        '--direct=1',
+                        '--output-format=json',
+                        '--random_generator=tausworthe64',
+                        f'--filename={fio_target_device}',
+                        f'--runtime={duration}',
+                        f"--name={test_params.get('name')}",
+                        f"--rw={test_params.get('rw')}",
+                        f"--bs={test_params.get('bs')}",
+                        f"--iodepth={test_params.get('iodepth')}",
+                        '--group_reporting',
+                    ])
 
-                    parsed_result = self._parse_fio_json_output(result.stdout)
-                    if parsed_result:
-                        self.logger.debug(
-                            "--- FIO Test '%s' Result: %s MB/s",
-                            test_params.get('name'),
-                            parsed_result,
+                    requested_size = test_params.get('size')
+                    if requested_size:
+                        base_command.append(f'--size={requested_size}')
+                    elif using_temp_file and fallback_file_size:
+                        base_command.append(f'--size={fallback_file_size}')
+                    elif using_temp_file and fallback_file_size:
+                        base_command.append(f'--size={fallback_file_size}')
+
+                    self.logger.debug(
+                        'Executing FIO command (attempt %s): %s',
+                        attempt,
+                        ' '.join(base_command),
+                    )
+
+                    try:
+                        result = subprocess.run(
+                            base_command,
+                            check=True,
+                            capture_output=True,
+                            text=True,
                         )
-                        combined_results.update(parsed_result)
-                    else:
+                    except FileNotFoundError:
+                        self.logger.error("FIO command not found at '%s'.", fio_path)
+                        raise
+                    except subprocess.CalledProcessError as exc:
+                        stderr_text = exc.stderr or ""
+                        stdout_text = getattr(exc, 'stdout', '') or ''
+
+                        can_retry_with_file = (
+                            sys.platform == 'win32'
+                            and not using_temp_file
+                            and disk_number_for_mount is not None
+                            and any(
+                                token in stderr_text.lower()
+                                for token in ('permission denied', 'access is denied', 'failed to open')
+                            )
+                        )
+
+                        if can_retry_with_file:
+                            self.logger.warning(
+                                "Raw FIO access to %s was denied; retrying using temporary file fallback.",
+                                fio_target_device,
+                            )
+                            candidate_drive = self._select_fallback_drive_letter(
+                                disk_number=disk_number_for_mount,
+                                initial_letter=normalized_drive_letter,
+                            )
+
+                            if not candidate_drive:
+                                assigned_letter = self._ensure_windows_test_mount(
+                                    disk_number=disk_number_for_mount,
+                                    drive_letter=normalized_drive_letter,
+                                    ensure_temp_dir=False,
+                                )
+                                candidate_drive = self._select_fallback_drive_letter(
+                                    disk_number=disk_number_for_mount,
+                                    initial_letter=assigned_letter,
+                                )
+
+                            temp_path = None
+                            if candidate_drive:
+                                temp_path = self._prepare_windows_fio_file(candidate_drive)
+
+                            if temp_path:
+                                normalized_drive_letter = candidate_drive
+                                temp_file_path = temp_path
+                                fio_target_device = temp_file_path
+                                using_temp_file = True
+                                continue
+
+                            self.logger.error(
+                                "Unable to establish a file-backed FIO target for disk %s.",
+                                disk_number_for_mount or disk_path,
+                            )
+
                         self.logger.error(
-                            "Failed to parse results for FIO test '%s'.",
+                            "FIO test '%s' failed with exit code %s.",
                             test_params.get('name'),
+                            exc.returncode,
+                        )
+                        self.logger.error(
+                            '  This can happen if the script is not run with administrator/root privileges.',
+                        )
+                        self.logger.error('  Stdout: %s', stdout_text)
+                        self.logger.error('  Stderr: %s', stderr_text)
+                        return None
+                    except Exception as exc:  # pragma: no cover - defensive
+                        self.logger.error(
+                            "An unexpected error occurred while running FIO: %s",
+                            exc,
+                            exc_info=True,
                         )
                         return None
+                    else:
+                        parsed_result = self._parse_fio_json_output(result.stdout)
+                        if parsed_result:
+                            self.logger.debug(
+                                "--- FIO Test '%s' Result: %s MB/s",
+                                test_params.get('name'),
+                                parsed_result,
+                            )
+                            for key, value in parsed_result.items():
+                                combined_results[key] = combined_results.get(key, 0.0) + value
+                        else:
+                            self.logger.error(
+                                "Failed to parse results for FIO test '%s'.",
+                                test_params.get('name'),
+                            )
+                            return None
 
-                    if result.stderr:
-                        self.logger.warning('FIO Stderr: %s', result.stderr)
+                        if result.stderr:
+                            self.logger.warning('FIO Stderr: %s', result.stderr)
 
-                except FileNotFoundError:
-                    self.logger.error("FIO command not found at '%s'.", fio_path)
-                    raise
-                except subprocess.CalledProcessError as exc:
-                    self.logger.error(
-                        "FIO test '%s' failed with exit code %s.",
-                        test_params.get('name'),
-                        exc.returncode,
-                    )
-                    self.logger.error(
-                        '  This can happen if the script is not run with administrator/root privileges.',
-                    )
-                    self.logger.error('  Stdout: %s', exc.stdout)
-                    self.logger.error('  Stderr: %s', exc.stderr)
-                    return None
-                except Exception as exc:  # pragma: no cover - defensive
-                    self.logger.error(
-                        'An unexpected error occurred during FIO test: %s',
-                        exc,
-                        exc_info=True,
-                    )
-                    return None
-
+                        break
             if 'read' in combined_results:
                 self.logger.info('Read: %s', combined_results['read'])
             if 'write' in combined_results:
@@ -1089,3 +1496,4 @@ if __name__ == '__main__': # pragma: no cover
             direct_test_logger.info("Closing UnifiedController instance from direct test...")
             uc_instance_for_test.close()
         direct_test_logger.info("UnifiedController direct test finished.")
+
