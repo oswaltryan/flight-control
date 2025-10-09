@@ -985,7 +985,7 @@ class UnifiedController:
         return temp_path
     def _ensure_windows_test_mount(
         self,
-        disk_number: str,
+        disk_number: Optional[str],
         drive_letter: Optional[str],
         ensure_temp_dir: bool = False,
     ) -> Optional[str]:

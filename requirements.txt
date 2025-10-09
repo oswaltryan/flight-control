@@ -1,9 +1,0 @@
-# Filename: requirements.txt
-numpy==2.3.1
-opencv_python==4.11.0.86
-phidget22==1.22.20250422
-pygraphviz==1.13
-pynput==1.8.1
-pytest==8.4.0
-transitions==0.9.2
-usb_tool==0.2.0

@@ -1,0 +1,3 @@
+[submodule "install/usb_tool"]
+	path = install/usb_tool
+	url = ./install/usb_tool

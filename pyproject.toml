@@ -1,0 +1,40 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "flight-control"
+version = "0.1.0"
+description = "A flight control system."
+readme = "README.md"
+requires-python = ">=3.8"
+license = { text = "MIT License" }
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "Operating System :: OS Independent",
+]
+dependencies = [
+    "colorama==0.4.6",
+    "iniconfig==2.1.0",
+    "numpy==2.3.2",
+    "opencv_python==4.11.0.86",
+    "packaging==25.0",
+    "phidget22==1.22.20250422",
+    "pluggy==1.6.0",
+    "pygments==2.19.2",
+    "pynput==1.8.1",
+    "pytest==8.4.0",
+    "six==1.17.0",
+    "transitions==0.9.2",
+    "libusb==1.0.27.post4",
+    "pywin32==309",
+    "pkg_about",
+]
+
+[project.optional-dependencies]
+diagrams = [
+    "pygraphviz==1.13",
+]
+
+[tool.setuptools.packages.find]
+include = ["controllers*", "utils*", "tools*", "scripts*"]

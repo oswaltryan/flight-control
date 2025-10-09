@@ -49,37 +49,49 @@ flight-control/
 
 ## Installation
 
-You can install the necessary packages using either an online or offline method.
+This project requires Python 3.8 or higher. It is highly recommended to use a virtual environment to manage dependencies.
 
-### Online Installation (Recommended)
+**Note on OS Compatibility:** This project has a dependency on `pywin32`, which is specific to Windows operating systems. While the core Python components are generally OS-agnostic, full functionality, especially related to certain hardware interactions, may be limited or unavailable on non-Windows platforms.
 
-This is the standard method for a machine with an internet connection.
+### Steps
 
-1.  **Clone the repository:**
+1.  **Install `uv`:**
+    If you don't have `uv` installed, you can install it using `pipx` (recommended) or `pip`:
     ```bash
-    git clone <your-repo-url>
+    # Linux/Windows
+    pip install uv
+    # macOS
+    brew install uv
+    ```
+
+2.  **Clone the repository:**
+    ```bash
+    git clone <your-repo-directory> flight-control
     cd flight-control
     ```
 
-2.  **Install all dependencies:**
-    This command installs both the public packages from `requirements.txt` and your local `usb-tool` package.
+3.  **Create and activate a virtual environment using `uv`:**
     ```bash
-    pip install -r ./install/requirements.txt
-    pip install .
+    uv venv venv
+    
+    # On Windows:
+    .venv\Scripts\activate
+    # On macOS/Linux:
+    source .venv/bin/activate
     ```
 
-### Offline Installation
-
-1.  **Extract the Bundle:**
-    Unzip the project files on the offline machine.
-
-2.  **Install from Local Files:**
-    Navigate your terminal into the `flight-control` directory and run the install command. The `--no-index` and `--find-links` flags are critical here.
+4.  **Install project dependencies using `uv`:**
+    This command will install all required Python packages listed in `pyproject.toml`, including local packages.
     ```bash
-    pip install -r requirements.txt --no-index --find-links=./install/offline_packages
+    uv pip sync . --no-index --find-links=./install/offline_packages
     ```
 
-This will install all required packages using only the files you downloaded.
+5.  **Install Graphviz (System-level prerequisite for FSM diagram generation):**
+    Graphviz is required only if you plan to generate Finite State Machine diagrams. It needs to be installed at the system level.
+
+    *   **Windows:** Download and install from the [official Graphviz website](https://graphviz.org/download/) and ensure it's added to your system's PATH.
+    *   **macOS:** `brew install graphviz`
+    *   **Linux (Ubuntu/Debian):** `sudo apt-get install graphviz`
 
 ---
 
@@ -121,3 +133,4 @@ To ensure the toolkit is functioning correctly, you can run the suite of unit te
 ```bash
 # From the project root directory
 pytest
+```
