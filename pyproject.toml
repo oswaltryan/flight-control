@@ -28,14 +28,15 @@ dependencies = [
     "transitions==0.9.2",
     "libusb==1.0.27.post4",
     "pywin32==309; sys_platform == 'win32'",
+    "usb-tool==0.3.0",
     "pkg_about",
+    "pyobjc==11.1",
 ]
 
 [project.optional-dependencies]
 diagrams = [
     "pygraphviz==1.13",
 ]
-macos = ["pyobjc"]
 
 [tool.setuptools.packages.find]
 include = ["controllers*", "utils*", "tools*", "scripts*"]

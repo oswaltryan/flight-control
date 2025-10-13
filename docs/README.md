@@ -85,6 +85,9 @@ This project requires Python 3.8 or higher. It is highly recommended to use a vi
     This command will install all required Python packages listed in `pyproject.toml`, including local packages.
     ```bash
     uv pip sync . --no-index --find-links=./install/offline_packages
+    ### macOS dependencies
+    uv pip install pyobjc
+    export DYLD_LIBRARY_PATH=/usr/local/lib
     ```
 
 5.  **Install Graphviz (System-level prerequisite for FSM diagram generation):**

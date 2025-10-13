@@ -232,7 +232,9 @@ class UnifiedController:
         Returns:
             The scanned serial number string, or None if the scan failed or the scanner is unavailable.
         """
-        if not self._barcode_scanner:
+        if sys.platform.startswith("darwin"):
+            pass
+        elif not self._barcode_scanner:
             self.logger.error("Barcode scanner not available.")
             pass
         else:
