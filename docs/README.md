@@ -87,7 +87,15 @@ This project requires Python 3.8 or higher. It is highly recommended to use a vi
     uv pip sync . --no-index --find-links=./install/offline_packages
     ### macOS dependencies
     uv pip install pyobjc
+    ```
+4.5. **Configure macOS:**
+    ```bash
     export DYLD_LIBRARY_PATH=/usr/local/lib
+    cd install/usb_tool
+    git submodule init
+    uv pip install .
+    sudo visudo
+    # paste 'your_username ALL=(ALL) NOPASSWD: /Users/itadmin/Desktop/flight-control/utils/fio/fio-macos'
     ```
 
 5.  **Install Graphviz (System-level prerequisite for FSM diagram generation):**
@@ -138,3 +146,9 @@ To ensure the toolkit is functioning correctly, you can run the suite of unit te
 # From the project root directory
 pytest
 ```
+
+## Platform Specific Notes
+### macOS
+- Barcode scanner does not work. That is an issue of implementation as macOS is not playing nice with the pynput
+- Camera properties are not adjustable using 'AVFOUNDATION' backend. No adjustment at all.
+- Offline installation does not work due to a `pyobjc` dependency, unclear which package exactly.

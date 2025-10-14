@@ -59,15 +59,15 @@ PRIMARY_LED_CONFIGURATIONS = {
     "red":   {
         "name": "Red LED",
         "roi": (187, 165, 40, 40),
-        "hsv_lower": (165,150,150),
-        "hsv_upper": (15,255,255),
+        "hsv_lower": (0,0,150),
+        "hsv_upper": (165,255,255),
         "min_match_percentage": 0.15,
         "display_color_bgr": (0,0,255)
     },
     "green": {
         "name": "Green LED",
         "roi": (302, 165, 40, 40),
-        "hsv_lower": (40, 10, 100),
+        "hsv_lower": (0, 0, 100),
         "hsv_upper": (85, 255, 255),
         "min_match_percentage": 0.25,
         "display_color_bgr": (0,255,0)

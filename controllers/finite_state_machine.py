@@ -1123,6 +1123,9 @@ class ApricornDeviceFSM:
                 elif sys.platform.startswith('linux'):
                     self.dut.disk_path = device_info.blockDevice
                     self.dut.drive_letter = ''
+                elif sys.platform.startswith('darwin'):
+                    self.dut.disk_path = device_info.blockDevice
+                    self.dut.drive_letter = ''
                 # You could update other properties here as well if they can change
                 self.logger.info(f"Successfully confirmed enumeration for S/N: {self.dut.serial_number}")
 
@@ -1151,6 +1154,9 @@ class ApricornDeviceFSM:
                     self.dut.disk_path = device_info.physicalDriveNum
                     self.dut.drive_letter = getattr(device_info, 'driveLetter', '') or ''
                 elif sys.platform.startswith('linux'):
+                    self.dut.disk_path = device_info.blockDevice
+                    self.dut.drive_letter = ''
+                elif sys.platform.startswith('darwin'):
                     self.dut.disk_path = device_info.blockDevice
                     self.dut.drive_letter = ''
                 # You could update other properties here as well if they can change
@@ -1184,6 +1190,9 @@ class ApricornDeviceFSM:
                     self.dut.disk_path = device_info.physicalDriveNum
                     self.dut.drive_letter = getattr(device_info, 'driveLetter', '') or ''
                 elif sys.platform.startswith('linux'):
+                    self.dut.disk_path = device_info.blockDevice
+                    self.dut.drive_letter = ''
+                elif sys.platform.startswith('darwin'):
                     self.dut.disk_path = device_info.blockDevice
                     self.dut.drive_letter = ''
                 # You could update other properties here as well if they can change

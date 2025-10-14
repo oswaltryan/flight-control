@@ -23,6 +23,9 @@ if PROJECT_ROOT not in sys.path:
 
 module_logger = logging.getLogger(__name__)
 
+# Default directory for camera replay videos.
+DEFAULT_REPLAY_OUTPUT_DIR = os.path.join(PROJECT_ROOT, "logs", "camera_replays")
+
 # Default size for the temporary FIO file used during Windows fallback testing.
 DEFAULT_FIO_FALLBACK_FILE_SIZE = os.environ.get('FIO_FALLBACK_FILE_SIZE') or '512M'
 
@@ -167,11 +170,15 @@ class UnifiedController:
                 logger_instance=self.logger.getChild("Camera"),
                 duration_tolerance_sec=led_duration_tolerance_sec or CAMERA_DEFAULT_TOLERANCE,
                 replay_post_failure_duration_sec=replay_post_failure_duration_sec or CAMERA_DEFAULT_REPLAY_DURATION,
-                replay_output_dir=replay_output_dir,
+                replay_output_dir=replay_output_dir or DEFAULT_REPLAY_OUTPUT_DIR,
                 enable_instant_replay=enable_instant_replay,
                 keypad_layout=self._keypad_layout,
                 camera_hw_settings=camera_settings_to_apply
             )
+            # Ensure the replay output directory exists
+            if self._camera_checker.replay_output_dir:
+                os.makedirs(self._camera_checker.replay_output_dir, exist_ok=True)
+
             self._camera_checker._camera_settings_to_apply = camera_settings_to_apply
             
             if self._camera_checker.is_camera_initialized:
@@ -643,7 +650,19 @@ class UnifiedController:
             or None if parsing fails.
         """
         try:
-            data = json.loads(json_output)
+            # FIO sometimes prints non-JSON warnings/notes before the actual JSON output.
+            # Find the start and end of the JSON object.
+            json_start = json_output.find('{')
+            json_end = json_output.rfind('}')
+
+            if json_start == -1 or json_end == -1:
+                self.logger.error("Could not find valid JSON start/end in FIO output.")
+                return None
+
+            # Extract only the JSON part
+            clean_json_output = json_output[json_start : json_end + 1]
+            
+            data = json.loads(clean_json_output)
             results = {}
             # FIO output contains a list of jobs, we are interested in the first one.
             if 'jobs' in data and data['jobs']:
@@ -1262,10 +1281,13 @@ class UnifiedController:
                     'Targeting raw Windows device: %s',
                     fio_target_device,
                 )
-        else:
-            fio_target_device = disk_path
+        else: # This covers Linux and macOS
+            if sys.platform.startswith("darwin"):
+                fio_target_device = f"/dev/{disk_path}"
+            else:
+                fio_target_device = disk_path
             self.logger.debug(
-                'Targeting raw Linux device: %s',
+                'Targeting raw Linux/macOS device: %s',
                 fio_target_device,
             )
 
@@ -1279,6 +1301,10 @@ class UnifiedController:
                     attempt += 1
 
                     base_command = [fio_path]
+
+                    # Add sudo for macOS
+                    if sys.platform == 'darwin':
+                        base_command.insert(0, 'sudo') # Prepend sudo
 
                     if sys.platform.startswith('linux'):
                         base_command.extend(['--ioengine=libaio'])
@@ -1301,9 +1327,7 @@ class UnifiedController:
                     requested_size = test_params.get('size')
                     if requested_size:
                         base_command.append(f'--size={requested_size}')
-                    elif using_temp_file and fallback_file_size:
-                        base_command.append(f'--size={fallback_file_size}')
-                    elif using_temp_file and fallback_file_size:
+                    elif using_temp_file: # Always add fallback size if using a temp file
                         base_command.append(f'--size={fallback_file_size}')
 
                     self.logger.debug(
