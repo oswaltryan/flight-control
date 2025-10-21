@@ -208,6 +208,8 @@ class LogitechLedChecker:
         self.replay_pre_fail_duration_sec = DEFAULT_REPLAY_PRE_FAIL_DURATION_SEC
         replay_buffer_maxlen = int(self.replay_pre_fail_duration_sec * self.replay_fps)
         self.replay_buffer = collections.deque(maxlen=replay_buffer_maxlen)
+        self.buffer_clear_wait_timeout_sec = 0.5  # Seconds to wait for a fresh frame after clearing
+        self._frame_thread_active = False
         
         self.replay_start_time = 0.0
         self.replay_method_name = ""
@@ -280,31 +282,35 @@ class LogitechLedChecker:
         MODIFIED: This thread now also snapshots the set of active keys
         and includes it in the replay buffer tuple.
         """
-        while not self.stopped:
-            if self.cap and self.cap.isOpened():
-                ret, frame = self.cap.read()
-                if not ret:
-                    continue
+        self._frame_thread_active = True
+        try:
+            while not self.stopped:
+                if self.cap and self.cap.isOpened():
+                    ret, frame = self.cap.read()
+                    if not ret:
+                        continue
 
-                detected_led_states = {}
-                for led_key, config_item in self.led_configs.items():
-                    detected_led_states[led_key] = 1 if self._check_roi_for_color(frame, config_item) else 0
+                    detected_led_states = {}
+                    for led_key, config_item in self.led_configs.items():
+                        detected_led_states[led_key] = 1 if self._check_roi_for_color(frame, config_item) else 0
 
-                # MODIFIED: Get a snapshot of active keys for this specific frame.
-                with self.active_keys_lock:
-                    active_keys_snapshot = self.active_keys_for_replay.copy()
+                    # MODIFIED: Get a snapshot of active keys for this specific frame.
+                    with self.active_keys_lock:
+                        active_keys_snapshot = self.active_keys_for_replay.copy()
 
-                with self.buffer_lock:
-                    current_capture_time = time.time()
-                    # MODIFIED: The tuple now includes the active keys snapshot.
-                    self.replay_buffer.append((current_capture_time, frame.copy(),
-                                               detected_led_states.copy(), active_keys_snapshot))
-                    if self.replay_frame_width is None or self.replay_frame_height is None:
-                        h, w = frame.shape[:2]
-                        self.replay_frame_width, self.replay_frame_height = w, h
-            else:
-                time.sleep(0.1)
-        self.logger.info("Frame-reading and processing thread has stopped.")
+                    with self.buffer_lock:
+                        current_capture_time = time.time()
+                        # MODIFIED: The tuple now includes the active keys snapshot.
+                        self.replay_buffer.append((current_capture_time, frame.copy(),
+                                                   detected_led_states.copy(), active_keys_snapshot))
+                        if self.replay_frame_width is None or self.replay_frame_height is None:
+                            h, w = frame.shape[:2]
+                            self.replay_frame_width, self.replay_frame_height = w, h
+                else:
+                    time.sleep(0.1)
+        finally:
+            self._frame_thread_active = False
+            self.logger.info("Frame-reading and processing thread has stopped.")
 
     def _initialize_camera(self, camera_hw_settings: Dict[int, Any]):
         """
@@ -373,12 +379,27 @@ class LogitechLedChecker:
         if not self.is_camera_initialized or not self.cap:
             self.logger.warning("Camera not initialized. Cannot clear buffer.")
             return
-        try:
-            for _ in range(CAMERA_BUFFER_SIZE_FRAMES):
-                ret, _ = self.cap.read() 
-                if not ret: self.logger.warning(f"Could not read frame while clearing buffer."); break
-        except Exception as e:
-            self.logger.error(f"Exception while clearing camera buffer: {e}", exc_info=True)
+        
+        cleared_timestamp = time.time()
+        with self.buffer_lock:
+            cleared_frames = len(self.replay_buffer)
+            self.replay_buffer.clear()
+
+        if cleared_frames:
+            self.logger.debug(f"Cleared {cleared_frames} frame(s) from replay buffer.")
+
+        wait_timeout = getattr(self, "buffer_clear_wait_timeout_sec", 0.0)
+        if wait_timeout <= 0 or not self._frame_thread_active:
+            return
+
+        wait_deadline = cleared_timestamp + wait_timeout
+        while time.time() < wait_deadline:
+            with self.buffer_lock:
+                if self.replay_buffer and self.replay_buffer[-1][0] >= cleared_timestamp:
+                    return
+            time.sleep(0.01)
+
+        self.logger.warning("Timed out waiting for fresh frame after clearing camera buffer.")
 
     def _check_roi_for_color(self, frame: np.ndarray, led_config_item: dict) -> bool:
         roi_rect = led_config_item["roi"]
@@ -1164,6 +1185,7 @@ class LogitechLedChecker:
         self.stopped = True
         if hasattr(self, 'thread') and self.thread.is_alive():
             self.thread.join(timeout=1.0) # Wait for thread to exit cleanly
+        self._frame_thread_active = False
         
         # MODIFIED: Check the renamed flag.
         if self.is_replay_armed:

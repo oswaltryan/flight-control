@@ -477,12 +477,13 @@ class TestLogitechLedCheckerMethods:
         Test the camera buffer clearing logic. The background thread is disabled
         by the 'checker' fixture.
         """
+        checker.replay_buffer.append((time.time() - 1, np.zeros((1, 1, 3), dtype=np.uint8), {"red": 1}, set()))
         # The checker fixture now returns a real instance, not a generator.
         checker._clear_camera_buffer()
         
-        # <<< FIX: Use the .call_count attribute for the assertion. >>>
-        # The .read() method should be called exactly CAMERA_BUFFER_SIZE_FRAMES times.
-        assert mock_cv2_videocapture.return_value.read.call_count == camera_module.CAMERA_BUFFER_SIZE_FRAMES
+        # The buffer should be emptied without invoking cv2.VideoCapture.read()
+        assert len(checker.replay_buffer) == 0
+        assert mock_cv2_videocapture.return_value.read.call_count == 0
 
     def test_clear_buffer_on_uninitialized_camera(self, checker, mock_logger):
         """Test that clearing buffer on uninitialized camera logs a warning."""

@@ -1,3 +1,4 @@
+import crashguard
 import sys
 import os
 import logging
