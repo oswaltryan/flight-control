@@ -42,7 +42,7 @@ try:
         from controllers.finite_state_machine import DeviceUnderTest
     from utils.led_states import LEDs
     from utils.config.keypad_layouts import KEYPAD_LAYOUTS
-    from usb_tool import find_apricorn_device
+    # from usb_tool import find_apricorn_device
     from transitions import EventData
 except ImportError as e_import:
     module_logger.critical(f"Critical Import Error in unified_controller.py: {e_import}. Check paths and dependencies.", exc_info=True)

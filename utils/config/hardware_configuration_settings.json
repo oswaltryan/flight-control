@@ -4,22 +4,22 @@
         "battery": true
     },
     "camera_properties": {
-        "focus": 0,
-        "brightness": 0,
-        "exposure": 2
+        "focus": 180,
+        "brightness": 154,
+        "exposure": 4
     },
     "roi_settings": {
         "red": {
-            "x": 220,
-            "y": 436
+            "x": 210,
+            "y": 423
         },
         "green": {
-            "x": 290,
-            "y": 435
+            "x": 281,
+            "y": 421
         },
         "blue": {
-            "x": 359,
-            "y": 435
+            "x": 354,
+            "y": 422
         }
     }
 }
