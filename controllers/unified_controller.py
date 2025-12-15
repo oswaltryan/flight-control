@@ -14,6 +14,7 @@ from pprint import pprint
 import subprocess
 import copy
 import textwrap
+import stat
 
 # --- Path Setup ---
 CONTROLLERS_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -28,6 +29,13 @@ DEFAULT_REPLAY_OUTPUT_DIR = os.path.join(PROJECT_ROOT, "logs", "camera_replays")
 
 # Default size for the temporary FIO file used during Windows fallback testing.
 DEFAULT_FIO_FALLBACK_FILE_SIZE = os.environ.get('FIO_FALLBACK_FILE_SIZE') or '512M'
+
+# Location of the packaged apricorn_usb_tool binaries.
+APRICORN_USB_TOOL_DIR = os.path.join(PROJECT_ROOT, "utils", "apricorn_usb_tool")
+try:
+    APRICORN_USB_TOOL_TIMEOUT_SEC = float(os.environ.get("APRICORN_USB_TOOL_TIMEOUT_SEC", "5"))
+except (TypeError, ValueError):
+    APRICORN_USB_TOOL_TIMEOUT_SEC = 5.0
 
 try:
     from controllers.phidget_board import PhidgetController, DEFAULT_SCRIPT_CHANNEL_MAP_CONFIG
@@ -47,6 +55,160 @@ try:
 except ImportError as e_import:
     module_logger.critical(f"Critical Import Error in unified_controller.py: {e_import}. Check paths and dependencies.", exc_info=True)
     raise
+
+
+class ApricornUSBDevice(dict):
+    """
+    Lightweight wrapper that exposes Apricorn USB device metadata with
+    attribute-style access while preserving the original dictionary payload.
+    """
+
+    def __getattr__(self, item: str) -> Any:
+        try:
+            return self[item]
+        except KeyError as exc:  # pragma: no cover - defensive safeguard
+            raise AttributeError(item) from exc
+
+    def __repr__(self) -> str:  # pragma: no cover - diagnostics only
+        return f"ApricornUSBDevice({dict.__repr__(self)})"
+
+    def as_dict(self) -> Dict[str, Any]:
+        """Return a shallow copy of the raw device dictionary."""
+        return dict(self)
+
+
+def _apricorn_usb_tool_path() -> Optional[str]:
+    """
+    Return the appropriate apricorn_usb_tool binary for the active platform.
+    """
+    if sys.platform == "win32":
+        candidate = os.path.join(APRICORN_USB_TOOL_DIR, "windows", "usb-windows.exe")
+    elif sys.platform == "darwin":
+        candidate = os.path.join(APRICORN_USB_TOOL_DIR, "macos", "usb-macos")
+    elif sys.platform.startswith("linux"):
+        candidate = os.path.join(APRICORN_USB_TOOL_DIR, "linux", "usb-linux")
+    else:
+        module_logger.error("Unsupported platform '%s' for Apricorn USB tool.", sys.platform)
+        return None
+
+    if not os.path.isfile(candidate):
+        module_logger.error("Apricorn USB tool binary not found at %s", candidate)
+        return None
+
+    if os.name != "nt":
+        try:
+            current_mode = os.stat(candidate).st_mode
+            if not (current_mode & stat.S_IXUSR):
+                os.chmod(candidate, current_mode | stat.S_IXUSR)
+        except OSError as exc:
+            module_logger.warning(
+                "Unable to adjust permissions on Apricorn USB tool %s: %s",
+                candidate,
+                exc,
+            )
+
+    return candidate
+
+
+def _parse_apricorn_usb_devices(raw_output: str) -> List[ApricornUSBDevice]:
+    """
+    Convert the apricorn_usb_tool JSON into a list of ApricornUSBDevice objects.
+    """
+    if not raw_output:
+        return []
+
+    try:
+        payload = json.loads(raw_output)
+    except json.JSONDecodeError as exc:
+        module_logger.error("Apricorn USB tool produced invalid JSON: %s", exc)
+        module_logger.debug("Raw output: %s", raw_output)
+        return []
+
+    if not isinstance(payload, dict):
+        module_logger.warning(
+            "Apricorn USB tool JSON root must be an object, received %s.",
+            type(payload).__name__,
+        )
+        return []
+
+    devices_field = payload.get("devices")
+    if not isinstance(devices_field, list):
+        module_logger.warning(
+            "Apricorn USB tool JSON missing 'devices' list (payload keys: %s).",
+            list(payload.keys()),
+        )
+        return []
+
+    parsed_devices: List[ApricornUSBDevice] = []
+    for entry in devices_field:
+        if isinstance(entry, dict):
+            # The tool nests devices under bus indexes (e.g., {"1": {...}}).
+            nested_dicts = [
+                (key, value)
+                for key, value in entry.items()
+                if isinstance(value, dict)
+            ]
+            if nested_dicts:
+                for idx_key, descriptor in nested_dicts:
+                    descriptor_copy = descriptor.copy()
+                    descriptor_copy.setdefault("deviceIndex", idx_key)
+                    parsed_devices.append(ApricornUSBDevice(descriptor_copy))
+                continue
+
+        if isinstance(entry, dict):
+            parsed_devices.append(ApricornUSBDevice(entry.copy()))
+
+    return parsed_devices
+
+
+def find_apricorn_device() -> List[ApricornUSBDevice]:
+    """
+    Execute the apricorn_usb_tool binary and return the list of discovered devices.
+    """
+    tool_path = _apricorn_usb_tool_path()
+    if not tool_path:
+        return []
+
+    command = [tool_path, "--json"]
+    module_logger.debug("Running Apricorn USB tool: %s", command)
+
+    try:
+        completed = subprocess.run(
+            command,
+            capture_output=True,
+            text=True,
+            check=True,
+            timeout=APRICORN_USB_TOOL_TIMEOUT_SEC,
+        )
+    except subprocess.TimeoutExpired:
+        module_logger.error(
+            "Apricorn USB tool timed out after %ss.",
+            APRICORN_USB_TOOL_TIMEOUT_SEC,
+        )
+        return []
+    except (FileNotFoundError, PermissionError) as exc:
+        module_logger.error("Unable to execute Apricorn USB tool at %s: %s", tool_path, exc)
+        return []
+    except subprocess.CalledProcessError as exc:
+        stderr_output = exc.stderr.strip() if exc.stderr else ""
+        stdout_output = exc.stdout.strip() if exc.stdout else ""
+        module_logger.error(
+            "Apricorn USB tool failed with exit code %s. stderr=%s",
+            exc.returncode,
+            stderr_output or "<empty>",
+        )
+        if stdout_output:
+            module_logger.debug("Apricorn USB tool stdout (failed): %s", stdout_output)
+        return []
+
+    stdout_text = completed.stdout.strip()
+    if not stdout_text and completed.stderr:
+        module_logger.debug(
+            "Apricorn USB tool returned empty stdout. stderr=%s",
+            completed.stderr.strip(),
+        )
+
+    return _parse_apricorn_usb_devices(stdout_text)
 
 # --- Custom Exception for 'pre-flight' Failures ---
 class LaunchError(Exception):
@@ -446,7 +608,7 @@ class UnifiedController:
 
         self.logger.info(f"Device with iSerial {first_device_serial} confirmed stable for at least {stable_min}s:")
         self.logger.info(f"  VID:PID  [Firm] @USB iSerial      iProduct")
-        self.logger.info(f"  {DUT_ping_2.idVendor}:{DUT_ping_2.idProduct} [{DUT_ping_2.bcdDevice}] @{DUT_ping_2.bcdUSB} {DUT_ping_2.iSerial} {DUT_ping_2.iProduct}")
+        self.logger.info(f" {DUT_ping_2.idVendor}:{DUT_ping_2.idProduct} [{DUT_ping_2.bcdDevice}] @{DUT_ping_2.bcdUSB} {DUT_ping_2.iSerial} {DUT_ping_2.iProduct}")
         return True, DUT_ping_2
     
     def confirm_drive_enum(self, serial_number: str, stable_min: float = 5, timeout: float = 15) -> Tuple[bool, Optional[Any]]:
@@ -509,7 +671,7 @@ class UnifiedController:
 
         self.logger.info(f"Drive with iSerial {first_device_serial} confirmed stable for at least {stable_min}s:")
         self.logger.info(f"  VID:PID  [Firm] @USB iSerial      iProduct")
-        self.logger.info(f"  {DUT_ping_2.idVendor}:{DUT_ping_2.idProduct} [{DUT_ping_2.bcdDevice}] @{DUT_ping_2.bcdUSB} {DUT_ping_2.iSerial} {DUT_ping_2.iProduct}")
+        self.logger.info(f" {DUT_ping_2.idVendor}:{DUT_ping_2.idProduct} [{DUT_ping_2.bcdDevice}] @{DUT_ping_2.bcdUSB} {DUT_ping_2.iSerial} {DUT_ping_2.iProduct}")
         return True, DUT_ping_2
     
     def _format_disk(
